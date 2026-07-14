@@ -1,0 +1,36 @@
+{
+  "models": [
+    {
+      "id": "qwen3.5-p1",
+      "name": "AI",
+      "type": "lmstudio",
+      "endpoint": "http://192.168.0.19:8888/v1/chat/completions",
+      "model": "qwen3.5"
+    },
+    {
+      "id": "qwen3.5-p2",
+      "name": "AI",
+      "type": "lmstudio",
+      "endpoint": "http://192.168.0.19:8888/v1/chat/completions",
+      "model": "qwen3.5"
+    },
+    {
+      "id": "ds4-pro-p1",
+      "name": "DS4 Pro",
+      "type": "deepseek",
+      "endpoint": "https://api.deepseek.com/v1/chat/completions",
+      "model": "deepseek-v4-pro",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "tools_choice": "auto"
+    },
+    {
+      "id": "ds4-pro-p2",
+      "name": "DS4 Pro",
+      "type": "deepseek",
+      "endpoint": "https://api.deepseek.com/v1/chat/completions",
+      "model": "deepseek-v4-pro",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "tools_choice": "auto"
+    }
+  ]
+}

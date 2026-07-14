@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+*.spec
+build/
+dist/
+
+# Settings
+.claude/
+
+# Sensitive config (contains API keys)
+models.json
+.env
