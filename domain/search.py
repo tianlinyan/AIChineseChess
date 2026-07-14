@@ -119,6 +119,9 @@ DEFAULT_MAX_DEPTH = 4
 DEFAULT_TIME_LIMIT = 5.0
 DEFAULT_QUIESCENCE_DEPTH = 4    # 静态搜索最大额外深度
 CHECK_EXTENSION_DEPTH = 1       # 将军时加深度（仅每分支一次，防止无限递归）
+NULL_MOVE_R = 3                 # 空着裁剪缩减因子（>2 以保证验证深度足够）
+NULL_MOVE_MIN_DEPTH = 4         # 空着裁剪最小深度（R+1）
+ZUGZWANG_PIECE_LIMIT = 8        # 少于该子力数不进行空着裁剪（防止逼着误判）
 
 
 class SearchEngine:
@@ -247,6 +250,30 @@ class SearchEngine:
         hit, tt_score, tt_move = self._tt.probe(hash_key, depth, alpha, beta)
         if hit:
             return tt_score
+
+        # ── 空着裁剪 (Null Move Pruning) ──
+        # 思路：如果跳过己方回合（让对手连走两步）仍无法被击败，
+        # 说明局面太好，可以直接剪枝。条件是未处于将军且非逼着局面。
+        in_check_before_nmp = game._is_in_check(player)
+        if (not in_check_before_nmp
+                and depth >= NULL_MOVE_MIN_DEPTH
+                and not extended):
+            # 逼着检测：子力太少时可能有逼着，跳过空着裁剪
+            piece_count = sum(1 for r in range(BOARD_HEIGHT)
+                            for c in range(BOARD_WIDTH)
+                            if game.board[r][c] != '.')
+            if piece_count >= ZUGZWANG_PIECE_LIMIT:
+                # 执行空着：切换走子方，浅搜索
+                saved_player = game.current_player
+                game.current_player = 3 - player
+                try:
+                    null_score = -self._alpha_beta(
+                        game, depth - 1 - NULL_MOVE_R,
+                        -beta, -beta + 1, 3 - player)
+                finally:
+                    game.current_player = saved_player  # 确保恢复
+                if null_score >= beta:
+                    return beta  # β 截断——局面太好，无需继续搜索
 
         # 叶子节点 → 进入静态搜索
         if depth <= 0:
@@ -410,8 +437,24 @@ class SearchEngine:
                     black_pieces += 1
                     black_material += PIECE_VALUE.get(p.upper(), 0)
 
+        total_pieces = red_pieces + black_pieces
+
+        # ── 残局库查询 ──
+        if total_pieces <= 10:
+            try:
+                from domain.egtb import probe
+                egtb_result = probe(board, game.current_player, total_pieces)
+                if egtb_result is not None:
+                    score, _dtm = egtb_result
+                    # EGTB 分数是当前走子方视角，需要转为红方视角
+                    if game.current_player == 2:
+                        score = -score
+                    return score
+            except ImportError:
+                pass  # 模块不可用时静默跳过
+
         # 判断是否残局
-        endgame = (red_pieces + black_pieces) <= 14
+        endgame = total_pieces <= 14
 
         # 将军检测（始终检查双方）
         red_in_check = game._is_in_check(1)
