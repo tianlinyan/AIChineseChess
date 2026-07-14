@@ -399,6 +399,13 @@ class ChineseChessGame:
                     h ^= piece_id << ((r * self.size_cols + c) % 16)
         return h
 
+    def position_hash(self) -> int:
+        """计算包含走子方的局面哈希（用于置换表去重）。
+
+        同一棋盘但不同走子方视为不同局面，用 current_player 搅动哈希。
+        """
+        return self.board_hash() ^ (self.current_player * 0x9E3779B9)
+
     def get_move_key(self) -> tuple:
         """返回当前走子序列的关键字（用于开局库精确匹配）。
 
