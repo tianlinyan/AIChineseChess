@@ -1,6 +1,6 @@
 """主窗口"""
 
-from PyQt6.QtCore import Qt, QSettings, QDateTime, QByteArray, pyqtSignal
+from PyQt6.QtCore import Qt, QSettings, QDateTime, QByteArray
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,

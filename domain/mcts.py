@@ -22,7 +22,7 @@ import random
 from typing import Optional, Callable, Dict, List, Tuple
 
 from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_PRIOR_STRENGTH
-from domain.evaluation import evaluate, PIECE_VALUE
+from domain.evaluation import evaluate
 from domain.game import ChineseChessGame
 
 # ══════════════════════════════════════════════════════════════════════════════

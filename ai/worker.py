@@ -11,7 +11,7 @@ from ai.parser import parse_coordinates_from_text
 from domain.constants import (
     AI_TIMEOUT_SECONDS, AI_OUTPUT_TRUNCATE_LENGTH,
     AI_OUTPUT_MIN_TRIM_POSITION, TOKEN_ESTIMATE_DIVISOR,
-    ESTIMATED_TOKENS_PER_IMAGE, BOARD_HEIGHT, BOARD_WIDTH,
+    BOARD_HEIGHT, BOARD_WIDTH,
     PIECE_SYMBOLS,
 )
 from domain.prompts import DEFAULT_TOOLS

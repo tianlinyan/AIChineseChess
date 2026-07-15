@@ -36,10 +36,6 @@ ENGINE_STARTUP_TIMEOUT = 10.0
 # 默认搜索时间（毫秒）
 DEFAULT_MOVE_TIME_MS = 5000
 
-# MultiPV 设置（用于 get_top_moves）
-DEFAULT_MULTIPV = 3
-
-
 def _find_pikafish() -> Optional[str]:
     """查找 Pikafish 二进制文件。
 
@@ -93,22 +89,18 @@ class PikafishEngine:
 
     def __init__(self,
                  binary_path: Optional[str] = None,
-                 move_time_ms: int = DEFAULT_MOVE_TIME_MS,
-                 multi_pv: int = DEFAULT_MULTIPV):
+                 move_time_ms: int = DEFAULT_MOVE_TIME_MS):
         """初始化 Pikafish 引擎。
 
         Args:
             binary_path: Pikafish 可执行文件路径。None 则自动查找。
             move_time_ms: 每步搜索时间（毫秒）。
-            multi_pv: MultiPV 行数（用于 get_top_moves）。
         """
         self.move_time_ms = move_time_ms
-        self.multi_pv = multi_pv
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._available = False
         self._error_msg: str = ''  # 启动失败时的诊断信息
-        self._last_multi_pv: List[Tuple[tuple, int, float]] = []
 
         if binary_path is None:
             binary_path = _find_pikafish()
@@ -227,21 +219,11 @@ class PikafishEngine:
         t.start()
 
     def get_top_moves(self, n: int = 3) -> List[Tuple[tuple, int, float]]:
-        """返回前 N 个最优走法（使用 MultiPV）。
+        """返回前 N 个最优走法（接口兼容 MCTSEngine）。
 
-        注意：此方法会执行一次搜索以获取 MultiPV 信息。
-        若最近一次 search() 已启用 MultiPV，则返回缓存结果。
-
-        Returns:
-            [(move, visits_approx, score), ...] 按评分降序排列
+        当前仅返回空列表——MultiPV 模式未启用。
+        Pikafish 作为单走法推荐引擎使用。
         """
-        if not self._available:
-            return []
-
-        # 返回最近一次 MultiPV 搜索的缓存结果
-        if self._last_multi_pv:
-            return self._last_multi_pv[:n]
-
         return []
 
     def close(self):
@@ -342,8 +324,6 @@ class PikafishEngine:
 
         # 总时间上限：实际搜索时间 + 30s 兜底
         deadline = time.time() + (time_ms / 1000.0) + 30.0
-        multi_pv_results: Dict[int, Tuple[str, int, float]] = {}
-
         while time.time() < deadline:
             # 进程已死 → 立即退出，不再阻塞 readline
             if self._proc.poll() is not None:
@@ -355,32 +335,10 @@ class PikafishEngine:
 
             line = line.strip()
 
-            # 解析 MultiPV 信息行
-            if 'multipv' in line and ' pv ' in line:
-                try:
-                    mpv = _parse_multipv_line(line)
-                    if mpv:
-                        pv_num, uci_move, cp_score = mpv
-                        multi_pv_results[pv_num] = (uci_move, cp_score)
-                except (ValueError, IndexError):
-                    pass
-
             if line.startswith('bestmove'):
                 parts = line.split()
                 if len(parts) >= 2:
                     best = parts[1]
-
-                    # 构建 MultiPV 结果列表
-                    if multi_pv_results:
-                        results = []
-                        for pv_num in sorted(multi_pv_results.keys()):
-                            uci_move, cp_score = multi_pv_results[pv_num]
-                            move_tuple = _uci_to_tuple(uci_move)
-                            if move_tuple:
-                                approx_visits = max(1, 100 + cp_score)
-                                normalized_score = cp_score / 100.0
-                                results.append((move_tuple, approx_visits, normalized_score))
-                        self._last_multi_pv = results
 
                     return best
 
@@ -462,31 +420,4 @@ def _uci_to_tuple(uci_move: str) -> Optional[tuple]:
             return (fr, fc, tr, tc)
     except (ValueError, IndexError):
         pass
-    return None
-
-
-def _parse_multipv_line(line: str) -> Optional[Tuple[int, str, int]]:
-    """解析 MultiPV 信息行。
-
-    格式示例:
-      info depth 20 multipv 1 score cp 35 pv b0c2 ...
-
-    Returns:
-        (multipv_number, first_move_uci, cp_score) 或 None
-    """
-    parts = line.split()
-    mpv_num = None
-    cp_score = None
-    pv_move = None
-
-    for i, p in enumerate(parts):
-        if p == 'multipv' and i + 1 < len(parts):
-            mpv_num = int(parts[i + 1])
-        elif p == 'cp' and i + 1 < len(parts):
-            cp_score = int(parts[i + 1])
-        elif p == 'pv' and i + 1 < len(parts):
-            pv_move = parts[i + 1]
-
-    if mpv_num is not None and pv_move is not None:
-        return (mpv_num, pv_move, cp_score if cp_score is not None else 0)
     return None

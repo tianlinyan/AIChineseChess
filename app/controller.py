@@ -7,7 +7,7 @@ from PyQt6.QtCore import QTimer, QDateTime, QObject, pyqtSignal
 from domain.constants import (
     AI_RETRY_LIMIT, AI_RETRY_DELAY_MS, AI_DELAY_MS,
     THINKING_TIMER_INTERVAL,
-    SEARCH_MAX_DEPTH, SEARCH_TIME_LIMIT,
+    SEARCH_MAX_DEPTH,
     OPENING_BOOK_ENABLED, OPENING_BOOK_MAX_MOVES,
     OPENING_DELAY_MS,
     MCTS_SIMULATIONS, MCTS_TIME_LIMIT,
@@ -21,7 +21,7 @@ from domain.game import ChineseChessGame
 from domain.mcts import MCTSEngine
 from domain.openings import get_opening_move, is_in_opening_book
 try:
-    from domain.pikafish import PikafishEngine
+    from domain.pikafish import PikafishEngine, _game_to_fen
 except ImportError:
     PikafishEngine = None  # pikafish 模块不可用
 from ai.manager import AIManager
@@ -725,7 +725,6 @@ class GameController:
                     piece = self.game.board[fr][fc]
                     if piece == '.':
                         # 走法非法：起始位置无棋子 → 诊断并回退 MCTS
-                        from domain.pikafish import _game_to_fen
                         fen = _game_to_fen(self.game, player)
                         self.log(
                             f"  ⚠️ Pikafish 返回非法走法 {chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1}"
