@@ -608,82 +608,26 @@ class GameController:
 
         # ── Hybrid 模式：验证 LLM 走法 ──
         llm_move = (from_row, from_col, to_row, to_col)
-        final_move = llm_move
 
         if self.ai_mode == 'hybrid':
-            verification_best = None
-            engine_name = 'MCTS'
-
-            # 优先使用 Pikafish 验证
+            # ── Pikafish 异步验证（不阻塞 UI）──
             if self._pikafish and self._pikafish.available:
-                try:
-                    verification_best = self._pikafish.search(
-                        self.game, current_player,
-                        time_ms=int(MCTS_TIME_LIMIT * 1000))
-                    engine_name = 'Pikafish (NNUE)'
-                    if verification_best:
-                        fr_v, fc_v, tr_v, tc_v = verification_best
-                        if self.game.board[fr_v][fc_v] == '.':
-                            self.log(
-                                f"  ⚠️ Pikafish验证走法非法（{chr(65+fc_v)}{fr_v+1}无棋子），回退MCTS",
-                                'WARNING')
-                            verification_best = None
-                        else:
-                            self.log(
-                                f"  🌳 Pikafish验证: LLM={'✔' if verification_best == llm_move else '✘'}",
-                                'INFO')
-                except Exception as e:
-                    self.log(f"  ⚠️ Pikafish 验证失败 ({e})，回退 MCTS", 'WARNING')
-                    verification_best = None
-
-            # 回退：MCTS 验证（带 LLM 先验）
-            if verification_best is None:
-                priors = {llm_move: 3.0}
-                mcts_engine = MCTSEngine(
-                    max_simulations=MCTS_SIMULATIONS,
-                    time_limit=MCTS_TIME_LIMIT,
+                # 捕获验证后所需的所有状态
+                captured_state = (
+                    llm_move, from_coord, to_coord, current_player,
+                    player_name, tokens, full_text
                 )
-                verification_best = mcts_engine.search(
-                    self.game, current_player, priors=priors)
-                self.stats['search_nodes'] = mcts_engine.simulations
+                self._pikafish.search_async(
+                    self.game, current_player,
+                    time_ms=int(MCTS_TIME_LIMIT * 1000),
+                    callback=lambda m: self._on_pikafish_verify_done(
+                        m, *captured_state))
+                return  # UI 保持响应；验证完成后 _on_pikafish_verify_done 继续
 
-                if verification_best:
-                    top = mcts_engine.get_top_moves(2)
-                    if top:
-                        best_move, best_visits, _ = top[0]
-                        llm_visits = 0
-                        for m, v, _ in top:
-                            if m == llm_move:
-                                llm_visits = v
-                                break
-                        self.log(
-                            f"  🌳 MCTS验证: LLM走法访问{llm_visits}次, "
-                            f"最佳走法访问{best_visits}次", 'INFO')
-
-                        # MCTS 覆盖需满足阈值条件；否则信任 LLM
-                        if not (verification_best != llm_move and
-                                best_visits > llm_visits * (1.0 + MCTS_LLM_OVERRIDE_THRESHOLD)):
-                            verification_best = llm_move  # LLM 走法通过验证
-                else:
-                    verification_best = llm_move  # MCTS 失败，信任 LLM
-
-            # ── 引擎覆盖逻辑 ──
-            if verification_best is not None and verification_best != llm_move:
-                final_move = verification_best
-                mfr, mfc, mtr, mtc = verification_best
-                mpn = PIECE_SYMBOLS.get(
-                    self.game.board[mfr][mfc], '?')
-                override_msg = (
-                    f"🔄 上回合你选择的走法被{engine_name}引擎覆盖："
-                    f"{mpn} {chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1} "
-                    f"取代了你的原选。"
-                    f"建议本回合更充分地利用引擎工具验证候选走法。"
-                )
-                self.log(
-                    f"  🔄 {engine_name}覆盖LLM: {mpn} "
-                    f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}",
-                    'WARNING')
-                self._last_mcts_override[current_player] = override_msg
+            # ── MCTS 同步验证（无 Pikafish 时）──
+            final_move = self._verify_with_mcts(llm_move, current_player)
+        else:
+            final_move = llm_move
 
         # ── 执行最终走法 ──
         from_row, from_col, to_row, to_col = final_move
@@ -980,6 +924,126 @@ class GameController:
         self.log(f"{'红方' if current_player == 1 else '黑方'} [{source}] "
                  f"{piece_name} {from_coord}→{to_coord}",
                  'red' if current_player == 1 else 'black')
+
+    # ── Pikafish 异步验证回调 ──
+
+    def _on_pikafish_verify_done(self, verification_best,
+                                  llm_move, from_coord, to_coord,
+                                  current_player, player_name,
+                                  tokens, full_text) -> None:
+        """Pikafish 异步验证完成回调。
+
+        由 search_async 的 daemon 线程调用 → QTimer 调度回主线程。
+        """
+        # 跨线程调度到主线程（Qt 事件循环）
+        QTimer.singleShot(0, lambda: self._on_verify_done_main(
+            verification_best, llm_move, from_coord, to_coord,
+            current_player, player_name, tokens, full_text))
+
+    def _on_verify_done_main(self, verification_best,
+                              llm_move, from_coord, to_coord,
+                              current_player, player_name,
+                              tokens, full_text) -> None:
+        """主线程：处理 Pikafish 验证结果并执行走法。"""
+        # 版本/状态检查（与 on_ai_finished 一致）
+        if not self.is_active or self.is_paused or self.game.game_over:
+            self._finish_ai_move()
+            return
+
+        final_move = llm_move
+        if verification_best:
+            fr_v, fc_v, tr_v, tc_v = verification_best
+            if self.game.board[fr_v][fc_v] == '.':
+                self.log(f"Pikafish验证走法非法，回退MCTS", 'WARNING')
+                final_move = self._verify_with_mcts(llm_move, current_player)
+            else:
+                self.log(f"Pikafish验证: LLM={'OK' if verification_best == llm_move else 'OVERRIDE'}", 'INFO')
+                if verification_best != llm_move:
+                    final_move = verification_best
+                    mfr, mfc, mtr, mtc = verification_best
+                    mpn = PIECE_SYMBOLS.get(self.game.board[mfr][mfc], '?')
+                    self.log(f"Pikafish覆盖LLM: {mpn} "
+                             f"{chr(65+mfc)}{mfr+1}->{chr(65+mtc)}{mtr+1}", 'WARNING')
+                    self._last_mcts_override[current_player] = (
+                        f"Pikafish引擎覆盖了你上回合的选择。建议充分利用引擎工具验证候选走法。"
+                    )
+        else:
+            # Pikafish 失败 → MCTS 回退
+            final_move = self._verify_with_mcts(llm_move, current_player)
+
+        # ── 执行走法（与 on_ai_finished 后段相同）──
+        from_row, from_col, to_row, to_col = final_move
+        result = self.game.move_piece(from_row, from_col, to_row, to_col)
+        if not result['success']:
+            reason = result.get('message', '未知原因')
+            self.last_move_error = f"{from_coord}->{to_coord}（原因：{reason}）"
+            self.log(f"{player_name} 走子非法 ({reason})，回退搜索", 'WARNING')
+            self._finish_ai_move()
+            self._fallback_to_search(current_player)
+            return
+
+        self._on_move_success(from_row, from_col, to_row, to_col,
+                              current_player, tokens=tokens, source='LLM')
+        self.main.board_widget.update()
+        self.main.update_game_status()
+        self.main.update_history_list()
+        self.main.update_stats_display()
+        self.main.update_player_status()
+        self._finish_ai_move()
+
+        if result.get('game_over'):
+            self.handle_game_over(result)
+            return
+
+        self.main.start_thinking_timer(self.game.current_player)
+        next_player = self.game.current_player
+        next_model = self.model1 if next_player == 1 else self.model2
+        if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
+            QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
+                self.make_ai_move(expected_version=v))
+
+    def _verify_with_mcts(self, llm_move: tuple,
+                          current_player: int) -> tuple:
+        """MCTS 同步验证（无 Pikafish 时的回退）。返回 final_move。"""
+        priors = {llm_move: 3.0}
+        mcts_engine = MCTSEngine(
+            max_simulations=MCTS_SIMULATIONS,
+            time_limit=MCTS_TIME_LIMIT,
+        )
+        verification_best = mcts_engine.search(
+            self.game, current_player, priors=priors)
+        self.stats['search_nodes'] = mcts_engine.simulations
+
+        if verification_best:
+            top = mcts_engine.get_top_moves(2)
+            if top:
+                best_move, best_visits, _ = top[0]
+                llm_visits = 0
+                for m, v, _ in top:
+                    if m == llm_move:
+                        llm_visits = v
+                        break
+                self.log(
+                    f"  MCTS验证: LLM走法访问{llm_visits}次, "
+                    f"最佳走法访问{best_visits}次", 'INFO')
+                if not (verification_best != llm_move and
+                        best_visits > llm_visits * (1.0 + MCTS_LLM_OVERRIDE_THRESHOLD)):
+                    verification_best = llm_move
+            else:
+                verification_best = llm_move
+
+            if verification_best != llm_move:
+                mfr, mfc, mtr, mtc = verification_best
+                mpn = PIECE_SYMBOLS.get(self.game.board[mfr][mfc], '?')
+                self.log(f"  MCTS覆盖LLM: {mpn} "
+                         f"{chr(65+mfc)}{mfr+1}->{chr(65+mtc)}{mtr+1}", 'WARNING')
+                self._last_mcts_override[current_player] = (
+                    f"MCTS引擎覆盖了你上回合的选择。建议充分利用引擎工具验证候选走法。"
+                )
+        else:
+            verification_best = llm_move
+
+        return verification_best
 
     def _finish_ai_move(self) -> None:
         self.ai_manager.set_busy(False)

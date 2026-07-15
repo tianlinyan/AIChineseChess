@@ -177,6 +177,55 @@ class PikafishEngine:
                 self._kill_proc()
             return None
 
+    def search_async(self,
+                     game,
+                     player: int,
+                     time_ms: int,
+                     callback) -> None:
+        """异步搜索 — 在后台线程执行，不阻塞调用线程（UI）。
+
+        在调用线程上快照 FEN + 合法走法（避免竞态），
+        UCI 通信在 daemon 线程中执行，完成时回调 callback(move)。
+
+        callback 在**工作线程**中被调用，调用方负责用
+        QTimer.singleShot / pyqtSignal 将结果调度回主线程。
+
+        Args:
+            game: ChineseChessGame 实例（仅用于快照，不在工作线程中访问）
+            player: 当前走子方
+            time_ms: 搜索时间（毫秒）
+            callback: callable(move_or_None)，在工作线程中调用
+        """
+        if not self._available:
+            callback(None)
+            return
+
+        # 在调用线程上快照状态（避免工作线程访问共享 game 对象）
+        try:
+            fen = _game_to_fen(game, player)
+            legal_moves = set(game.get_all_legal_moves(player))
+        except Exception:
+            callback(None)
+            return
+
+        def _run():
+            try:
+                with self._lock:
+                    self._send(f'position fen {fen}')
+                    self._send(f'go movetime {time_ms}')
+                    uci = self._read_bestmove(time_ms)
+                    if uci:
+                        move = _uci_to_tuple(uci)
+                        if move and move in legal_moves:
+                            callback(move)
+                            return
+            except Exception:
+                pass
+            callback(None)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
     def get_top_moves(self, n: int = 3) -> List[Tuple[tuple, int, float]]:
         """返回前 N 个最优走法（使用 MultiPV）。
 
