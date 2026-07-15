@@ -2,7 +2,7 @@ import random
 import threading
 from typing import Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import QTimer, QDateTime
+from PyQt6.QtCore import QTimer, QDateTime, QObject, pyqtSignal
 
 from domain.constants import (
     AI_RETRY_LIMIT, AI_RETRY_DELAY_MS, AI_DELAY_MS,
@@ -29,6 +29,11 @@ from ai.worker import AIWorker
 
 if TYPE_CHECKING:
     from app.protocols import MainWindowProtocol
+
+
+class _PikafishRelay(QObject):
+    """跨线程信号中继：daemon 线程 emit → Qt 自动排队到主线程。"""
+    done = pyqtSignal(tuple)  # (verification_best, llm_move, from_coord, ...)
 
 
 class GameController:
@@ -78,6 +83,11 @@ class GameController:
         # ── Pikafish 引擎（延迟初始化——需等 main 就绪后才能写日志） ──
         self._pikafish: Optional['PikafishEngine'] = None
         self._pikafish_initialized: bool = False
+
+        # 跨线程信号中继：Pikafish 异步回调 → 主线程
+        self._pikafish_relay = _PikafishRelay()
+        self._pikafish_relay.done.connect(self._on_pikafish_relay_done)
+        self._pending_verify_args: tuple = ()
 
     def _init_pikafish(self) -> None:
         """尝试初始化 Pikafish 外部引擎。
@@ -931,20 +941,18 @@ class GameController:
                                   llm_move, from_coord, to_coord,
                                   current_player, player_name,
                                   tokens, full_text) -> None:
-        """Pikafish 异步验证完成回调。
+        """Pikafish 异步验证完成回调（daemon 线程）。
 
-        由 search_async 的 daemon 线程调用 → QTimer 调度回主线程。
+        通过 pyqtSignal 中继到主线程（Qt 自动排队）。
         """
-        # 跨线程调度到主线程（Qt 事件循环）
-        QTimer.singleShot(0, lambda: self._on_verify_done_main(
+        self._pikafish_relay.done.emit((
             verification_best, llm_move, from_coord, to_coord,
             current_player, player_name, tokens, full_text))
 
-    def _on_verify_done_main(self, verification_best,
-                              llm_move, from_coord, to_coord,
-                              current_player, player_name,
-                              tokens, full_text) -> None:
+    def _on_pikafish_relay_done(self, args: tuple) -> None:
         """主线程：处理 Pikafish 验证结果并执行走法。"""
+        (verification_best, llm_move, from_coord, to_coord,
+         current_player, player_name, tokens, full_text) = args
         # 版本/状态检查（与 on_ai_finished 一致）
         if not self.is_active or self.is_paused or self.game.game_over:
             self._finish_ai_move()
