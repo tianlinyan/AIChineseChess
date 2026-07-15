@@ -33,7 +33,8 @@ if TYPE_CHECKING:
 
 class _PikafishRelay(QObject):
     """跨线程信号中继：daemon 线程 emit → Qt 自动排队到主线程。"""
-    done = pyqtSignal(tuple)  # (verification_best, llm_move, from_coord, ...)
+    done = pyqtSignal(tuple)       # 验证结果
+    search_done = pyqtSignal(tuple)  # 搜索/回退结果
 
 
 class GameController:
@@ -87,6 +88,7 @@ class GameController:
         # 跨线程信号中继：Pikafish 异步回调 → 主线程
         self._pikafish_relay = _PikafishRelay()
         self._pikafish_relay.done.connect(self._on_pikafish_relay_done)
+        self._pikafish_relay.search_done.connect(self._on_pikafish_search_done)
         self._pending_verify_args: tuple = ()
 
     def _init_pikafish(self) -> None:
@@ -332,15 +334,16 @@ class GameController:
                                 self.make_ai_move(expected_version=v))
                         return
 
-        # ── 2. 纯搜索模式（MCTS） ──
+        # ── 2. 纯搜索模式（Pikafish/MCTS 异步，不阻塞UI）──
         if self.ai_mode == 'search_only':
-            move = self._mcts_search(current_player)  # MCTS 统一先验
-            if move:
+            def _on_search(move, p):
+                if not move:
+                    self._random_move(p)
+                    return
                 fr, fc, tr, tc = move
                 result = self.game.move_piece(fr, fc, tr, tc)
                 if result['success']:
-                    self._on_move_success(fr, fc, tr, tc, current_player,
-                                          source='搜索')
+                    self._on_move_success(fr, fc, tr, tc, p, source='搜索')
                     self.main.board_widget.update()
                     self.main.update_game_status()
                     self.main.update_history_list()
@@ -349,14 +352,15 @@ class GameController:
                     if result.get('game_over'):
                         self.handle_game_over(result)
                         return
-                    next_player = self.game.current_player
-                    next_model = self.model1 if next_player == 1 else self.model2
-                    if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
+                    np = self.game.current_player
+                    nm = self.model1 if np == 1 else self.model2
+                    if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
                         QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
                             self.make_ai_move(expected_version=v))
-                    return
-            # 搜索失败 → 随机走子
-            self._random_move(current_player)
+                else:
+                    self._random_move(p)
+
+            self._mcts_search(current_player, on_done=_on_search)
             return
 
         # ── 3. LLM 模式（llm_only / hybrid） ──
@@ -692,24 +696,29 @@ class GameController:
     # ── 搜索引擎集成 ──
 
     def _mcts_search(self, player: int,
-                     priors: dict = None) -> Optional[tuple]:
-        """搜索最佳走法。
+                     priors: dict = None,
+                     on_done = None) -> Optional[tuple]:
+        """搜索最佳走法。优先 Pikafish（若可用），回退 MCTS。
 
-        优先使用 Pikafish（若可用），回退到 MCTS。
-        两者提供相同的接口，调用方无感知。
+        on_done 回调提供时：Pikafish 异步执行(不阻塞UI)，结果通过信号回主线程。
+        on_done=None：同步返回结果(向后兼容)。
 
-        Args:
-            player: 当前走子方
-            priors: {move: prior} LLM提供的先验概率（Pikafish 忽略）
+        on_done 签名为 on_done(best_move_or_None, player)
         """
-        best_move = None
+        # ── 异步路径：Pikafish + 回调 ──
+        if on_done is not None and self._pikafish and self._pikafish.available:
+            time_ms = int(MCTS_TIME_LIMIT * 1000)
+            self._pikafish.search_async(
+                self.game, player, time_ms=time_ms,
+                callback=lambda m: self._pikafish_relay.search_done.emit((m, player, on_done)))
+            return None
 
-        # ── 优先：Pikafish 外部引擎 ──
+        # ── 同步路径：Pikafish → MCTS 回退 ──
+        best_move = None
         if self._pikafish and self._pikafish.available:
             try:
                 time_ms = int(MCTS_TIME_LIMIT * 1000)
-                best_move = self._pikafish.search(
-                    self.game, player, priors=priors, time_ms=time_ms)
+                best_move = self._pikafish.search(self.game, player, priors=priors, time_ms=time_ms)
                 # Pikafish 不暴露节点数，保留上次统计值（不设 0）
                 if best_move:
                     fr, fc, tr, tc = best_move
@@ -775,42 +784,37 @@ class GameController:
                 self.main.pause_btn.setEnabled(False)
             return
 
-        move = self._mcts_search(player)  # MCTS 回退
-        if move:
-            fr, fc, tr, tc = move
-            result = self.game.move_piece(fr, fc, tr, tc)
-            if result['success']:
-                self._on_move_success(fr, fc, tr, tc, player, source='搜索回退')
-                self._random_action_count = 0  # 重置计数
-
-                if self.main:
-                    self.main.board_widget.update()
-                    self.main.update_game_status()
-                    self.main.update_history_list()
-                    self.main.update_stats_display()
-                    self.main.update_player_status()
-
-                if result.get('game_over'):
-                    self.handle_game_over(result)
+        # Pikafish/MCTS 异步回退
+        def _on_fb(move, p):
+            if move:
+                fr, fc, tr, tc = move
+                result = self.game.move_piece(fr, fc, tr, tc)
+                if result['success']:
+                    self._on_move_success(fr, fc, tr, tc, p, source='搜索回退')
+                    self._random_action_count = 0
+                    if self.main:
+                        self.main.board_widget.update()
+                        self.main.update_game_status()
+                        self.main.update_history_list()
+                        self.main.update_stats_display()
+                        self.main.update_player_status()
+                    if result.get('game_over'):
+                        self.handle_game_over(result)
+                        return
+                    self.main.start_thinking_timer(self.game.current_player)
+                    np = self.game.current_player
+                    nm = self.model1 if np == 1 else self.model2
+                    if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
+                        QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
+                            self.make_ai_move(expected_version=v))
                     return
+                else:
+                    self.log(f"搜索回退走子失败: {result.get('message', '未知')}", 'ERROR')
+            self._finish_ai_move()
+            self._random_move(p)
 
-                self.main.start_thinking_timer(self.game.current_player)
-                next_player = self.game.current_player
-                next_model = self.model1 if next_player == 1 else self.model2
-                if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
-                    QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                        self.make_ai_move(expected_version=v))
-                return
-            else:
-                self.log(f"搜索回退走子失败: {result.get('message', '未知')}", 'ERROR')
-                self._finish_ai_move()
-                return
-
-        # 搜索也失败 → 尝试随机走子作为最后手段
-        # _fallback_to_search 已在入口处 +1
-        self.log("搜索回退也无法找到走法，尝试随机走子", 'ERROR')
-        self._finish_ai_move()
-        self._random_move(player)
+        self._mcts_search(player, on_done=_on_fb)
+        return
 
     def _random_move(self, current_player: int) -> None:
         """随机走子（最后的fallback）"""
@@ -1009,6 +1013,13 @@ class GameController:
         if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
             QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
                 self.make_ai_move(expected_version=v))
+
+    def _on_pikafish_search_done(self, args: tuple) -> None:
+        """主线程：处理 Pikafish 异步搜索/回退结果。"""
+        move, player, on_done = args
+        if not self.is_active or self.game.game_over:
+            return
+        on_done(move, player)
 
     def _verify_with_mcts(self, llm_move: tuple,
                           current_player: int) -> tuple:
