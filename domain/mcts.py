@@ -29,8 +29,8 @@ from domain.game import ChineseChessGame
 # 配置
 # ══════════════════════════════════════════════════════════════════════════════
 
-DEFAULT_SIMULATIONS = 800       # 默认模拟次数
-DEFAULT_TIME_LIMIT = 5.0        # 时间上限（秒）
+DEFAULT_SIMULATIONS = 2000      # 默认模拟次数
+DEFAULT_TIME_LIMIT = 15.0       # 时间上限（秒）
 DEFAULT_EXPLORATION = 1.4       # UCB1 探索参数
 VIRTUAL_LOSS = 3                # 虚拟损失（并行搜索用）
 MAX_SIMULATION_DEPTH = 20       # 模拟最大深度

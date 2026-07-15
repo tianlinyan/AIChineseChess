@@ -10,6 +10,7 @@ import json
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from typing import Optional, Tuple
 
 
@@ -92,7 +93,7 @@ def probe_cloud(board: list, current_player: int) -> Optional[dict]:
 
     # 构造 FEN 并查询
     fen = _board_to_fen(board, current_player)
-    url = CHESSDB_URL + '?' + urllib.parse.quote(fen)
+    url = CHESSDB_URL + '?fen=' + urllib.parse.quote(fen, safe='')
 
     try:
         req = urllib.request.Request(url)
@@ -127,7 +128,7 @@ def _dtm_to_score(dtm: int, win: int, current_player: int) -> float:
     """
     if win == 0:
         return 0.0
-    base = 100000 - dtm * 10
+    base = 99999 - dtm * 10  # 与 search.MATE_SCORE 一致
     if win == 1:    # 红胜
         return base if current_player == 1 else -base
     else:            # 黑胜

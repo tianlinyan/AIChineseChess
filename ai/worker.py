@@ -258,16 +258,22 @@ class AIWorker(QRunnable):
                 if captured != '.':
                     s += PIECE_VALUE.get(captured.upper(), 0) * 10 - PIECE_VALUE.get(piece.upper(), 0)
                 # 将军奖励：走子后对方被将军额外加分
-                if self.game._is_in_check(opponent):
-                    s += 50.0 if player == 1 else -50.0
+                # 注意：_is_in_check 内部使用 self.game.board，
+                # 因此需临时指向已应用候选走法的 board_copy
+                self.game.board = board
+                try:
+                    if self.game._is_in_check(opponent):
+                        s += 50.0 if player == 1 else -50.0
+                finally:
+                    self.game.board = original_board
                 SearchEngine._unmake_move(board, fr, fc, tr, tc, captured)
-                # 红方视角标准化
+                # 归一化：将评分转为"越高=对当前玩家越有利"
                 if player == 2:
                     s = -s
                 scored.append((fr, fc, tr, tc, s))
 
-            reverse = (player == 1)
-            scored.sort(key=lambda x: x[4], reverse=reverse)
+            # 归一化后高分=好棋 → 始终降序排列（最佳走法排最前）
+            scored.sort(key=lambda x: x[4], reverse=True)
             top_moves = scored[:top_n]
             best_score = engine.best_score
 

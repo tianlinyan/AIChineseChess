@@ -15,14 +15,14 @@ ESTIMATED_TOKENS_PER_IMAGE = 100
 LM_STUDIO_DEFAULT_PORT = 1234
 
 # ── 搜索引擎配置 ──
-SEARCH_MAX_DEPTH = 4             # Alpha-Beta 最大搜索深度 (1-6) [仅 search_only 模式使用]
-SEARCH_TIME_LIMIT = 8.0          # 搜索时间上限（秒）
+SEARCH_MAX_DEPTH = 5             # Alpha-Beta 最大搜索深度 (1-6) [仅 search_only 模式使用]
+SEARCH_TIME_LIMIT = 20.0         # 搜索时间上限（秒）
 SEARCH_QUIESCENCE_DEPTH = 4      # 静态搜索额外深度
 SEARCH_BLUNDER_CHECK_DEPTH = 2   # LLM 走法验证用浅搜索深度
 
 # ── MCTS 配置 ──
-MCTS_SIMULATIONS = 600           # 默认模拟次数（每次~5ms，600次≈3s）
-MCTS_TIME_LIMIT = 5.0            # MCTS 时间上限（秒）
+MCTS_SIMULATIONS = 2000          # 默认模拟次数（每次~5ms，2000次≈10s）
+MCTS_TIME_LIMIT = 15.0           # MCTS 时间上限（秒）
 MCTS_EXPLORATION = 1.4           # UCB1 探索参数
 MCTS_PRIOR_STRENGTH = 50         # LLM走法先验强度（虚拟访问次数乘数）
 MCTS_LLM_OVERRIDE_THRESHOLD = 0.15  # MCTS价值超过LLM走法此阈值时，用MCTS结果

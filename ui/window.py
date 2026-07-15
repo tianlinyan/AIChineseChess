@@ -45,6 +45,9 @@ class MainWindow(QMainWindow):
         self.load_models()
         self.game_controller.reset_game()
 
+        # 必须在 setup_ui() 之后调用——日志面板的 widget 在那时才创建
+        self.game_controller._init_pikafish()
+
         self.settings = QSettings('ChineseChessAI', 'ChineseChess')
 
     # ── UI 构建 ──
@@ -352,5 +355,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.game_controller.stop_thinking_timer()
+        self.game_controller.shutdown()
         self.ai_manager.shutdown()
         event.accept()

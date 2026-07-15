@@ -20,6 +20,10 @@ from domain.prompts import (
 from domain.game import ChineseChessGame
 from domain.mcts import MCTSEngine
 from domain.openings import get_opening_move, is_in_opening_book
+try:
+    from domain.pikafish import PikafishEngine
+except ImportError:
+    PikafishEngine = None  # pikafish 模块不可用
 from ai.manager import AIManager
 from ai.worker import AIWorker
 
@@ -70,6 +74,36 @@ class GameController:
 
         self._random_action_count: int = 0
         self._last_mcts_override: dict = {}  # {player: msg} MCTS 覆盖反馈（按玩家分）
+
+        # ── Pikafish 引擎（延迟初始化——需等 main 就绪后才能写日志） ──
+        self._pikafish: Optional['PikafishEngine'] = None
+        self._pikafish_initialized: bool = False
+
+    def _init_pikafish(self) -> None:
+        """尝试初始化 Pikafish 外部引擎。
+
+        必须在 self.main 赋值后调用（日志需要 main.log_manager）。
+        若引擎二进制不可用，静默跳过——后续自动回退到 MCTS。
+        """
+        if self._pikafish_initialized:
+            return
+        self._pikafish_initialized = True
+
+        if PikafishEngine is not None:
+            try:
+                self._pikafish = PikafishEngine(move_time_ms=int(MCTS_TIME_LIMIT * 1000))
+                if self._pikafish.available:
+                    self.log("Pikafish 引擎已就绪（NNUE 评估，大师级棋力）", 'INFO')
+                else:
+                    # 输出详细诊断信息帮助用户排查
+                    err = self._pikafish.error_msg
+                    if err:
+                        for line in err.split('\n'):
+                            self.log(f"[Pikafish] {line.strip()}", 'WARNING')
+                    self._pikafish = None
+            except Exception as e:
+                self.log(f"[Pikafish] 初始化异常: {e}", 'WARNING')
+                self._pikafish = None
 
     # ── 游戏控制 ──
 
@@ -136,6 +170,10 @@ class GameController:
     def reset_game(self) -> None:
         self.game_version += 1
         self.stop_thinking_timer()
+
+        # 取消运行中的 AI 任务，防止残留 Worker 阻塞新游戏
+        self.ai_manager.clear_queue()
+        self.ai_manager.set_busy(False)
 
         self.is_active = False
         self.is_paused = False
@@ -329,23 +367,66 @@ class GameController:
         legal_moves = self.game.get_all_legal_moves(current_player)
         legal_move_count = len(legal_moves)
 
+        # 零合法走法 = 将杀或困毙 → 直接判定游戏结束，跳过 LLM 调用
+        if legal_move_count == 0:
+            opponent = 2 if current_player == 1 else 1
+            self.game.game_over = True
+            self.game.winner = opponent
+            self.handle_game_over({
+                'game_over': True, 'winner': opponent,
+                'message': f"{'红方' if opponent == 1 else '黑方'}获胜（{'将杀' if self.game._is_in_check(current_player) else '困毙'}）"
+            })
+            return
+
         # 格式化合法走法列表
         legal_moves_str = format_legal_moves(legal_moves, self.game.board)
 
-        # ── Hybrid 模式：先跑快速 MCTS，结果注入提示词 ──
+        # ── Hybrid 模式：先跑快速搜索，结果注入提示词 ──
         mcts_suggestions = ''
         if self.ai_mode == 'hybrid':
             try:
-                quick_mcts = MCTSEngine(
-                    max_simulations=200,     # 快速扫描
-                    time_limit=2.0,          # 2 秒上限
-                )
-                quick_mcts.search(self.game, current_player)
-                top = quick_mcts.get_top_moves(3)
+                top = None
+                engine_label = 'MCTS'
+
+                # 优先使用 Pikafish 快速扫描
+                if self._pikafish and self._pikafish.available:
+                    try:
+                        quick_move = self._pikafish.search(
+                            self.game, current_player, time_ms=2000)
+                        if quick_move:
+                            # 构建单走法推荐（Pikafish 快速模式）
+                            mfr, mfc, mtr, mtc = quick_move
+                            mpn = PIECE_SYMBOLS.get(
+                                self.game.board[mfr][mfc], '?')
+                            cap = ''
+                            if self.game.board[mtr][mtc] != '.':
+                                cap = f" 吃{PIECE_SYMBOLS.get(self.game.board[mtr][mtc], '?')}"
+                            top = [(quick_move, 0, 0.0)]
+                            engine_label = 'Pikafish (NNUE)'
+                            self.log(
+                                f"  🌳 快速Pikafish完成: {mpn} "
+                                f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}",
+                                'INFO')
+                    except Exception:
+                        pass  # Pikafish 快速扫描失败，回退 MCTS
+
+                # 回退：MCTS 快速扫描
+                if top is None:
+                    quick_mcts = MCTSEngine(
+                        max_simulations=500,
+                        time_limit=4.0,
+                    )
+                    quick_mcts.search(self.game, current_player)
+                    top = quick_mcts.get_top_moves(3)
+                    if top:
+                        self.log(
+                            f"  🌳 快速MCTS完成 ({quick_mcts.simulations}次模拟)",
+                            'INFO')
+
                 if top:
                     lines = []
-                    lines.append("## 🌳 引擎快速分析（Top-3 MCTS 建议）")
-                    lines.append("以下走法经本地引擎快速搜索，评分从高到低排列。请结合你的战略判断做最终选择。")
+                    lines.append(f"## 🌳 引擎快速分析（{engine_label} 建议）")
+                    lines.append("以下走法经本地引擎快速搜索。请结合你的战略判断做最终选择。")
                     lines.append("")
                     for i, (move, visits, val) in enumerate(top, 1):
                         mfr, mfc, mtr, mtc = move
@@ -353,16 +434,21 @@ class GameController:
                         cap = ''
                         if self.game.board[mtr][mtc] != '.':
                             cap = f" 吃{PIECE_SYMBOLS.get(self.game.board[mtr][mtc], '?')}"
-                        lines.append(
-                            f"  {i}. [{visits}次/{val:+.3f}] {mpn} "
-                            f"{chr(65+mfc)}{mfr+1}→{chr(65+mtr)}{mtr+1}{cap}"
-                        )
+                        if engine_label.startswith('Pikafish'):
+                            lines.append(
+                                f"  ★ 引擎推荐: {mpn} "
+                                f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}"
+                            )
+                        else:
+                            lines.append(
+                                f"  {i}. [{visits}次/{val:+.3f}] {mpn} "
+                                f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}"
+                            )
                     lines.append("")
                     lines.append("**引擎首选通常战术最优，除非你有明确的战略理由应优先考虑引擎推荐。**")
                     mcts_suggestions = "\n".join(lines)
-                    self.log(f"  🌳 快速MCTS完成 ({quick_mcts.simulations}次模拟)", 'INFO')
             except Exception as e:
-                self.log(f"快速MCTS失败: {e}", 'WARNING')
+                self.log(f"快速搜索失败: {e}", 'WARNING')
 
         # 上一步走子描述
         last_move_str = ''
@@ -394,7 +480,7 @@ class GameController:
             retry_count=self.retry_count,
             vision_mode=use_vision,
             mcts_suggestions=mcts_suggestions,
-            mcts_override_feedback=self._last_mcts_override.pop(current_player, ''),
+            mcts_override_feedback=self._last_mcts_override.get(current_player, ''),
         )
 
         image = None
@@ -520,55 +606,84 @@ class GameController:
                     self._fallback_to_search(current_player)
                     return
 
-        # ── Hybrid 模式：MCTS 验证 LLM 走法 ──
+        # ── Hybrid 模式：验证 LLM 走法 ──
         llm_move = (from_row, from_col, to_row, to_col)
         final_move = llm_move
 
         if self.ai_mode == 'hybrid':
-            # 构建先验：LLM走法获得中等权重（允许MCTS有效验证，≈150虚拟访问）
-            priors = {llm_move: 3.0}
-            mcts_engine = MCTSEngine(
-                max_simulations=MCTS_SIMULATIONS,
-                time_limit=MCTS_TIME_LIMIT,
-            )
-            mcts_best = mcts_engine.search(self.game, current_player, priors=priors)
-            self.stats['search_nodes'] = mcts_engine.simulations
+            verification_best = None
+            engine_name = 'MCTS'
 
-            if mcts_best:
-                top = mcts_engine.get_top_moves(2)
-                if top:
-                    best_move, best_visits, best_val = top[0]
-                    llm_visits = 0
-                    for m, v, _ in top:
-                        if m == llm_move:
-                            llm_visits = v
-                            break
+            # 优先使用 Pikafish 验证
+            if self._pikafish and self._pikafish.available:
+                try:
+                    verification_best = self._pikafish.search(
+                        self.game, current_player,
+                        time_ms=int(MCTS_TIME_LIMIT * 1000))
+                    engine_name = 'Pikafish (NNUE)'
+                    if verification_best:
+                        fr_v, fc_v, tr_v, tc_v = verification_best
+                        if self.game.board[fr_v][fc_v] == '.':
+                            self.log(
+                                f"  ⚠️ Pikafish验证走法非法（{chr(65+fc_v)}{fr_v+1}无棋子），回退MCTS",
+                                'WARNING')
+                            verification_best = None
+                        else:
+                            self.log(
+                                f"  🌳 Pikafish验证: LLM={'✔' if verification_best == llm_move else '✘'}",
+                                'INFO')
+                except Exception as e:
+                    self.log(f"  ⚠️ Pikafish 验证失败 ({e})，回退 MCTS", 'WARNING')
+                    verification_best = None
 
-                    # MCTS验证结果
-                    self.log(
-                        f"  🌳 MCTS验证: LLM走法访问{llm_visits}次, "
-                        f"最佳走法访问{best_visits}次", 'INFO')
+            # 回退：MCTS 验证（带 LLM 先验）
+            if verification_best is None:
+                priors = {llm_move: 3.0}
+                mcts_engine = MCTSEngine(
+                    max_simulations=MCTS_SIMULATIONS,
+                    time_limit=MCTS_TIME_LIMIT,
+                )
+                verification_best = mcts_engine.search(
+                    self.game, current_player, priors=priors)
+                self.stats['search_nodes'] = mcts_engine.simulations
 
-                    # 如果MCTS最佳 ≠ LLM且LLM走法访问量显著低于最佳
-                    if (mcts_best != llm_move and
-                        best_visits > llm_visits * (1.0 + MCTS_LLM_OVERRIDE_THRESHOLD)):
-                        final_move = mcts_best
-                        mfr, mfc, mtr, mtc = mcts_best
-                        mpn = PIECE_SYMBOLS.get(
-                            self.game.board[mfr][mfc], '?')
-                        override_msg = (
-                            f"🔄 上回合你选择的走法被引擎覆盖："
-                            f"{mpn} {chr(65+mfc)}{mfr+1}→{chr(65+mtr)}{mtr+1} "
-                            f"取代了你的原选。"
-                            f"建议本回合更充分地利用 search_best_move 工具验证候选走法。"
-                        )
+                if verification_best:
+                    top = mcts_engine.get_top_moves(2)
+                    if top:
+                        best_move, best_visits, _ = top[0]
+                        llm_visits = 0
+                        for m, v, _ in top:
+                            if m == llm_move:
+                                llm_visits = v
+                                break
                         self.log(
-                            f"  🔄 MCTS覆盖LLM: {mpn} "
-                            f"{chr(65+mfc)}{mfr+1}→{chr(65+mtr)}{mtr+1} "
-                            f"(LLM={llm_visits}次 vs MCTS最佳={best_visits}次)",
-                            'WARNING')
-                        # 设置反馈，该玩家下回合注入提示词
-                        self._last_mcts_override[current_player] = override_msg
+                            f"  🌳 MCTS验证: LLM走法访问{llm_visits}次, "
+                            f"最佳走法访问{best_visits}次", 'INFO')
+
+                        # MCTS 覆盖需满足阈值条件；否则信任 LLM
+                        if not (verification_best != llm_move and
+                                best_visits > llm_visits * (1.0 + MCTS_LLM_OVERRIDE_THRESHOLD)):
+                            verification_best = llm_move  # LLM 走法通过验证
+                else:
+                    verification_best = llm_move  # MCTS 失败，信任 LLM
+
+            # ── 引擎覆盖逻辑 ──
+            if verification_best is not None and verification_best != llm_move:
+                final_move = verification_best
+                mfr, mfc, mtr, mtc = verification_best
+                mpn = PIECE_SYMBOLS.get(
+                    self.game.board[mfr][mfc], '?')
+                override_msg = (
+                    f"🔄 上回合你选择的走法被{engine_name}引擎覆盖："
+                    f"{mpn} {chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1} "
+                    f"取代了你的原选。"
+                    f"建议本回合更充分地利用引擎工具验证候选走法。"
+                )
+                self.log(
+                    f"  🔄 {engine_name}覆盖LLM: {mpn} "
+                    f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}",
+                    'WARNING')
+                self._last_mcts_override[current_player] = override_msg
 
         # ── 执行最终走法 ──
         from_row, from_col, to_row, to_col = final_move
@@ -624,12 +739,48 @@ class GameController:
 
     def _mcts_search(self, player: int,
                      priors: dict = None) -> Optional[tuple]:
-        """使用 MCTS 搜索（hybrid 模式的主要搜索引擎）。
+        """搜索最佳走法。
+
+        优先使用 Pikafish（若可用），回退到 MCTS。
+        两者提供相同的接口，调用方无感知。
 
         Args:
             player: 当前走子方
-            priors: {move: prior} LLM提供的先验概率（可选）
+            priors: {move: prior} LLM提供的先验概率（Pikafish 忽略）
         """
+        best_move = None
+
+        # ── 优先：Pikafish 外部引擎 ──
+        if self._pikafish and self._pikafish.available:
+            try:
+                time_ms = int(MCTS_TIME_LIMIT * 1000)
+                best_move = self._pikafish.search(
+                    self.game, player, priors=priors, time_ms=time_ms)
+                # Pikafish 不暴露节点数，保留上次统计值（不设 0）
+                if best_move:
+                    fr, fc, tr, tc = best_move
+                    piece = self.game.board[fr][fc]
+                    if piece == '.':
+                        # 走法非法：起始位置无棋子 → 诊断并回退 MCTS
+                        from domain.pikafish import _game_to_fen
+                        fen = _game_to_fen(self.game, player)
+                        self.log(
+                            f"  ⚠️ Pikafish 返回非法走法 {chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1}"
+                            f"（起始位置无棋子），回退 MCTS", 'WARNING')
+                        self.log(
+                            f"    诊断: FEN={fen[:60]}... 棋盘[{fr}][{fc}]='{piece}'",
+                            'INFO')
+                        best_move = None  # 触发 MCTS 回退
+                    else:
+                        pn = PIECE_SYMBOLS.get(piece, '?')
+                        self.log(f"  ✅ Pikafish选择: {pn} "
+                                 f"{chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1} "
+                                 f"({time_ms}ms)", 'INFO')
+                        return best_move
+            except Exception as e:
+                self.log(f"  ⚠️ Pikafish 搜索失败 ({e})，回退到 MCTS", 'WARNING')
+
+        # ── 回退：内置 MCTS 引擎 ──
         engine = MCTSEngine(
             max_simulations=MCTS_SIMULATIONS,
             time_limit=MCTS_TIME_LIMIT,
@@ -661,8 +812,8 @@ class GameController:
 
     def _fallback_to_search(self, player: int) -> None:
         """LLM 失败时回退到搜索引擎（替代随机走子）"""
-        self._random_action_count += 1
-        if self._random_action_count > 5:
+        # 计数统一由 _random_move 管理（阈值 >3），_fallback_to_search 不单独计数
+        if self._random_action_count > 3:
             self.log("连续回退过多 — 停止游戏", 'ERROR')
             self.is_active = False
             if self.main:
@@ -701,10 +852,11 @@ class GameController:
                 self._finish_ai_move()
                 return
 
-        # 搜索也失败 → 不调用 _random_move（避免重复计数）
+        # 搜索也失败 → 尝试随机走子作为最后手段
         # _fallback_to_search 已在入口处 +1
-        self.log("搜索回退也无法找到走法", 'ERROR')
+        self.log("搜索回退也无法找到走法，尝试随机走子", 'ERROR')
         self._finish_ai_move()
+        self._random_move(player)
 
     def _random_move(self, current_player: int) -> None:
         """随机走子（最后的fallback）"""
@@ -802,6 +954,8 @@ class GameController:
 
         # 更新统计
         self.last_move_error = ''
+        # 清除该玩家的引擎覆盖反馈（已通过 get() 展示过，避免残留）
+        self._last_mcts_override.pop(current_player, None)
         self.stats['move_count'] += 1
         self.stats['estimated_tokens'] += tokens
         if current_player == 1:
@@ -900,3 +1054,12 @@ class GameController:
         """委托给 LogManager，确保 HTML 正确渲染"""
         if self.main and hasattr(self.main, 'log_manager'):
             self.main.log_manager.log(text, msg_type)
+
+    def shutdown(self) -> None:
+        """清理资源 — 关闭 Pikafish 引擎进程等。"""
+        if self._pikafish:
+            try:
+                self._pikafish.close()
+            except Exception:
+                pass
+            self._pikafish = None

@@ -311,8 +311,8 @@ def evaluate(board: list,
             score -= w.endgame_king_active * black_king_pos[0]
 
     # ── 模式检测（高价值战术） ──
-    score += _detect_dangerous_knight(board, red_knights, black_king_pos)
-    score -= _detect_dangerous_knight(board, black_knights, red_king_pos)
+    score += _detect_dangerous_knight(red_knights, black_king_pos)
+    score -= _detect_dangerous_knight(black_knights, red_king_pos)
     score += _detect_battery(board, red_rooks, red_cannons, black_king_pos)
     score -= _detect_battery(board, black_rooks, black_cannons, red_king_pos)
 
@@ -455,7 +455,7 @@ def _river_control(board: list, is_red: bool) -> float:
     return score
 
 
-def _detect_dangerous_knight(board: list, knights: list,
+def _detect_dangerous_knight(knights: list,
                               enemy_king_pos: tuple = None) -> float:
     """检测卧槽马/挂角马威胁"""
     bonus = 0.0
