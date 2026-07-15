@@ -225,19 +225,18 @@ class AIWorker(QRunnable):
         top_n = min(max(args.get('top_n', 3), 1), 5)
 
         try:
-            # 主搜索 — 使用棋盘副本避免线程竞态
+            # 主搜索 — 用临时 Game 对象隔离，不修改 self.game.board
             board_copy = [row[:] for row in self.game.board]
             engine = SearchEngine(
                 max_depth=depth,
                 time_limit=min(15.0, 2.0 + depth * 3.0),
             )
-            # 临时替换 game.board 为副本，搜索完成后恢复
-            original_board = self.game.board
-            self.game.board = board_copy
-            try:
-                best_move = engine.search(self.game, self.current_player)
-            finally:
-                self.game.board = original_board
+            # 创建临时 Game，避免替换 self.game.board（防止 Pikafish 快照读到修改中棋盘）
+            from domain.game import ChineseChessGame
+            tmp_game = ChineseChessGame()
+            tmp_game.board = board_copy
+            tmp_game.current_player = self.current_player
+            best_move = engine.search(tmp_game, self.current_player)
 
             if not best_move:
                 return json.dumps({'error': '未找到合法走法'}, ensure_ascii=False)

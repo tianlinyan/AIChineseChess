@@ -101,6 +101,7 @@ class PikafishEngine:
         self._lock = threading.RLock()  # 可重入：_kill_proc 可能在持锁时被调用
         self._available = False
         self._error_msg: str = ''  # 启动失败时的诊断信息
+        self._pending_async: int = 0   # 进行中的异步搜索计数
 
         if binary_path is None:
             binary_path = _find_pikafish()
@@ -108,7 +109,6 @@ class PikafishEngine:
         if binary_path and os.path.isfile(binary_path):
             self._start_engine(binary_path)
             if self._available:
-                # 注册退出清理：即使应用崩溃也尽力杀子进程
                 atexit.register(self._kill_proc)
         elif binary_path:
             self._error_msg = f'Pikafish 路径不存在: {binary_path}'
@@ -192,6 +192,7 @@ class PikafishEngine:
             callback(None)
             return
 
+        self._pending_async += 1
         # 原子快照：深拷贝棋盘，从副本推导 FEN + 合法走法（避免 TOCTOU）
         try:
             board_copy = [row[:] for row in game.board]
@@ -202,11 +203,13 @@ class PikafishEngine:
             tmp_game.board = board_copy
             tmp_game.current_player = player
             legal_moves = set(tmp_game.get_all_legal_moves(player))
-        except Exception:
+        except Exception as e:
+            self._pending_async -= 1
             callback(None)
             return
 
         def _run():
+            move = None
             try:
                 with self._lock:
                     self._send(f'position fen {fen}')
@@ -214,15 +217,19 @@ class PikafishEngine:
                     uci = self._read_bestmove(time_ms)
                     if uci:
                         move = _uci_to_tuple(uci)
-                        if move and move in legal_moves:
-                            callback(move)
-                            return
+                        if not (move and move in legal_moves):
+                            move = None
             except (OSError, ValueError, BrokenPipeError):
                 self._available = False
                 self._kill_proc()
             except Exception:
                 pass
-            callback(None)
+            try:
+                callback(move)
+            except Exception:
+                pass
+            finally:
+                self._pending_async -= 1
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -380,7 +387,12 @@ class PikafishEngine:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _board_to_fen(board: list, current_player: int) -> str:
-    """从棋盘副本生成 FEN（无 game 依赖，线程安全）。"""
+    """从棋盘副本生成 FEN（无 game 依赖，线程安全）。
+
+    Pikafish 坐标系：row 0 = 红方底线（棋盘底部），row 9 = 黑方底线。
+    内部坐标系：row 0 = 黑方底线（棋盘顶部）。
+    因此 FEN 行序需反转，w/b 为标准 UCI 约定。
+    """
     rows = []
     for r in range(10):
         row_str = ""; empty = 0
@@ -392,25 +404,26 @@ def _board_to_fen(board: list, current_player: int) -> str:
                 row_str += p
         if empty > 0: row_str += str(empty)
         rows.append(row_str)
-    side = 'b' if current_player == 1 else 'w'
+    rows.reverse()  # Pikafish FEN row 0 = our row 9（红方底线）
+    side = 'w' if current_player == 1 else 'b'  # 标准UCI: w=红方
     return '/'.join(rows) + ' ' + side
 
 
 def _game_to_fen(game, current_player: int) -> str:
-    """从 game 对象生成 FEN（委托 _board_to_fen）。"""
+    """从 game 对象生成 FEN（委托 _board_to_fen，同步接口用）。"""
     return _board_to_fen(game.board, current_player)
 
 
 def _uci_to_tuple(uci_move: str) -> Optional[tuple]:
     """将 Pikafish UCI 走法字符串转为内部元组格式。
 
-    Pikafish 坐标系与内部一致：row 0 = 黑方底线。
-    UCI 格式: <from_col><from_row><to_col><to_row>
-    例如: 'g4g5'（黑卒 G5→G6）→ (4, 6, 5, 6)
-          'h7e7'（红炮二平五 H8→E8）→ (7, 7, 7, 4)
+    Pikafish UCI 坐标系与内部一致（经验证：d 显示行号 = UCI 行号 = 内部行号）。
+    无需反转。
 
-    col: a-i → 0-8（不变）
-    row: 0-9 → 0-9（不变）
+    UCI 格式: <from_col><from_row><to_col><to_row>
+    例如 Pikafish 'e0e1'（红帅E10→E9）→ 内部 (9, 4, 8, 4)
+    col: a-i → 0-8
+    row: 0-9 → 0-9
     """
     if len(uci_move) < 4:
         return None

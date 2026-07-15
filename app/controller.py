@@ -405,51 +405,26 @@ class GameController:
         # 格式化合法走法列表
         legal_moves_str = format_legal_moves(legal_moves, self.game.board)
 
-        # ── Hybrid 模式：先跑快速搜索，结果注入提示词 ──
+        # ── Hybrid 模式：MCTS 快速扫描 → 注入 LLM 提示词 ──
+        # Pikafish 异步快速扫描在后台并行运行（避免同步阻塞 RLock），
+        # 结果仅用于日志参考；LLM 提示词始终使用 MCTS（低延迟、零阻塞）。
         mcts_suggestions = ''
         if self.ai_mode == 'hybrid':
             try:
-                top = None
-                engine_label = 'MCTS'
-
-                # 优先使用 Pikafish 快速扫描
+                # Pikafish 异步快速扫描（仅日志参考，结果通过信号中继回主线程）
                 if self._pikafish and self._pikafish.available:
-                    try:
-                        quick_move = self._pikafish.search(
-                            self.game, current_player, time_ms=2000)
-                        if quick_move:
-                            # 构建单走法推荐（Pikafish 快速模式）
-                            mfr, mfc, mtr, mtc = quick_move
-                            mpn = PIECE_SYMBOLS.get(
-                                self.game.board[mfr][mfc], '?')
-                            cap = ''
-                            if self.game.board[mtr][mtc] != '.':
-                                cap = f" 吃{PIECE_SYMBOLS.get(self.game.board[mtr][mtc], '?')}"
-                            top = [(quick_move, 0, 0.0)]
-                            engine_label = 'Pikafish (NNUE)'
-                            self.log(
-                                f"  🌳 快速Pikafish完成: {mpn} "
-                                f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}",
-                                'INFO')
-                    except Exception:
-                        pass  # Pikafish 快速扫描失败，回退 MCTS
+                    self._pikafish.search_async(
+                        self.game, current_player, time_ms=int(MCTS_TIME_LIMIT * 1000),
+                        callback=lambda m: self._pikafish_relay.search_done.emit(
+                            (m, current_player, self._log_quick_pikafish, self.game_version)))
 
-                # 回退：MCTS 快速扫描
-                if top is None:
-                    quick_mcts = MCTSEngine(
-                        max_simulations=500,
-                        time_limit=4.0,
-                    )
-                    quick_mcts.search(self.game, current_player)
-                    top = quick_mcts.get_top_moves(3)
-                    if top:
-                        self.log(
-                            f"  🌳 快速MCTS完成 ({quick_mcts.simulations}次模拟)",
-                            'INFO')
-
+                # MCTS 快速扫描（始终可用，零阻塞）
+                quick_mcts = MCTSEngine(max_simulations=500, time_limit=4.0)
+                quick_mcts.search(self.game, current_player)
+                top = quick_mcts.get_top_moves(3)
                 if top:
-                    lines = []
-                    lines.append(f"## 🌳 引擎快速分析（{engine_label} 建议）")
+                    self.log(f"快速MCTS完成 ({quick_mcts.simulations}次模拟)", 'INFO')
+                    lines = ["## 引擎快速分析（MCTS 建议）"]
                     lines.append("以下走法经本地引擎快速搜索。请结合你的战略判断做最终选择。")
                     lines.append("")
                     for i, (move, visits, val) in enumerate(top, 1):
@@ -458,16 +433,8 @@ class GameController:
                         cap = ''
                         if self.game.board[mtr][mtc] != '.':
                             cap = f" 吃{PIECE_SYMBOLS.get(self.game.board[mtr][mtc], '?')}"
-                        if engine_label.startswith('Pikafish'):
-                            lines.append(
-                                f"  ★ 引擎推荐: {mpn} "
-                                f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}"
-                            )
-                        else:
-                            lines.append(
-                                f"  {i}. [{visits}次/{val:+.3f}] {mpn} "
-                                f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}"
-                            )
+                        lines.append(f"  {i}. [{visits}次/{val:+.3f}] {mpn} "
+                                     f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}")
                     lines.append("")
                     lines.append("**引擎首选通常战术最优，除非你有明确的战略理由应优先考虑引擎推荐。**")
                     mcts_suggestions = "\n".join(lines)
@@ -636,6 +603,7 @@ class GameController:
         if self.ai_mode == 'hybrid':
             # ── Pikafish 异步验证（不阻塞 UI）──
             if self._pikafish and self._pikafish.available:
+                self.log(f"[PF诊断] 启动异步验证 player={current_player}", 'INFO')
                 # 捕获验证后所需的所有状态
                 captured_state = (
                     llm_move, from_coord, to_coord, current_player,
@@ -963,6 +931,15 @@ class GameController:
                  f"{piece_name} {from_coord}→{to_coord}",
                  'red' if current_player == 1 else 'black')
 
+    def _log_quick_pikafish(self, move, player) -> None:
+        """异步 Pikafish 快速扫描完成回调（仅日志，不影响走子）。"""
+        if move:
+            mfr, mfc, mtr, mtc = move
+            mpn = PIECE_SYMBOLS.get(self.game.board[mfr][mfc], '?')
+            self.log(f"快速Pikafish完成: {mpn} {chr(65+mfc)}{mfr+1}->{chr(65+mtc)}{mtr+1}", 'INFO')
+        else:
+            self.log(f"快速Pikafish失败(player={player})，使用MCTS建议", 'INFO')
+
     # ── Pikafish 异步验证回调 ──
 
     def _on_pikafish_verify_done(self, verification_best,
@@ -981,16 +958,22 @@ class GameController:
 
     def _on_pikafish_relay_done(self, args: tuple) -> None:
         """主线程：处理 Pikafish 验证结果并执行走法。"""
-        (verification_best, llm_move, from_coord, to_coord,
-         current_player, player_name, tokens, full_text,
-         captured_version) = args
-        # 版本门控：用户重置后丢弃过时回调
+        try:
+            (verification_best, llm_move, from_coord, to_coord,
+             current_player, player_name, tokens, full_text,
+             captured_version) = args
+        except Exception as e:
+            self.log(f"[PF错误] 验证回调参数解包失败: {e} args_len={len(args)}", 'ERROR')
+            self._finish_ai_move()
+            return
+
         if captured_version != self.game_version:
             self._finish_ai_move()
             return
         if not self.is_active or self.is_paused or self.game.game_over:
             self._finish_ai_move()
             return
+
 
         try:
             final_move = llm_move
@@ -1051,14 +1034,22 @@ class GameController:
         """主线程：处理 Pikafish 异步搜索/回退结果。"""
         try:
             move, player, on_done, captured_version = args
+        except Exception as e:
+            self.log(f"[PF错误] 搜索回调参数解包失败: {e}", 'ERROR')
+            self._finish_ai_move()
+            return
+        try:
             if captured_version != self.game_version:
+                self.log(f"[PF诊断] 搜索回调版本不匹配({captured_version}!={self.game_version})，丢弃", 'INFO')
                 self._finish_ai_move()
                 return
             if not self.is_active or self.game.game_over:
+                self.log(f"[PF诊断] 搜索回调状态异常(active={self.is_active} over={self.game.game_over})，丢弃", 'INFO')
                 self._finish_ai_move()
                 return
             on_done(move, player)
-        except Exception:
+        except Exception as e:
+            self.log(f"[PF诊断] 搜索回调异常: {e}", 'ERROR')
             self._finish_ai_move()
 
     def _verify_with_mcts(self, llm_move: tuple,
