@@ -30,8 +30,9 @@ class ChineseChessGame:
         self.current_player = 1          # 1 红方（先手），2 黑方（后手）
         self.moves = []
         self.game_over = False
-        self.winner = None
+        self.winner = None     # None=进行中, 1=红胜, 2=黑胜, 0=和棋
         self.last_move = None
+        self._position_history: list = []  # 走子历史哈希，用于着法重复检测
 
     def reset(self):
         self.board = [row[:] for row in self.STANDARD_BOARD]
@@ -40,6 +41,7 @@ class ChineseChessGame:
         self.game_over = False
         self.winner = None
         self.last_move = None
+        self._position_history = []
 
     def is_red(self, piece):
         return piece.isupper()
@@ -84,7 +86,20 @@ class ChineseChessGame:
         self.last_move = (from_row, from_col, to_row, to_col, self.current_player)
         self.moves.append((from_row, from_col, to_row, to_col, self.current_player, captured, piece))
 
+        # 记录走子后的局面哈希（着法重复检测）
+        self._position_history.append(self.position_hash())
+
         opponent = 2 if self.current_player == 1 else 1
+
+        # ── 着法重复检测：同局面第3次出现 → 和棋 ──
+        if self._is_threefold_repetition():
+            self.game_over = True
+            self.winner = 0  # 0 = 和棋
+            return {
+                'success': True, 'game_over': True, 'winner': 0,
+                'message': '着法重复三次 — 和棋'
+            }
+
         if self._is_checkmated(opponent):
             self.game_over = True
             self.winner = self.current_player
@@ -405,6 +420,21 @@ class ChineseChessGame:
         同一棋盘但不同走子方视为不同局面，用 current_player 搅动哈希。
         """
         return self.board_hash() ^ (self.current_player * 0x9E3779B9)
+
+    def _is_threefold_repetition(self) -> bool:
+        """检测当前局面是否第 3 次出现（着法重复 → 和棋）。
+
+        中国象棋规则：同局面（相同棋盘 + 相同走子方）出现 3 次，
+        任一方可提和。此处自动判定。
+
+        Returns:
+            True 如果当前 position_hash 在历史中出现 ≥3 次（第 3 次出现）
+        """
+        if len(self._position_history) < 5:
+            return False  # 至少 5 步才可能形成 3 次重复
+        current = self.position_hash()
+        count = sum(1 for h in self._position_history if h == current)
+        return count >= 3
 
     def get_move_key(self) -> tuple:
         """返回当前走子序列的关键字（用于开局库精确匹配）。

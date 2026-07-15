@@ -381,6 +381,11 @@ class SearchEngine:
         """
         # 同步 game.current_player（与 _alpha_beta 一致）
         game.current_player = player
+
+        # 超时截断
+        if self._nodes_searched % 200 == 0 and self._is_time_up():
+            return self._fast_eval(game, player)
+
         stand_pat = self._fast_eval(game, player)
 
         if stand_pat >= beta:
@@ -407,7 +412,11 @@ class SearchEngine:
             reverse=True,
         )
 
-        for fr, fc, tr, tc in ordered_captures:
+        for i, (fr, fc, tr, tc) in enumerate(ordered_captures):
+            # 超时截断（每 50 次检查一次）
+            if i % 50 == 0 and self._is_time_up():
+                return alpha
+
             # Delta 剪枝：即使吃掉这个子也达不到 alpha，跳过
             captured_val = PIECE_VALUE.get(
                 game.board[tr][tc].upper(), 0)
@@ -460,8 +469,8 @@ class SearchEngine:
                 if egtb_result is not None:
                     # probe 返回的 score 已是 player 视角
                     return egtb_result[0]
-            except ImportError:
-                pass  # 模块不可用时静默跳过
+            except Exception:
+                pass  # EGTB 不可用/异常时静默跳过，不影响搜索
 
         # 判断是否残局
         endgame = total_pieces <= 14

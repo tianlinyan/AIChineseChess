@@ -98,7 +98,7 @@ class PikafishEngine:
         """
         self.move_time_ms = move_time_ms
         self._proc: Optional[subprocess.Popen] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # 可重入：_kill_proc 可能在持锁时被调用
         self._available = False
         self._error_msg: str = ''  # 启动失败时的诊断信息
 
@@ -192,10 +192,16 @@ class PikafishEngine:
             callback(None)
             return
 
-        # 在调用线程上快照状态（避免工作线程访问共享 game 对象）
+        # 原子快照：深拷贝棋盘，从副本推导 FEN + 合法走法（避免 TOCTOU）
         try:
-            fen = _game_to_fen(game, player)
-            legal_moves = set(game.get_all_legal_moves(player))
+            board_copy = [row[:] for row in game.board]
+            fen = _board_to_fen(board_copy, player)
+            # 用临时 Game 对象计算合法走法（隔离共享状态）
+            from domain.game import ChineseChessGame
+            tmp_game = ChineseChessGame()
+            tmp_game.board = board_copy
+            tmp_game.current_player = player
+            legal_moves = set(tmp_game.get_all_legal_moves(player))
         except Exception:
             callback(None)
             return
@@ -211,6 +217,9 @@ class PikafishEngine:
                         if move and move in legal_moves:
                             callback(move)
                             return
+            except (OSError, ValueError, BrokenPipeError):
+                self._available = False
+                self._kill_proc()
             except Exception:
                 pass
             callback(None)
@@ -228,26 +237,28 @@ class PikafishEngine:
 
     def close(self):
         """关闭引擎进程。"""
-        if self._proc:
-            try:
-                self._send('quit')
-                self._proc.wait(timeout=3.0)
-            except Exception:
-                self._proc.kill()
-            finally:
-                self._proc = None
-                self._available = False
+        with self._lock:
+            if self._proc:
+                try:
+                    self._send('quit')
+                    self._proc.wait(timeout=3.0)
+                except Exception:
+                    self._proc.kill()
+                finally:
+                    self._proc = None
+                    self._available = False
 
     def _kill_proc(self):
         """强制终止引擎进程（异常恢复用）。"""
-        if self._proc:
-            try:
-                self._proc.kill()
-                self._proc.wait(timeout=2.0)
-            except Exception:
-                pass
-            finally:
-                self._proc = None
+        with self._lock:
+            if self._proc:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+                finally:
+                    self._proc = None
 
     # ── UCI 协议通信 ──
 
@@ -290,9 +301,12 @@ class PikafishEngine:
                         )
                     return  # self._available stays False
 
+                # 进程已死 → 立即退出
+                if self._proc.poll() is not None:
+                    break
                 line = self._proc.stdout.readline()
                 if not line:
-                    time.sleep(0.05)  # 避免忙等待
+                    time.sleep(0.05)
                     continue
                 if 'uciok' in line:
                     self._available = True
@@ -365,37 +379,26 @@ class PikafishEngine:
 # 辅助函数
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _game_to_fen(game, current_player: int) -> str:
-    """将 10×9 棋盘转为中国象棋 FEN 字符串。
-
-    坐标系约定（经验证）：
-    - 内部 row 0 = 黑方底线（棋盘顶部）
-    - Pikafish FEN：row 0 = 黑方底线 — 与内部一致，**不反转**
-    - Pikafish UCI 坐标：与 FEN 一致，**不反转**
-    - w/b：Pikafish 方向相反 — w = 黑方走, b = 红方走
-
-    格式：rows/.../rows w/b
-    - 大写 = 红方，小写 = 黑方
-    """
+def _board_to_fen(board: list, current_player: int) -> str:
+    """从棋盘副本生成 FEN（无 game 依赖，线程安全）。"""
     rows = []
     for r in range(10):
-        row_str = ""
-        empty = 0
+        row_str = ""; empty = 0
         for c in range(9):
-            p = game.board[r][c]
-            if p == '.':
-                empty += 1
+            p = board[r][c]
+            if p == '.': empty += 1
             else:
-                if empty > 0:
-                    row_str += str(empty)
-                    empty = 0
+                if empty > 0: row_str += str(empty); empty = 0
                 row_str += p
-        if empty > 0:
-            row_str += str(empty)
+        if empty > 0: row_str += str(empty)
         rows.append(row_str)
-    # Pikafish w/b 方向相反：w = 黑方走, b = 红方走
     side = 'b' if current_player == 1 else 'w'
     return '/'.join(rows) + ' ' + side
+
+
+def _game_to_fen(game, current_player: int) -> str:
+    """从 game 对象生成 FEN（委托 _board_to_fen）。"""
+    return _board_to_fen(game.board, current_player)
 
 
 def _uci_to_tuple(uci_move: str) -> Optional[tuple]:
@@ -404,7 +407,7 @@ def _uci_to_tuple(uci_move: str) -> Optional[tuple]:
     Pikafish 坐标系与内部一致：row 0 = 黑方底线。
     UCI 格式: <from_col><from_row><to_col><to_row>
     例如: 'g4g5'（黑卒 G5→G6）→ (4, 6, 5, 6)
-          'b2e2'（红炮二平五）→ (7, 1, 7, 4)
+          'h7e7'（红炮二平五 H8→E8）→ (7, 7, 7, 4)
 
     col: a-i → 0-8（不变）
     row: 0-9 → 0-9（不变）
