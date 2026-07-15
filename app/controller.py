@@ -337,6 +337,11 @@ class GameController:
         # ── 2. 纯搜索模式（Pikafish/MCTS 异步，不阻塞UI）──
         if self.ai_mode == 'search_only':
             def _on_search(move, p):
+                # Pikafish 异步失败 → MCTS 同步回退（不重试Pikafish，避免UI再阻塞15s）
+                if not move:
+                    mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS, time_limit=MCTS_TIME_LIMIT)
+                    move = mcts.search(self.game, p)
+                    self.stats['search_nodes'] = mcts.simulations
                 if not move:
                     self._random_move(p)
                     return
@@ -705,7 +710,7 @@ class GameController:
 
         on_done 签名为 on_done(best_move_or_None, player)
         """
-        # ── 异步路径：Pikafish + 回调 ──
+        # ── 异步路径：Pikafish（MCTS 回退在主线程回调中处理）──
         if on_done is not None and self._pikafish and self._pikafish.available:
             time_ms = int(MCTS_TIME_LIMIT * 1000)
             self._pikafish.search_async(
@@ -738,6 +743,9 @@ class GameController:
                         self.log(f"  ✅ Pikafish选择: {pn} "
                                  f"{chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1} "
                                  f"({time_ms}ms)", 'INFO')
+                        if on_done:
+                            on_done(best_move, player)
+                            return None
                         return best_move
             except Exception as e:
                 self.log(f"  ⚠️ Pikafish 搜索失败 ({e})，回退到 MCTS", 'WARNING')
@@ -770,6 +778,9 @@ class GameController:
         else:
             self.log(f"  ⚠️ MCTS未找到走法", 'WARNING')
 
+        if on_done:
+            on_done(best_move, player)
+            return None
         return best_move
 
     def _fallback_to_search(self, player: int) -> None:
@@ -785,6 +796,11 @@ class GameController:
 
         # Pikafish/MCTS 异步回退
         def _on_fb(move, p):
+            # Pikafish 异步失败 → MCTS 同步回退
+            if not move:
+                mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS, time_limit=MCTS_TIME_LIMIT)
+                move = mcts.search(self.game, p)
+                self.stats['search_nodes'] = mcts.simulations
             if move:
                 fr, fc, tr, tc = move
                 result = self.game.move_piece(fr, fc, tr, tc)
