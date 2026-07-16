@@ -405,37 +405,81 @@ class GameController:
         # 格式化合法走法列表
         legal_moves_str = format_legal_moves(legal_moves, self.game.board)
 
-        # ── Hybrid 模式：MCTS 快速扫描 → 注入 LLM 提示词 ──
-        # Pikafish 异步快速扫描在后台并行运行（避免同步阻塞 RLock），
-        # 结果仅用于日志参考；LLM 提示词始终使用 MCTS（低延迟、零阻塞）。
+        # ── Hybrid 模式：双引擎并行快速扫描 → 注入 LLM 提示词 ──
         mcts_suggestions = ''
+        PF_QUICK_TIME_MS = 8000  # Pikafish 快速扫描超时（5000 偶发超时，8000 稳定）
         if self.ai_mode == 'hybrid':
             try:
-                # Pikafish 异步快速扫描（仅日志参考，结果通过信号中继回主线程）
+                # ① Pikafish 后台启动（与 MCTS 并行，节省等待时间）
+                _pf_result = {'move': None}
+                pf_ready = threading.Event()
+
                 if self._pikafish and self._pikafish.available:
                     self._pikafish.search_async(
-                        self.game, current_player, time_ms=int(MCTS_TIME_LIMIT * 1000),
-                        callback=lambda m: self._pikafish_relay.search_done.emit(
-                            (m, current_player, self._log_quick_pikafish, self.game_version)))
+                        self.game, current_player, time_ms=PF_QUICK_TIME_MS,
+                        callback=lambda m: (
+                            _pf_result.update({'move': m}), pf_ready.set()))
+                else:
+                    pf_ready.set()
 
-                # MCTS 快速扫描（始终可用，零阻塞）
+                # ② MCTS 主线程同步跑（与 Pikafish 后台并行）
                 quick_mcts = MCTSEngine(max_simulations=500, time_limit=4.0)
                 quick_mcts.search(self.game, current_player)
                 top = quick_mcts.get_top_moves(3)
-                if top:
-                    self.log(f"快速MCTS完成 ({quick_mcts.simulations}次模拟)", 'INFO')
-                    lines = ["## 引擎快速分析（MCTS 建议）"]
-                    lines.append("以下走法经本地引擎快速搜索。请结合你的战略判断做最终选择。")
-                    lines.append("")
-                    for i, (move, visits, val) in enumerate(top, 1):
-                        mfr, mfc, mtr, mtc = move
+
+                # ③ 等 Pikafish 结束（MCTS 跑完时 Pikafish 通常也已结束）
+                pf_ready.wait(timeout=PF_QUICK_TIME_MS / 1000 + 2.0)
+                pikafish_best = _pf_result['move']
+
+                # ④ 合并双引擎结果写入提示词
+                if top or pikafish_best:
+                    # 构建日志：显示 MCTS 首选走法
+                    if top:
+                        mfr, mfc, mtr, mtc = top[0][0]
                         mpn = PIECE_SYMBOLS.get(self.game.board[mfr][mfc], '?')
-                        cap = ''
-                        if self.game.board[mtr][mtc] != '.':
-                            cap = f" 吃{PIECE_SYMBOLS.get(self.game.board[mtr][mtc], '?')}"
-                        lines.append(f"  {i}. [{visits}次/{val:+.3f}] {mpn} "
-                                     f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}")
+                        mcts_log = (f"快速MCTS完成  {mpn} "
+                                    f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}")
+                    else:
+                        mcts_log = "快速MCTS完成（无结果）"
+                    self.log(mcts_log, 'INFO')
+                    lines = ["## 🌳 引擎快速分析"]
+                    lines.append("以下走法经本地双引擎快速搜索。请结合你的战略判断做最终选择。")
                     lines.append("")
+
+                    if pikafish_best:
+                        pfr, pfc, ptr, ptc = pikafish_best
+                        ppn = PIECE_SYMBOLS.get(self.game.board[pfr][pfc], '?')
+                        pcap = ''
+                        if self.game.board[ptr][ptc] != '.':
+                            pcap = f" 吃{PIECE_SYMBOLS.get(self.game.board[ptr][ptc], '?')}"
+                        self.log(f"快速Pikafish完成: {ppn} "
+                                 f"{chr(65+pfc)}{pfr+1}→{chr(65+ptc)}{ptr+1}{pcap}", 'INFO')
+                        lines.append("### Pikafish (NNUE) 首选")
+                        lines.append(f"  ★ {ppn} {chr(65+pfc)}{pfr+1}→{chr(65+ptc)}{ptr+1}{pcap}")
+                        lines.append("")
+                    else:
+                        self.log("快速Pikafish无结果", 'INFO')
+
+                    if top:
+                        lines.append("### MCTS Top-3")
+                        for i, (move, visits, val) in enumerate(top, 1):
+                            mfr, mfc, mtr, mtc = move
+                            mpn = PIECE_SYMBOLS.get(self.game.board[mfr][mfc], '?')
+                            cap = ''
+                            if self.game.board[mtr][mtc] != '.':
+                                cap = f" 吃{PIECE_SYMBOLS.get(self.game.board[mtr][mtc], '?')}"
+                            marker = ''
+                            if pikafish_best and move == pikafish_best:
+                                marker = '  ← Pikafish'
+                            lines.append(f"  {i}. [{visits}次/{val:+.3f}] {mpn} "
+                                         f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}{cap}{marker}")
+
+                    lines.append("")
+                    if pikafish_best and top and pikafish_best == top[0][0]:
+                        lines.append("**✅ 双引擎一致，该走法高度可信。**")
+                    elif pikafish_best and top and pikafish_best != top[0][0]:
+                        lines.append("**⚠️ Pikafish和MCTS 产生双引擎分歧，**")
+                        lines.append("**请分析两个首选走法的后续变化，结合你的战略判断做选择。如果你的走法不在引擎推荐中，请说明理由。**")
                     lines.append("**引擎首选通常战术最优，除非你有明确的战略理由应优先考虑引擎推荐。**")
                     mcts_suggestions = "\n".join(lines)
             except Exception as e:
@@ -986,10 +1030,15 @@ class GameController:
                     self.log(f"Pikafish验证: LLM={'OK' if verification_best == llm_move else 'OVERRIDE'}", 'INFO')
                     if verification_best != llm_move:
                         final_move = verification_best
+                        # 记录 LLM 原始走法
+                        lfr, lfc, ltr, ltc = llm_move
+                        lpn = PIECE_SYMBOLS.get(self.game.board[lfr][lfc], '?')
                         mfr, mfc, mtr, mtc = verification_best
                         mpn = PIECE_SYMBOLS.get(self.game.board[mfr][mfc], '?')
-                        self.log(f"Pikafish覆盖LLM: {mpn} "
-                                 f"{chr(65+mfc)}{mfr+1}->{chr(65+mtc)}{mtr+1}", 'WARNING')
+                        self.log(f"Pikafish覆盖LLM: LLM选{lpn} "
+                                 f"{chr(65+lfc)}{lfr+1}→{chr(65+ltc)}{ltr+1} → "
+                                 f"Pikafish选{mpn} "
+                                 f"{chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1}", 'WARNING')
                         self._last_mcts_override[current_player] = (
                             f"Pikafish引擎覆盖了你上回合的选择。建议充分利用引擎工具验证候选走法。"
                         )

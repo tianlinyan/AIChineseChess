@@ -159,11 +159,27 @@ class PikafishEngine:
                 self._send(f'go movetime {time_ms}')
 
                 best_move_uci = self._read_bestmove(time_ms)
-                if best_move_uci:
-                    move = _uci_to_tuple(best_move_uci)
-                    # 验证走法合法性 — 最终防线
-                    if move and move in game.get_all_legal_moves(player):
-                        return move
+                if not best_move_uci:
+                    import sys
+                    print(f"[Pikafish.search] _read_bestmove 返回空 "
+                          f"(time_ms={time_ms}, fen={fen[:40]}...)",
+                          file=sys.stderr, flush=True)
+                    return None
+                move = _uci_to_tuple(best_move_uci)
+                if not move:
+                    import sys
+                    print(f"[Pikafish.search] _uci_to_tuple 失败 "
+                          f"(uci={best_move_uci!r})",
+                          file=sys.stderr, flush=True)
+                    return None
+                # 验证走法合法性 — 最终防线
+                if move not in game.get_all_legal_moves(player):
+                    import sys
+                    print(f"[Pikafish.search] 走法非法 "
+                          f"(uci={best_move_uci!r} move={move})",
+                          file=sys.stderr, flush=True)
+                    return None
+                return move
             except (OSError, ValueError, BrokenPipeError):
                 self._available = False
                 self._kill_proc()
