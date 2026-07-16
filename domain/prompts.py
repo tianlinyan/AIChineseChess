@@ -148,15 +148,16 @@ def get_system_prompt() -> str:
 
 ### 标准流程（大多数局面）
 1. **分析局面** — 用你的棋艺知识做初步判断
-2. **（可选）`search_best_move`** — 局面复杂或不确定时，调引擎获取战术参考
-3. **（可选）`evaluate_position`** — 考虑兑子时，确认子力得失
-4. **`move_piece`** — 最终提交走法
+2. **参考引擎推荐** — 如果用户消息中包含「引擎参考走法」，请认真评估。引擎在战术计算上有优势，但缺乏战略视野。最终决定权在你。
+3. **（可选）`search_best_move`** — 如需更深搜索验证你的判断
+4. **（可选）`evaluate_position`** — 考虑兑子时，确认子力得失
+5. **`move_piece`** — 最终提交走法
 
 ### 何时使用 `search_best_move`
 - ✅ 中局复杂局面，难以判断最佳走法
 - ✅ 怀疑有杀棋或捉双机会，需要战术验证
 - ✅ 你的候选走法和合法走法列表中的某个走法之间拿不定主意
-- ✅ **Hybrid 模式下引擎分析已内嵌在提示词中（见用户消息），但你仍可调用此工具做更深搜索**
+- ✅ **Hybrid 模式下引擎分析已内嵌在提示词中（见用户消息「引擎参考走法」），但你仍可调用此工具做更深搜索**
 - ❌ 开局前几步（开局库已覆盖，直接用 move_piece）
 - ❌ 只有一种明显走法时（如唯一应将）
 
@@ -168,6 +169,7 @@ def get_system_prompt() -> str:
 ### 重要提示
 - 每个工具调用都会消耗时间，请合理使用
 - 引擎搜索可能需要数秒，不要在同一回合重复调用
+- **如有引擎推荐，请在分析中说明你采纳与否及理由。你拥有最终决定权。**
 - 最终必须调用 `move_piece`，否则走子不会被记录
 
 如果你未调用工具，你的走子不会被记录，你将输掉比赛。
@@ -312,9 +314,10 @@ def get_system_prompt() -> str:
 - 长远的杀棋路线：卧槽马、铁门栓、重炮、双车错
 
 ### 第 3 步：候选走法评估
-- 从合法走法列表中选出 2~5 个最有价值的候选走法
+- 从合法走法列表中选出 2~5 个最有价值的候选走法（如有引擎推荐，请纳入候选一起评估）
 - 对每个候选：评估走后的局面（对方最强应对是什么？）
 - 得失判断：是否损失子力？是否改善局面？是否有后续手段？
+- **引擎擅长战术计算，但你是最终决策者**——如果你不采纳引擎推荐，简述你的战略考量即可
 - 优先选择能吃对方大子、将军对方、或改善局面的走法
 
 ### 第 4 步：最终选择
@@ -399,15 +402,16 @@ def get_system_prompt_lite() -> str:
 
 ### 标准流程（大多数局面）
 1. **分析局面** — 用你的棋艺知识做初步判断
-2. **（推荐）`search_best_move`** — 调引擎获取战术参考，验证你的候选走法
-3. **（可选）`evaluate_position`** — 考虑兑子时，确认子力得失
-4. **`move_piece`** — 最终提交走法
+2. **参考引擎推荐** — 如果用户消息中包含「引擎参考走法」，请认真评估。引擎在战术计算上有优势，但缺乏战略视野。最终决定权在你。
+3. **（推荐）`search_best_move`** — 如需更深搜索验证
+4. **（可选）`evaluate_position`** — 考虑兑子时，确认子力得失
+5. **`move_piece`** — 最终提交走法
 
 ### 何时使用 `search_best_move`
 - ✅ 中局复杂局面，难以判断最佳走法
 - ✅ 怀疑有杀棋或捉双机会，需要战术验证
 - ✅ 你的候选走法和合法走法列表中的某个走法之间拿不定主意
-- ✅ **Hybrid 模式下引擎分析已内嵌在提示词中，但你仍可调用此工具做更深搜索**
+- ✅ **Hybrid 模式下引擎分析已内嵌在提示词中（见「引擎参考走法」），但你仍可调用此工具做更深搜索**
 - ❌ 开局前几步（开局库已覆盖，直接用 move_piece）
 - ❌ 只有一种明显走法时（如唯一应将）
 
@@ -418,6 +422,7 @@ def get_system_prompt_lite() -> str:
 ### 重要提示
 - 每个工具调用都会消耗时间，请合理使用
 - 引擎搜索可能需要数秒，不要在同一回合重复调用
+- **如有引擎推荐，请在分析中说明你采纳与否及理由。你拥有最终决定权。**
 - **最终必须调用 `move_piece`，否则走子不会被记录**
 
 如果你未调用工具，你的走子不会被记录，你将输掉比赛。
@@ -516,9 +521,9 @@ def get_system_prompt_lite() -> str:
 - 长远杀棋路线：卧槽马、铁门栓、重炮、双车错
 
 ### 第 3 步：候选评估
-- 从合法走法列表中选 2~5 个候选
+- 从合法走法列表中选 2~5 个候选（如有引擎推荐，请纳入候选一起评估）
 - 评估每步后的局面和对方最强应对
-- **优先考虑引擎推荐走法（如有）**，除非有明确战略理由
+- **引擎擅长战术计算，但你是最终决策者**——不采纳时简述战略考量即可
 
 ### 第 4 步：最终选择
 - 再次确认：不走送将、不将帅对面、符合走子规则
@@ -608,8 +613,7 @@ def build_move_prompt(current_player: int, board_str: str, history: str,
                       last_move_error: str = '',
                       retry_count: int = 0,
                       vision_mode: bool = False,
-                      mcts_suggestions: str = '',
-                      mcts_override_feedback: str = '') -> str:
+                      mcts_suggestions: str = '') -> str:
     """构建走子用户提示词
 
     Args:
@@ -678,17 +682,12 @@ def build_move_prompt(current_player: int, board_str: str, history: str,
         parts.append("```")
         parts.append("")
 
-    # ═══ MCTS 覆盖反馈（来自上回合） ═══
-    if mcts_override_feedback:
-        parts.append("---")
-        parts.append("## ⚠️ 上回合反馈")
-        parts.append(mcts_override_feedback)
-        parts.append("")
-
-    # ═══ MCTS 引擎分析（Hybrid 模式预注入） ═══
+    # ═══ 引擎参考走法（Hybrid 模式预注入） ═══
     if mcts_suggestions:
         parts.append("---")
         parts.append(mcts_suggestions)
+        parts.append("")
+        parts.append("*请在分析中简要说明是否采纳引擎推荐及理由。*")
         parts.append("")
 
     # ═══ 合法走法列表（核心新增） ═══
@@ -708,7 +707,10 @@ def build_move_prompt(current_player: int, board_str: str, history: str,
     parts.append("")
 
     # ═══ 操作指引 ═══
-    if not vision_mode:
+    parts.append("## 📏 输出控制在 600 字以内，力求精炼。")
+    if mcts_suggestions:
+        parts.append("请参考引擎推荐，简要说明你是否采纳及理由，然后调用 move_piece。")
+    elif not vision_mode:
         parts.append("按系统提示词中的四步法分析，从合法走法列表中选择最优走法，然后调用 move_piece 工具。")
     else:
         parts.append("分析图像，从合法走法列表中选择最优走法，然后调用 move_piece 工具。")
