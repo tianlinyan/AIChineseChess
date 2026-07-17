@@ -6,9 +6,6 @@ from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, PIECE_SYMBOLS
 class ChineseChessGame:
     """中国象棋游戏逻辑核心"""
 
-    # 棋子符号映射（从 domain.constants 导入，保留类属性以兼容旧引用）
-    PIECE_SYMBOLS = PIECE_SYMBOLS
-
     # 标准初始棋盘（9列，10行），行0为黑方底线，行9为红方底线
     STANDARD_BOARD = [
         ['r', 'n', 'b', 'a', 'k', 'a', 'b', 'n', 'r'],
@@ -34,7 +31,7 @@ class ChineseChessGame:
         self.last_move = None
         self._position_history: list = []  # 走子历史哈希，用于着法重复检测
         self.total_moves_count = 0        # 总步数（自游戏开始计，reset 清零）
-        # 将/帅位置缓存（O(1) 将军检测，move_piece 时增量更新）
+        # 将位置缓存（O(1) 将军检测，move_piece 时增量更新）
         self._king_pos = {1: (9, 4), 2: (0, 4)}
 
     def reset(self):
@@ -79,9 +76,9 @@ class ChineseChessGame:
             return {'success': False, 'message': '不能移动对方的棋子'}
 
         target_piece = self.board[to_row][to_col]
-        # 防御：禁止吃对方的将/帅（将杀判定应在吃之前结束游戏）
+        # 防御：禁止吃对方的将（将杀判定应在吃之前结束游戏）
         if target_piece.upper() == 'K':
-            return {'success': False, 'message': '不能直接吃掉对方的将/帅'}
+            return {'success': False, 'message': '不能直接吃掉对方的将'}
         if target_piece != '.' and self.get_piece_owner(target_piece) == owner:
             return {'success': False, 'message': '目标位置已有己方棋子'}
 
@@ -89,13 +86,13 @@ class ChineseChessGame:
             return {'success': False, 'message': '不合法的移动'}
 
         if self._would_be_illegal(from_row, from_col, to_row, to_col, owner):
-            return {'success': False, 'message': '移动后己方将/帅会被将军或形成将帅对面'}
+            return {'success': False, 'message': '移动后己方将会被将军或形成将帅对面'}
 
         captured = target_piece
         self.board[to_row][to_col] = piece
         self.board[from_row][from_col] = '.'
 
-        # 将/帅移动时增量更新缓存
+        # 将移动时增量更新缓存
         if piece == 'K':
             self._king_pos[1] = (to_row, to_col)
         elif piece == 'k':
@@ -143,7 +140,7 @@ class ChineseChessGame:
 
     # ── 将帅对面检测 ──
     def _is_king_facing(self):
-        """检测将帅是否对面（中间无棋子阻挡）。
+        """检测双方将是否对面（中间无棋子阻挡）。
 
         优先使用缓存位置（O(1)），缓存失效时回退全盘扫描。
         """
@@ -183,7 +180,7 @@ class ChineseChessGame:
         self.board[tr][tc] = piece
         self.board[fr][fc] = '.'
 
-        # 如果临时移动了将/帅，更新缓存以保证 _is_king_facing 正确
+        # 如果临时移动了将，更新缓存以保证 _is_king_facing 正确
         saved_king = None
         saved_player = None
         if piece == 'K':
@@ -220,7 +217,7 @@ class ChineseChessGame:
         dc = tc - fc
 
         piece_upper = piece.upper()
-        if piece_upper == 'K':  # 将/帅
+        if piece_upper == 'K':  # 将
             if abs(dr) + abs(dc) != 1:
                 return False
             if self.is_red(piece):
@@ -236,7 +233,7 @@ class ChineseChessGame:
             else:
                 return 0 <= tr <= 2 and 3 <= tc <= 5
 
-        elif piece_upper == 'B':  # 相/象
+        elif piece_upper == 'B':  # 相
             if abs(dr) != 2 or abs(dc) != 2:
                 return False
             er = fr + dr // 2
@@ -248,7 +245,7 @@ class ChineseChessGame:
             else:
                 return tr <= 4
 
-        elif piece_upper == 'N':  # 马
+        elif piece_upper == 'N':  # 馬
             if (abs(dr), abs(dc)) not in [(1, 2), (2, 1)]:
                 return False
             if abs(dr) == 2:
@@ -261,7 +258,7 @@ class ChineseChessGame:
                 return False
             return True
 
-        elif piece_upper == 'R':  # 车
+        elif piece_upper == 'R':  # 車
             if dr != 0 and dc != 0:
                 return False
             step_r = 0 if dr == 0 else (1 if dr > 0 else -1)
@@ -296,8 +293,8 @@ class ChineseChessGame:
             else:
                 return obstacles == 1
 
-        elif piece_upper == 'P':  # 兵/卒
-            if piece.isupper():  # 红兵（前进=行号减小）
+        elif piece_upper == 'P':  # 卒
+            if piece.isupper():  # 红卒（前进=行号减小）
                 if tr > fr:       # 不能后退（严格大于，允许横走 tr==fr）
                     return False
                 crossed = fr <= 4
@@ -319,7 +316,7 @@ class ChineseChessGame:
         self.board[tr][tc] = piece
         self.board[fr][fc] = '.'
 
-        # 如果临时移动了将/帅，更新缓存以保证 _is_in_check 正确
+        # 如果临时移动了将，更新缓存以保证 _is_in_check 正确
         saved_king = None
         if piece.upper() == 'K':
             saved_king = self._king_pos.get(player)
@@ -338,7 +335,7 @@ class ChineseChessGame:
     def _is_in_check(self, player):
         """检测 player 方是否被将军。
 
-        优先使用缓存的将/帅位置（O(1)），缓存失效时回退全盘扫描（O(90)）。
+        优先使用缓存的将位置（O(1)），缓存失效时回退全盘扫描（O(90)）。
         """
         king_piece = 'K' if player == 1 else 'k'
         kr, kc = self._king_pos.get(player, (None, None))
@@ -356,7 +353,7 @@ class ChineseChessGame:
                     continue
                 break
             else:
-                return False  # 将/帅不在棋盘上（不应出现）
+                return False  # 将不在棋盘上（不应出现）
 
         opponent = 2 if player == 1 else 1
         for r in range(self.size_rows):
@@ -418,7 +415,7 @@ class ChineseChessGame:
             return "暂无移动"
         lines = []
         for idx, (fr, fc, tr, tc, player, captured, piece) in enumerate(self.moves, 1):
-            piece_name = self.PIECE_SYMBOLS.get(piece, piece)
+            piece_name = PIECE_SYMBOLS.get(piece, piece)
             from_coord = f"{chr(65 + fc)}{fr + 1}"
             to_coord = f"{chr(65 + tc)}{tr + 1}"
             player_name = '红方' if player == 1 else '黑方'
@@ -426,7 +423,7 @@ class ChineseChessGame:
             line = f"{idx}. {player_name} {piece_name} {from_coord}→{to_coord}"
             # 标注吃子
             if captured != '.':
-                captured_name = self.PIECE_SYMBOLS.get(captured, captured)
+                captured_name = PIECE_SYMBOLS.get(captured, captured)
                 line += f" 吃{captured_name}"
             lines.append(line)
         return "\n".join(lines)
@@ -443,7 +440,7 @@ class ChineseChessGame:
         """判断是否进入残局阶段。
 
         启发式标准：总子力 <= 14（大约初始子力的一半）视为残局。
-        残局中兵/卒和将/帅的估值策略需要调整。
+        残局中卒和将的估值策略需要调整。
         """
         count = 0
         for r in range(self.size_rows):

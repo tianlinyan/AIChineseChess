@@ -164,7 +164,7 @@ def _local_egtb(board: list, current_player: int) -> Optional[Tuple[float, int]]
             else:
                 black_has_attackers = True
 
-    # 只有帅/将+士/相 → 和棋（无攻击子力）
+    # 只有将+士/相 → 和棋（无攻击子力）
     if current_player == 1:
         if not red_has_attackers and not black_has_attackers:
             return (0.0, 0)  # 和棋

@@ -1212,9 +1212,8 @@ class GameController:
             score_change = '+1'
             score_reason = 'LLM 与仲裁一致'
         else:
-            self.ai_score -= 1
-            score_change = '-1'
-            score_reason = 'LLM 与仲裁不一致（采纳引擎）'
+            score_change = '0'
+            score_reason = 'LLM 与仲裁不一致'
 
         self.log(
             f"📊 仲裁计分: {score_change} (总分: {self.ai_score}) — {score_reason}",

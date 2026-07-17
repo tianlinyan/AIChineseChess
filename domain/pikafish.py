@@ -408,7 +408,7 @@ def _uci_to_tuple(uci_move: str) -> Optional[tuple]:
     无需反转。
 
     UCI 格式: <from_col><from_row><to_col><to_row>
-    例如 Pikafish 'e0e1'（红帅E10→E9）→ 内部 (9, 4, 8, 4)
+    例如 Pikafish 'e0e1'（红将E10→E9）→ 内部 (9, 4, 8, 4)
     col: a-i → 0-8
     row: 0-9 → 0-9
     """

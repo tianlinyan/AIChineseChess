@@ -7,10 +7,10 @@
   A. 物质分 (2) — 红方/黑方子力值
   B. 位置分 (14) — 7种棋子 × 2方 PST
   C. 机动性 (2) — 红方/黑方合法走法数
-  D. 兵卒结构 (6) — 过河兵、兵链、通路兵、兵威胁
-  E. 将/帅安全 (4) — 士相完整性、将军状态、将/帅暴露度
-  F. 开放线 (2) — 车占开放线/半开放线
-  G. 子力协调 (4) — 马炮配合、双车连线、担子炮、连环马
+  D. 卒结构 (6) — 过河卒、卒链、通路卒、卒威胁
+  E. 将安全 (4) — 士相完整性、将军状态、将暴露度
+  F. 开放线 (2) — 車占开放线/半开放线
+  G. 子力协调 (4) — 馬炮配合、双車连线、担子炮、连环馬
   H. 空间控制 (2) — 中心控制、河界控制
   I. 阶段权重 — 开局/中局/残局自动切换
 
@@ -24,24 +24,24 @@ from domain.constants import BOARD_WIDTH, BOARD_HEIGHT
 # ══════════════════════════════════════════════════════════════════════════════
 
 PIECE_VALUE = {
-    'K': 10000,  # 帅
-    'R': 900,    # 车
+    'K': 10000,  # 将
+    'R': 900,    # 車
     'C': 450,    # 炮
-    'N': 400,    # 马
+    'N': 400,    # 馬
     'B': 200,    # 相
-    'A': 200,    # 仕
-    'P': 100,    # 兵（基础值）
+    'A': 200,    # 士
+    'P': 100,    # 卒（基础值）
 }
 
-# 残局价值修正（兵升值，炮贬值）
+# 残局价值修正（卒升值，炮贬值）
 PIECE_VALUE_ENDGAME = {
     'K': 10000,
     'R': 900,
     'C': 380,    # 炮贬值（炮架减少）
-    'N': 420,    # 马升值（蹩脚减少）
-    'B': 180,    # 相/仕轻微贬值
+    'N': 420,    # 馬升值（蹩脚减少）
+    'B': 180,    # 相/士轻微贬值
     'A': 180,
-    'P': 200,    # 兵大幅升值
+    'P': 200,    # 卒大幅升值
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -49,7 +49,7 @@ PIECE_VALUE_ENDGAME = {
 # 红方视角，row 0=黑底线, row 9=红底线。黑方镜像。
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── 兵/卒（分三个阶段：未过河/刚过河/深入敌阵） ──
+# ── 卒（分三个阶段：未过河/刚过河/深入敌阵） ──
 RED_BING_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],  # row 0
     [90, 100, 110, 120, 130, 120, 110, 100,  90],  # row 1（逼近九宫）
@@ -63,7 +63,7 @@ RED_BING_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],  # row 9
 ]
 
-# ── 马（中心化 + 避免边角） ──
+# ── 馬（中心化 + 避免边角） ──
 RED_MA_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   5,  15,  20,  20,  20,  15,   5,   0],
@@ -91,7 +91,7 @@ RED_PAO_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
 ]
 
-# ── 车（占据要道 + 侵入敌阵） ──
+# ── 車（占据要道 + 侵入敌阵） ──
 RED_JU_PST = [
     [5,  10,  20,  30,  35,  30,  20,  10,   5],
     [5,  15,  30,  45,  50,  45,  30,  15,   5],
@@ -105,7 +105,7 @@ RED_JU_PST = [
     [0,   5,  10,  15,  15,  15,  10,   5,   0],
 ]
 
-# ── 仕/士 ──
+# ── 士/士 ──
 RED_SHI_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
@@ -119,7 +119,7 @@ RED_SHI_PST = [
     [0,   0,   0,  15,   0,  15,   0,   0,   0],
 ]
 
-# ── 相/象（连环保护优先） ──
+# ── 相（连环保护优先） ──
 RED_XIANG_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
@@ -133,7 +133,7 @@ RED_XIANG_PST = [
     [0,   0,   8,   0,   0,   0,   8,   0,   0],
 ]
 
-# ── 帅/将（残局宫顶活跃） ──
+# ── 将（残局宫顶活跃） ──
 RED_SHUAI_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
@@ -162,14 +162,14 @@ class EvalWeights:
     material = 1.0           # 物质分
     positional = 0.6         # 位置分权重
     mobility = 2.0           # 每走法价值
-    shuai_safety = 1.0        # 将/帅安全
-    bing_structure = 0.8      # 兵结构
+    shuai_safety = 1.0        # 将安全
+    bing_structure = 0.8      # 卒结构
     open_column = 25.0         # 开放线
     coordination = 1.0       # 子力协调
     check_bonus = 50.0       # 将军加分
     center_control = 0.5     # 中心控制
     river_control = 0.3      # 河界控制
-    endgame_shuai_active = 8.0  # 残局将帅活跃加分
+    endgame_shuai_active = 8.0  # 残局将活跃加分
 
 
 WEIGHTS = EvalWeights()
@@ -269,11 +269,11 @@ def evaluate(board: list,
     if legal_moves_black > 0:
         score -= w.mobility * min(legal_moves_black, 80)
 
-    # ── D. 兵卒结构 ──
+    # ── D. 卒结构 ──
     score += w.bing_structure * _bing_structure(board, red_bing, is_red=True)
     score -= w.bing_structure * _bing_structure(board, black_bing, is_red=False)
 
-    # ── E. 将/帅安全 ──
+    # ── E. 将安全 ──
     if red_shuai_pos:
         score += w.shuai_safety * _shuai_safety(board, red_shuai_pos, is_red=True, endgame=endgame)
     if black_shuai_pos:
@@ -303,7 +303,7 @@ def evaluate(board: list,
     score += w.river_control * _river_control(board, is_red=True)
     score -= w.river_control * _river_control(board, is_red=False)
 
-    # ── I. 残局将帅活跃 ──
+    # ── I. 残局将活跃 ──
     if endgame:
         if red_shuai_pos:
             score += w.endgame_shuai_active * (9 - red_shuai_pos[0])
@@ -324,7 +324,7 @@ def evaluate(board: list,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _bing_structure(board: list, bing_list: list, is_red: bool) -> float:
-    """兵卒结构评估：过河兵、通路兵（前方被任意棋子阻挡则非通路兵）"""
+    """卒结构评估：过河卒、通路卒（前方被任意棋子阻挡则非通路卒）"""
     if not bing_list:
         return 0.0
     score = 0.0
@@ -336,10 +336,10 @@ def _bing_structure(board: list, bing_list: list, is_red: bool) -> float:
             # 深入敌阵（越靠近底线越好）
             advance = r if is_red else (9 - r)
             score += (4 - advance) * 8.0 if advance <= 3 else 0
-            # 中心兵价值更高
+            # 中心卒价值更高
             if 3 <= c <= 5:
                 score += 10.0
-            # 通路兵（前方无任何敌方棋子阻挡）
+            # 通路卒（前方无任何敌方棋子阻挡）
             blocked = False
             step = -1 if is_red else 1
             cr = r + step
@@ -355,9 +355,9 @@ def _bing_structure(board: list, bing_list: list, is_red: bool) -> float:
 
 def _shuai_safety(board: list, shuai_pos: tuple, is_red: bool,
                  endgame: bool) -> float:
-    """将/帅安全评估"""
+    """将安全评估"""
     if endgame:
-        return 0.0  # 残局中将/帅安全不是首要问题
+        return 0.0  # 残局中将安全不是首要问题
     kr, kc = shuai_pos
     score = 0.0
     # 士相完整性
@@ -371,14 +371,14 @@ def _shuai_safety(board: list, shuai_pos: tuple, is_red: bool,
                 if p.upper() in ('A', 'B'):
                     defenders += 1
     score += defenders * 15.0  # 每个防守棋子+15
-    # 将/帅在宫底更安全（开局中局）
+    # 将在宫底更安全（开局中局）
     safe_row = 9 if is_red else 0
     score -= abs(kr - safe_row) * 5.0
     return score
 
 
 def _open_column_bonus(board: list, col: int, is_red: bool) -> float:
-    """车在开放线/半开放线的加分"""
+    """車在开放线/半开放线的加分"""
     friendly_bing = 0
     enemy_bing = 0
     for r in range(BOARD_HEIGHT):
@@ -399,9 +399,9 @@ def _open_column_bonus(board: list, col: int, is_red: bool) -> float:
 
 def _piece_coordination(ma_list: list, cannons: list,
                         ju_list: list, is_red: bool) -> float:
-    """子力协调：连环马、担子炮、双车连线"""
+    """子力协调：连环馬、担子炮、双車连线"""
     score = 0.0
-    # 连环马（两马相距一个日字）
+    # 连环馬（两马相距一个日字）
     for i, (r1, c1) in enumerate(ma_list):
         for r2, c2 in ma_list[i + 1:]:
             if abs(r1 - r2) + abs(c1 - c2) <= 3:
@@ -413,12 +413,12 @@ def _piece_coordination(ma_list: list, cannons: list,
                 score += 20.0
             elif r1 == r2 and abs(c1 - c2) <= 3:
                 score += 15.0
-    # 双车连线（同列或同行）
+    # 双車连线（同列或同行）
     if len(ju_list) >= 2:
         for i, (r1, c1) in enumerate(ju_list):
             for r2, c2 in ju_list[i + 1:]:
                 if c1 == c2:
-                    score += 25.0  # 同列双车错
+                    score += 25.0  # 同列双車错
                 elif r1 == r2:
                     score += 15.0  # 同排
     return score
@@ -434,7 +434,7 @@ def _center_control(board: list, is_red: bool) -> float:
             if p == '.':
                 continue
             if (is_red and p.isupper()) or (not is_red and p.islower()):
-                # 在中心的子力（兵卒除外）
+                # 在中心的子力（卒除外）
                 if p.upper() != 'P':
                     score += 5.0
     return score
@@ -457,17 +457,17 @@ def _river_control(board: list, is_red: bool) -> float:
 
 def _detect_dangerous_ma(ma_list: list,
                               enemy_shuai_pos: tuple = None) -> float:
-    """检测卧槽马/挂角马威胁"""
+    """检测卧槽馬/挂角馬威胁"""
     bonus = 0.0
     if not enemy_shuai_pos:
         return 0.0
     ekr, ekc = enemy_shuai_pos
     for kr, kc in ma_list:
-        # 马在对方九宫对角线位置 = 卧槽马/挂角马
+        # 馬在对方九宫对角线位置 = 卧槽馬/挂角馬
         dr, dc = abs(kr - ekr), abs(kc - ekc)
         if (dr == 1 and dc == 2) or (dr == 2 and dc == 1):
             bonus += 60.0
-        # 马在对方九宫一格内
+        # 馬在对方九宫一格内
         elif dr <= 2 and dc <= 2 and abs(kr - ekr) + abs(kc - ekc) <= 3:
             bonus += 20.0
     return bonus
@@ -475,18 +475,18 @@ def _detect_dangerous_ma(ma_list: list,
 
 def _detect_battery(board: list, ju_list: list, cannons: list,
                     enemy_shuai_pos: tuple = None) -> float:
-    """检测车炮组合威胁（铁门栓、当头炮、沉底炮）"""
+    """检测車炮组合威胁（铁门栓、当头炮、沉底炮）"""
     bonus = 0.0
     if not enemy_shuai_pos:
         return 0.0
     ekr, ekc = enemy_shuai_pos
-    # 车控制将/帅所在列
+    # 車控制将所在列
     for rr, rc in ju_list:
         if rc == ekc:
             obstacles = sum(1 for mr in range(min(rr, ekr) + 1, max(rr, ekr))
                           if board[mr][rc] != '.')
             if obstacles <= 1:
-                bonus += 40.0  # 车直对将/帅
+                bonus += 40.0  # 車直对将
     # 炮在中路
     for cr, cc in cannons:
         if cc == ekc:
