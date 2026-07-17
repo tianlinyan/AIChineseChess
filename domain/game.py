@@ -33,6 +33,7 @@ class ChineseChessGame:
         self.winner = None     # None=进行中, 1=红胜, 2=黑胜, 0=和棋
         self.last_move = None
         self._position_history: list = []  # 走子历史哈希，用于着法重复检测
+        self.total_moves_count = 0        # 总步数（自游戏开始计，reset 清零）
 
     def reset(self):
         self.board = [row[:] for row in self.STANDARD_BOARD]
@@ -42,6 +43,7 @@ class ChineseChessGame:
         self.winner = None
         self.last_move = None
         self._position_history = []
+        self.total_moves_count = 0
 
     def is_red(self, piece):
         return piece.isupper()
@@ -85,6 +87,7 @@ class ChineseChessGame:
 
         self.last_move = (from_row, from_col, to_row, to_col, self.current_player)
         self.moves.append((from_row, from_col, to_row, to_col, self.current_player, captured, piece))
+        self.total_moves_count += 1
 
         # 记录走子后的局面哈希（着法重复检测）
         self._position_history.append(self.position_hash())

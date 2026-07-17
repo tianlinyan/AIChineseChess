@@ -194,6 +194,8 @@ def setup_left_expanded(parent) -> None:
     status_layout.addWidget(parent.game_status_label)
     parent.turn_label = QLabel("当前回合: —")
     status_layout.addWidget(parent.turn_label)
+    parent.total_moves_label = QLabel("总步数: 0")
+    status_layout.addWidget(parent.total_moves_label)
     parent.think_timer_label = QLabel("思考用时: —")
     status_layout.addWidget(parent.think_timer_label)
 
@@ -201,27 +203,37 @@ def setup_left_expanded(parent) -> None:
 
     layout.addSpacing(4)
 
-    # ── 统计 ──
-    stats_group = QGroupBox("统计")
-    stats_group.setStyleSheet(
-        "QGroupBox { font-weight: bold; color: #b0b0b0; border: 1px solid #444; "
+    # ── AI 计分（仲裁） ──
+    score_group = QGroupBox("🏆 AI 计分 (仲裁)")
+    score_group.setStyleSheet(
+        "QGroupBox { font-weight: bold; color: #b0b0b0; border: 1px solid #555; "
         "margin-top: 10px; padding: 12px 8px 8px 8px; }"
-        "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: #7eb8da; }"
+        "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: #f0c040; }"
     )
-    stats_layout = QVBoxLayout(stats_group)
-    stats_layout.setSpacing(2)
+    score_layout = QVBoxLayout(score_group)
+    score_layout.setSpacing(4)
 
-    parent.total_moves_label = QLabel("总步数: 0")
-    stats_layout.addWidget(parent.total_moves_label)
-    parent.game_duration_label = QLabel("持续时间: 0 秒")
-    stats_layout.addWidget(parent.game_duration_label)
-    parent.red_tokens_label = QLabel("红方用时: 0 秒")
-    stats_layout.addWidget(parent.red_tokens_label)
-    parent.black_tokens_label = QLabel("黑方用时: 0 秒")
-    stats_layout.addWidget(parent.black_tokens_label)
-    parent.search_nodes_label = QLabel("搜索节点: 0")
-    stats_layout.addWidget(parent.search_nodes_label)
+    parent.ai_score_label = QLabel("得分: 0")
+    parent.ai_score_label.setStyleSheet(
+        "color: #f0c040; font-size: 18px; font-weight: bold; padding: 4px;"
+    )
+    parent.ai_score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    score_layout.addWidget(parent.ai_score_label)
 
-    layout.addWidget(stats_group)
+    parent.ai_arbitration_count_label = QLabel("仲裁次数: 0")
+    parent.ai_arbitration_count_label.setStyleSheet(
+        "color: #aaa; font-size: 11px; padding: 2px;"
+    )
+    parent.ai_arbitration_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    score_layout.addWidget(parent.ai_arbitration_count_label)
+
+    parent.ai_score_detail = QLabel("LLM=仲裁 +1 | LLM≠仲裁 0\n未分歧不进入仲裁，不得分")
+    parent.ai_score_detail.setStyleSheet(
+        "color: #888; font-size: 10px; padding: 2px;"
+    )
+    parent.ai_score_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    score_layout.addWidget(parent.ai_score_detail)
+
+    layout.addWidget(score_group)
 
     layout.addStretch()

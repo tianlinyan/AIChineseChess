@@ -1,6 +1,6 @@
 """主窗口"""
 
-from PyQt6.QtCore import Qt, QSettings, QDateTime, QByteArray
+from PyQt6.QtCore import Qt, QSettings, QByteArray
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
 
 from domain.game import ChineseChessGame
 from domain.prompts import HUMAN_MODEL
-from domain.constants import format_duration
 from services.logging import LogManager
 from services.models import ModelManager
 from ai.manager import AIManager
@@ -255,7 +254,6 @@ class MainWindow(QMainWindow):
     def update_ui(self) -> None:
         self.board_widget.update()
         self.update_game_status()
-        self.update_stats_display()
         self.update_history_list()
 
     def update_game_status(self) -> None:
@@ -275,25 +273,8 @@ class MainWindow(QMainWindow):
                 "游戏状态: 进行中" if self.game_controller.is_active else "游戏状态: 等待开始")
             self.turn_label.setText(
                 f"当前回合: {'红方' if g.current_player == 1 else '黑方'}")
-        self.total_moves_label.setText(f"总步数: {len(g.moves)}")
 
-    def update_stats_display(self) -> None:
-        stats = self.game_controller.stats
-        if not stats['start_time']:
-            return
-        duration = stats['start_time'].secsTo(QDateTime.currentDateTime())
-        self.game_duration_label.setText(
-            f"持续时间: {format_duration(duration)}")
-        self.red_tokens_label.setText(
-            f"红方用时: {format_duration(self.game_controller.red_total_time)}")
-        self.black_tokens_label.setText(
-            f"黑方用时: {format_duration(self.game_controller.black_total_time)}")
-        search_nodes = stats.get('search_nodes', 0)
-        if search_nodes > 0:
-            if search_nodes >= 1000:
-                self.search_nodes_label.setText(f"搜索节点: {search_nodes/1000:.1f}K")
-            else:
-                self.search_nodes_label.setText(f"搜索节点: {search_nodes}")
+        self.total_moves_label.setText(f"总步数: {g.total_moves_count}")
 
     def update_history_list(self) -> None:
         # 删除除 history_label 之外的所有旧走子标签和 stretch
@@ -312,6 +293,25 @@ class MainWindow(QMainWindow):
             self.history_mini_layout.addWidget(label)
 
         self.history_mini_layout.addStretch()
+
+    def update_ai_score(self) -> None:
+        """更新左侧面板的 AI 仲裁计分显示。"""
+        score = self.game_controller.ai_score
+        if score > 0:
+            color = '#4a9e5a'  # 绿色 - 正分
+            prefix = '+'
+        elif score < 0:
+            color = '#c44a4a'  # 红色 - 负分
+            prefix = ''
+        else:
+            color = '#f0c040'  # 金色 - 零分
+            prefix = ''
+        self.ai_score_label.setText(f"得分: {prefix}{score}")
+        self.ai_score_label.setStyleSheet(
+            f"color: {color}; font-size: 18px; font-weight: bold; padding: 4px;"
+        )
+        self.ai_arbitration_count_label.setText(
+            f"仲裁次数: {self.game_controller.arbitration_count}")
 
     def update_player_status(self) -> None:
         g = self.game

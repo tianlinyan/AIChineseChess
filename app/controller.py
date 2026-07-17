@@ -11,10 +11,12 @@ from domain.constants import (
     OPENING_BOOK_ENABLED, OPENING_BOOK_MAX_MOVES,
     OPENING_DELAY_MS,
     MCTS_SIMULATIONS, MCTS_TIME_LIMIT,
-    AI_DEFAULT_MODE, PIECE_SYMBOLS, format_duration,
+    AI_DEFAULT_MODE, ARBITRATION_TIMEOUT_SECONDS,
+    PIECE_SYMBOLS, format_duration,
 )
 from domain.prompts import (
     HUMAN_MODEL, get_system_prompt, build_move_prompt, format_legal_moves,
+    get_arbitration_system_prompt, build_arbitration_prompt,
 )
 from domain.game import ChineseChessGame
 from domain.mcts import MCTSEngine
@@ -32,7 +34,6 @@ if TYPE_CHECKING:
 
 class _PikafishRelay(QObject):
     """跨线程信号中继：daemon 线程 emit → Qt 自动排队到主线程。"""
-    done = pyqtSignal(tuple)       # 验证结果
     search_done = pyqtSignal(tuple)  # 搜索/回退结果
 
 
@@ -63,9 +64,6 @@ class GameController:
         self.stats: dict = {
             'start_time': None,
             'move_count': 0,
-            'estimated_tokens': 0,
-            'red_tokens': 0,
-            'black_tokens': 0,
             'search_nodes': 0,
         }
         self.red_total_time: int = 0
@@ -89,6 +87,17 @@ class GameController:
 
         # ── Hybrid 模式：引擎搜索结果暂存（LLM 失败时兜底用）──
         self._hybrid_engine_move: Optional[tuple] = None
+        self._last_engine_name: str = '引擎'
+
+        # ── AI 计分（仲裁模式）──
+        self.ai_score: int = 0  # LLM 与仲裁一致 +1，不一致 -1
+        self.arbitration_count: int = 0  # 仲裁触发次数
+
+        # ── 仲裁暂存（LLM 与引擎分歧时等待 DeepSeek 裁决）──
+        self._arbitration_llm_move: Optional[tuple] = None
+        self._arbitration_llm_text: str = ''
+        self._arbitration_engine_move: Optional[tuple] = None
+        self._arbitration_engine_name: str = ''
 
     def _init_pikafish(self) -> None:
         """尝试初始化 Pikafish 外部引擎。
@@ -154,9 +163,6 @@ class GameController:
         self.stats = {
             'start_time': QDateTime.currentDateTime(),
             'move_count': 0,
-            'estimated_tokens': 0,
-            'red_tokens': 0,
-            'black_tokens': 0,
             'search_nodes': 0,
         }
         self.red_total_time = 0
@@ -202,16 +208,25 @@ class GameController:
         self.red_total_time = 0
         self.black_total_time = 0
 
+        # 重置 AI 计分
+        self.ai_score = 0
+        self.arbitration_count = 0
+        self._arbitration_llm_move = None
+        self._arbitration_llm_text = ''
+        self._arbitration_engine_move = None
+        self._arbitration_engine_name = ''
+        if self.main:
+            self.main.update_ai_score()
+
         self.stats = {
             'start_time': None, 'move_count': 0,
-            'estimated_tokens': 0, 'red_tokens': 0, 'black_tokens': 0,
             'search_nodes': 0,
         }
 
         if self.main:
             self.main.update_player_status()
             self.main.update_game_status()
-            self.main.update_stats_display()
+
             self.main.update_history_list()
             self.main.start_btn.setEnabled(True)
             self.main.pause_btn.setEnabled(False)
@@ -319,7 +334,6 @@ class GameController:
                         self.main.board_widget.update()
                         self.main.update_game_status()
                         self.main.update_history_list()
-                        self.main.update_stats_display()
                         self.main.update_player_status()
                         if result.get('game_over'):
                             self.handle_game_over(result)
@@ -336,6 +350,10 @@ class GameController:
             self.ai_manager.set_busy(True)
 
             def _on_search(move, p):
+                # 检查暂停/关闭状态，防止异步回调在暂停后执行走子
+                if self.is_paused or not self.is_active or self.game.game_over:
+                    self._finish_ai_move()
+                    return
                 # Pikafish 异步失败 → MCTS 同步回退（不重试Pikafish，避免UI再阻塞15s）
                 if not move:
                     mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS, time_limit=MCTS_TIME_LIMIT)
@@ -349,11 +367,11 @@ class GameController:
                 result = self.game.move_piece(fr, fc, tr, tc)
                 if result['success']:
                     self._on_move_success(fr, fc, tr, tc, p, source='搜索')
-                    self.main.board_widget.update()
-                    self.main.update_game_status()
-                    self.main.update_history_list()
-                    self.main.update_stats_display()
-                    self.main.update_player_status()
+                    if self.main:
+                        self.main.board_widget.update()
+                        self.main.update_game_status()
+                        self.main.update_history_list()
+                        self.main.update_player_status()
                     if result.get('game_over'):
                         self._finish_ai_move()
                         self.handle_game_over(result)
@@ -373,25 +391,25 @@ class GameController:
 
         # ── 3. LLM 模式（llm_only / hybrid） ──
         if self.ai_mode == 'hybrid':
-            # 引擎先行：Pikafish 同步搜索 → MCTS 同步兜底 → LLM
+            # 引擎先行：Pikafish 异步搜索（不阻塞UI）→ MCTS 同步兜底 → LLM
             self.ai_manager.set_busy(True)
-            engine_move = None
-            engine_name = 'MCTS'
-            if self._pikafish and self._pikafish.available:
-                try:
-                    engine_move = self._pikafish.search(
-                        self.game, current_player,
-                        time_ms=int(MCTS_TIME_LIMIT * 1000))
-                    if engine_move:
-                        engine_name = 'Pikafish'
-                except Exception as e:
-                    self.log(f"Pikafish 同步搜索异常: {e}", 'WARNING')
-            if not engine_move:
-                mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS,
-                                  time_limit=MCTS_TIME_LIMIT)
-                engine_move = mcts.search(self.game, current_player)
-                self.stats['search_nodes'] = mcts.simulations
-            self._on_hybrid_engine_done(engine_move, current_player, engine_name)
+
+            def _on_engine_done(move, p):
+                engine_name = 'MCTS'
+                if move and self._pikafish and self._pikafish.available:
+                    engine_name = 'Pikafish'
+                if not move:
+                    # Pikafish 失败/不可用 → MCTS 同步回退
+                    mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS,
+                                      time_limit=MCTS_TIME_LIMIT)
+                    move = mcts.search(self.game, p)
+                    self.stats['search_nodes'] = mcts.simulations
+                if not self.is_active or self.is_paused or self.game.game_over:
+                    self._finish_ai_move()
+                    return
+                self._on_hybrid_engine_done(move, p, engine_name)
+
+            self._mcts_search(current_player, on_done=_on_engine_done)
             return
 
         # llm_only: 直接启动 LLM（无引擎参考）
@@ -531,11 +549,19 @@ class GameController:
 
         player_name = '红方' if player == 1 else '黑方'
 
+        # 保存引擎名称（仲裁时需要）
+        self._last_engine_name = engine_name
+
         # 格式化引擎参考走法 + 日志输出
         engine_hint = ''
         if engine_move:
             efr, efc, etr, etc = engine_move
-            if self.game.board[efr][efc] != '.':
+            # 验证走法在合法列表中（防止引擎因坐标系问题返回非法走法）
+            legal = self.game.get_all_legal_moves(player)
+            if (efr, efc, etr, etc) not in legal:
+                self.log(f"引擎走法 {chr(65+efc)}{efr+1}→{chr(65+etc)}{etr+1} 不在合法列表中，丢弃", 'WARNING')
+                engine_move = None
+            elif self.game.board[efr][efc] != '.':
                 epn = PIECE_SYMBOLS.get(self.game.board[efr][efc], '?')
                 emove_str = f"{epn} {chr(65+efc)}{efr+1}→{chr(65+etc)}{etr+1}"
                 self.log(f"🔍 {engine_name} 推荐: {emove_str}", 'INFO')
@@ -543,8 +569,8 @@ class GameController:
                     f"## 🔍 引擎参考走法\n\n"
                     f"{engine_name} 经 {MCTS_TIME_LIMIT:.0f} 秒搜索，推荐：\n"
                     f"**{emove_str}**\n\n"
-                    f"引擎在战术计算（捉双、抽将、杀棋等）方面有优势，"
-                    f"但缺乏战略视野。请认真参考，结合你的判断做最终决定。"
+                    f"引擎在战术计算（捉双、抽将、杀棋等）方面有优势。"
+                    f"请认真参考，结合你的判断做最终决定。"
                     f"在分析中简要说明你采纳与否及理由即可。"
                 )
             else:
@@ -587,10 +613,10 @@ class GameController:
         if error:
             self.log(f"{player_name} AI 错误: {error}", 'ERROR')
 
-        # ── LLM 失败 → 优先用引擎兜底，否则搜索回退 ──
+        # ── LLM 失败 → 直接采用引擎结果，不仲裁 ──
         if error or not from_coord or not to_coord:
             if self.ai_mode == 'hybrid':
-                self.log(f"{player_name} LLM 调用失败，尝试引擎兜底", 'WARNING')
+                self.log(f"{player_name} LLM 调用失败 ({error or '无有效走法'})，直接采用引擎走法", 'WARNING')
                 self._finish_ai_move()
                 if self._hybrid_engine_move:
                     self._execute_fallback_move(self._hybrid_engine_move,
@@ -620,7 +646,7 @@ class GameController:
                 f"请确保坐标格式正确：列字母 A~I，行数字 1~10。"
             )
             if self.ai_mode == 'hybrid':
-                self.log(f"{player_name} 坐标解析失败，尝试引擎兜底", 'WARNING')
+                self.log(f"{player_name} 坐标解析失败，直接采用引擎走法", 'WARNING')
                 self._finish_ai_move()
                 if self._hybrid_engine_move:
                     self._execute_fallback_move(self._hybrid_engine_move,
@@ -643,6 +669,33 @@ class GameController:
 
         # ── LLM 走法即为最终决定（hybrid 模式下引擎仅作参考）──
         final_move = (from_row, from_col, to_row, to_col)
+
+        # ── Hybrid 模式分歧检测：LLM ≠ 引擎 → 启动第三方仲裁 ──
+        if (self.ai_mode == 'hybrid' and self._hybrid_engine_move
+                and final_move != self._hybrid_engine_move):
+            # 暂存双方走法，启动 DeepSeek 仲裁
+            self._arbitration_llm_move = final_move
+            self._arbitration_llm_text = full_text
+            self._arbitration_engine_move = self._hybrid_engine_move
+            # 保存引擎名称（从 _hybrid_engine_move 的来源推断）
+            efr, efc, etr, etc = self._hybrid_engine_move
+            self._arbitration_engine_name = getattr(
+                self, '_last_engine_name', '引擎')
+
+            # 格式化日志
+            epiece = self.game.board[efr][efc] if self.game.board[efr][efc] != '.' else '?'
+            epn = PIECE_SYMBOLS.get(epiece, epiece)
+            erec = f"{epn} {chr(65+efc)}{efr+1}→{chr(65+etc)}{etr+1}"
+            lpiece = self.game.board[from_row][from_col] if self.game.board[from_row][from_col] != '.' else '?'
+            lpn = PIECE_SYMBOLS.get(lpiece, lpiece)
+            lrec = f"{lpn} {chr(65+from_col)}{from_row+1}→{chr(65+to_col)}{to_row+1}"
+            self.log(
+                f"⚖️ 分歧检测 | LLM选择: {lrec} | 引擎推荐: {erec} | 启动 DeepSeek 仲裁...",
+                'WARNING')
+
+            # 启动仲裁（异步），仲裁完成后由 on_arbitration_finished 接管
+            self._start_arbitration(current_player)
+            return  # 暂不执行走子，等待仲裁结果
 
         # ── 执行最终走法 ──
         result = self.game.move_piece(from_row, from_col, to_row, to_col)
@@ -674,26 +727,14 @@ class GameController:
                     return
 
         # ── 移动成功 ──
-        # Hybrid 模式：LLM 与引擎推荐不一致时警告
-        if self.ai_mode == 'hybrid' and self._hybrid_engine_move \
-                and final_move != self._hybrid_engine_move:
-            efr, efc, etr, etc = self._hybrid_engine_move
-            epn = PIECE_SYMBOLS.get(self.game.board[efr][efc], '?')
-            erec = f"{epn} {chr(65+efc)}{efr+1}→{chr(65+etc)}{etr+1}"
-            lpn = PIECE_SYMBOLS.get(self.game.board[to_row][to_col], '?')
-            lrec = f"{lpn} {chr(65+from_col)}{from_row+1}→{chr(65+to_col)}{to_row+1}"
-            self.log(
-                f"⚠️ LLM 未采纳引擎推荐 | 引擎推荐: {erec} | LLM选择: {lrec}",
-                'WARNING')
-
         self._on_move_success(from_row, from_col, to_row, to_col,
-                              current_player, tokens=tokens, source='LLM')
+                              current_player, source='LLM')
 
-        self.main.board_widget.update()
-        self.main.update_game_status()
-        self.main.update_history_list()
-        self.main.update_stats_display()
-        self.main.update_player_status()
+        if self.main:
+            self.main.board_widget.update()
+            self.main.update_game_status()
+            self.main.update_history_list()
+            self.main.update_player_status()
 
         self._finish_ai_move()
 
@@ -702,7 +743,8 @@ class GameController:
             return
 
         # ── 下一步 ──
-        self.main.start_thinking_timer(self.game.current_player)
+        if self.main:
+            self.main.start_thinking_timer(self.game.current_player)
         next_player = self.game.current_player
         next_model = self.model1 if next_player == 1 else self.model2
         if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
@@ -811,6 +853,10 @@ class GameController:
         self.ai_manager.set_busy(True)
 
         def _on_fb(move, p):
+            # 检查暂停/关闭状态，防止异步回调在暂停后执行走子
+            if self.is_paused or not self.is_active or self.game.game_over:
+                self._finish_ai_move()
+                return
             # Pikafish 异步失败 → MCTS 同步回退
             if not move:
                 mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS, time_limit=MCTS_TIME_LIMIT)
@@ -826,13 +872,13 @@ class GameController:
                         self.main.board_widget.update()
                         self.main.update_game_status()
                         self.main.update_history_list()
-                        self.main.update_stats_display()
                         self.main.update_player_status()
                     if result.get('game_over'):
                         self._finish_ai_move()
                         self.handle_game_over(result)
                         return
-                    self.main.start_thinking_timer(self.game.current_player)
+                    if self.main:
+                        self.main.start_thinking_timer(self.game.current_player)
                     np = self.game.current_player
                     nm = self.model1 if np == 1 else self.model2
                     if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
@@ -872,14 +918,15 @@ class GameController:
                     self.main.board_widget.update()
                     self.main.update_game_status()
                     self.main.update_history_list()
-                    self.main.update_stats_display()
+        
                     self.main.update_player_status()
 
                 if result['game_over']:
                     self.handle_game_over(result)
                     return
 
-                self.main.start_thinking_timer(self.game.current_player)
+                if self.main:
+                    self.main.start_thinking_timer(self.game.current_player)
                 next_player = self.game.current_player
                 next_model = self.model1 if next_player == 1 else self.model2
                 if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
@@ -928,7 +975,6 @@ class GameController:
     def _on_move_success(self, from_row: int, from_col: int,
                           to_row: int, to_col: int,
                           current_player: int,
-                          tokens: int = 0,
                           source: str = '') -> None:
         """统一处理走子成功后的状态更新"""
         # 计时
@@ -945,11 +991,6 @@ class GameController:
         # 更新统计
         self.last_move_error = ''
         self.stats['move_count'] += 1
-        self.stats['estimated_tokens'] += tokens
-        if current_player == 1:
-            self.stats['red_tokens'] += tokens
-        else:
-            self.stats['black_tokens'] += tokens
 
         # 记录走子
         from_coord = f"{chr(65+from_col)}{from_row+1}"
@@ -982,8 +1023,8 @@ class GameController:
                 self.log(f"[PF诊断] 搜索回调版本不匹配({captured_version}!={self.game_version})，丢弃", 'INFO')
                 self._finish_ai_move()
                 return
-            if not self.is_active or self.game.game_over:
-                self.log(f"[PF诊断] 搜索回调状态异常(active={self.is_active} over={self.game.game_over})，丢弃", 'INFO')
+            if self.ai_manager._shutting_down or self.is_paused or not self.is_active or self.game.game_over:
+                self.log(f"[PF诊断] 搜索回调状态异常(shutdown={self.ai_manager._shutting_down} paused={self.is_paused} active={self.is_active} over={self.game.game_over})，丢弃", 'INFO')
                 self._finish_ai_move()
                 return
             on_done(move, player)
@@ -1006,13 +1047,14 @@ class GameController:
                 self.main.board_widget.update()
                 self.main.update_game_status()
                 self.main.update_history_list()
-                self.main.update_stats_display()
+    
                 self.main.update_player_status()
             if result.get('game_over'):
                 self._finish_ai_move()
                 self.handle_game_over(result)
                 return
-            self.main.start_thinking_timer(self.game.current_player)
+            if self.main:
+                self.main.start_thinking_timer(self.game.current_player)
             np = self.game.current_player
             nm = self.model1 if np == 1 else self.model2
             if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
@@ -1023,6 +1065,272 @@ class GameController:
             self.log(f"引擎兜底走子失败: {result.get('message', '未知')}", 'ERROR')
             self._finish_ai_move()
             self._fallback_to_search(player)
+
+    def _execute_llm_fallback(self, player: int) -> None:
+        """仲裁失败兜底：直接执行 LLM 暂存走法。
+
+        仲裁出错（连接问题、中断、第三方AI不在线等）时调用。
+        LLM 走法已经过合法性验证（在 on_ai_finished 中解析通过），直接执行。
+        """
+        if not self._arbitration_llm_move:
+            self._fallback_to_search(player)
+            return
+        fr, fc, tr, tc = self._arbitration_llm_move
+        result = self.game.move_piece(fr, fc, tr, tc)
+        if result['success']:
+            self._on_move_success(fr, fc, tr, tc, player, source='LLM(仲裁失败回退)')
+            self._random_action_count = 0
+            if self.main:
+                self.main.board_widget.update()
+                self.main.update_game_status()
+                self.main.update_history_list()
+                self.main.update_player_status()
+            if result.get('game_over'):
+                self._finish_ai_move()
+                self.handle_game_over(result)
+                return
+            if self.main:
+                self.main.start_thinking_timer(self.game.current_player)
+            np = self.game.current_player
+            nm = self.model1 if np == 1 else self.model2
+            if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
+                QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
+                    self.make_ai_move(expected_version=v))
+            self._finish_ai_move()
+        else:
+            self.log(f"LLM回退走子失败: {result.get('message', '未知')}", 'ERROR')
+            self._finish_ai_move()
+            self._fallback_to_search(player)
+
+    # ── 第三方仲裁（DeepSeek） ──
+
+    def _start_arbitration(self, player: int) -> None:
+        """启动 DeepSeek 第三方仲裁。
+
+        当 LLM 与引擎走法不一致时调用。
+        异步请求 DeepSeek 裁决，结果由 on_arbitration_finished 处理。
+        DeepSeek 不可用时直接采用 LLM 走法。
+        """
+        # 查找仲裁模型：优先 id='arbitration'，其次 type='deepseek'
+        arbitrator_model = None
+        if self.main and hasattr(self.main, 'model_manager'):
+            for m in self.main.model_manager.models:
+                if m.id == 'arbitration':
+                    arbitrator_model = m
+                    break
+            if not arbitrator_model:
+                for m in self.main.model_manager.models:
+                    if m.type and m.type == 'deepseek':
+                        arbitrator_model = m
+                        break
+
+        if not arbitrator_model:
+            self.log("⚠️ 未找到 DeepSeek 模型配置，仲裁跳过 → 采用 LLM 走法", 'WARNING')
+            self._finish_ai_move()
+            self._execute_llm_fallback(player)
+            return
+
+        player_name = '红方' if player == 1 else '黑方'
+
+        # 构建仲裁提示词
+        board_str = self.game.get_board_state_string()
+        history = self.game.format_move_history()
+        legal_moves = self.game.get_all_legal_moves(player)
+
+        opponent = 2 if player == 1 else 1
+        move_count = len(self.game.moves) + 1
+
+        # 零合法走法 = 不应到达这里（LLM 和引擎都已返回走法），但防御性检查
+        if len(legal_moves) == 0:
+            self.game.game_over = True
+            self.game.winner = opponent
+            self.log("仲裁时检测到零合法走法，游戏结束", 'ERROR')
+            self._finish_ai_move()
+            self.handle_game_over({
+                'game_over': True, 'winner': opponent,
+                'message': f"{'红方' if opponent == 1 else '黑方'}获胜"
+            })
+            return
+
+        legal_moves_str = format_legal_moves(legal_moves, self.game.board)
+
+        # LLM 走法描述
+        lfr, lfc, ltr, ltc = self._arbitration_llm_move
+        lpiece = self.game.board[lfr][lfc]
+        lpn = PIECE_SYMBOLS.get(lpiece, '?')
+        llm_move_str = f"{lpn} {chr(65+lfc)}{lfr+1}→{chr(65+ltc)}{ltr+1}"
+
+        # 引擎走法描述
+        efr, efc, etr, etc = self._arbitration_engine_move
+        epiece = self.game.board[efr][efc]
+        epn = PIECE_SYMBOLS.get(epiece, '?')
+        engine_move_str = f"{epn} {chr(65+efc)}{efr+1}→{chr(65+etc)}{etr+1}"
+
+        # 将军状态
+        in_check = self.game._is_in_check(player)
+        opponent_in_check = self.game._is_in_check(opponent)
+
+        prompt = build_arbitration_prompt(
+            player=player,
+            board_str=board_str,
+            history=history,
+            legal_moves_str=legal_moves_str,
+            llm_move_str=llm_move_str,
+            llm_reasoning=self._arbitration_llm_text,
+            engine_move_str=engine_move_str,
+            engine_name=self._arbitration_engine_name,
+            in_check=in_check,
+            opponent_in_check=opponent_in_check,
+            move_count=move_count,
+        )
+
+        system_prompt = get_arbitration_system_prompt()
+        current_version = self.game_version
+
+        from domain.prompts import TOOLS_BASIC
+
+        self.arbitration_count += 1
+        self.log(f"🔨 已启动 DeepSeek 仲裁 ({arbitrator_model.name}) 第 {self.arbitration_count} 次", 'INFO')
+
+        # 更新 UI 仲裁次数
+        if self.main:
+            self.main.update_ai_score()
+
+        worker = AIWorker(
+            arbitrator_model, prompt, None, f"{player_name}仲裁",
+            version=current_version,
+            cancel_version=self.ai_manager.cancel_version,
+            think=True,
+            system_prompt=system_prompt,
+            tools=TOOLS_BASIC,
+            timeout=ARBITRATION_TIMEOUT_SECONDS,
+            game=self.game,
+            current_player=player,
+        )
+        worker.signals.finished.connect(self.on_arbitration_finished)
+        self.ai_manager.set_active_worker(worker)
+        t = threading.Thread(target=worker.run, daemon=True)
+        t.start()
+        self.ai_manager.set_active_thread(t)
+
+    def on_arbitration_finished(self, from_coord: str, to_coord: str,
+                                 full_text: str, error: str,
+                                 tokens: int, version: int,
+                                 cancel_version: int = 0) -> None:
+        """仲裁完成回调：评分 + 执行仲裁结果。"""
+        if self.ai_manager._shutting_down:
+            return
+        if version != self.game_version:
+            self._finish_ai_move()
+            return
+        if cancel_version != self.ai_manager.cancel_version:
+            self._finish_ai_move()
+            return
+        if self.is_paused or not self.is_active or self.game.game_over:
+            self._finish_ai_move()
+            return
+
+        current_player = self.game.current_player
+
+        # ── 仲裁失败 → 采用 LLM 走法兜底（不计分）──
+        if error or not from_coord or not to_coord:
+            self.log(f"⚠️ DeepSeek 仲裁失败 ({error or '无有效走法'})，采用 LLM 走法（不计分）", 'WARNING')
+            self._finish_ai_move()
+            self._execute_llm_fallback(current_player)
+            return
+
+        # ── 解析仲裁坐标 ──
+        try:
+            arb_col = ord(from_coord[0].upper()) - 65
+            arb_row = int(from_coord[1:]) - 1
+            arb_to_col = ord(to_coord[0].upper()) - 65
+            arb_to_row = int(to_coord[1:]) - 1
+            if not (self.game.in_board(arb_row, arb_col) and
+                    self.game.in_board(arb_to_row, arb_to_col)):
+                raise ValueError
+        except (ValueError, IndexError):
+            self.log(f"仲裁坐标解析失败 '{from_coord}'→'{to_coord}'，采用 LLM 走法（不计分）", 'WARNING')
+            self._finish_ai_move()
+            self._execute_llm_fallback(current_player)
+            return
+
+        arb_move = (arb_row, arb_col, arb_to_row, arb_to_col)
+        llm_move = self._arbitration_llm_move
+
+        # ── 计分 ──
+        if arb_move == llm_move:
+            self.ai_score += 1
+            score_change = '+1'
+            score_reason = 'LLM 与仲裁一致'
+        else:
+            score_change = '0'
+            score_reason = 'LLM 与仲裁不一致'
+
+        self.log(
+            f"📊 仲裁计分: {score_change} (总分: {self.ai_score}) — {score_reason}",
+            'INFO')
+
+        # 更新 UI 计分
+        if self.main:
+            self.main.update_ai_score()
+
+        # ── 日志仲裁分析 ──
+        if full_text:
+            self.log(f"  🔨 仲裁分析:\n{full_text}\n", 'INFO')
+
+        # 格式化双方走法用于日志
+        arb_piece = self.game.board[arb_row][arb_col]
+        arb_pn = PIECE_SYMBOLS.get(arb_piece, '?')
+        arb_rec = f"{arb_pn} {chr(65+arb_col)}{arb_row+1}→{chr(65+arb_to_col)}{arb_to_row+1}"
+
+        lfr, lfc, ltr, ltc = llm_move
+        lpiece = self.game.board[lfr][lfc]
+        lpn = PIECE_SYMBOLS.get(lpiece, '?')
+        llm_rec = f"{lpn} {chr(65+lfc)}{lfr+1}→{chr(65+ltc)}{ltr+1}"
+
+        efr, efc, etr, etc = self._arbitration_engine_move
+        epiece = self.game.board[efr][efc]
+        epn = PIECE_SYMBOLS.get(epiece, '?')
+        eng_rec = f"{epn} {chr(65+efc)}{efr+1}→{chr(65+etc)}{etr+1}"
+
+        self.log(
+            f"⚖️ 仲裁结果: {arb_rec} | LLM: {llm_rec} | 引擎: {eng_rec} | "
+            f"{'✅ 采纳LLM' if arb_move == llm_move else '🔄 采纳引擎'}",
+            'WARNING')
+
+        # ── 执行仲裁走法 ──
+        result = self.game.move_piece(arb_row, arb_col, arb_to_row, arb_to_col)
+        if not result['success']:
+            reason = result.get('message', '未知原因')
+            self.log(f"仲裁走法非法 ({reason})，回退 LLM 走法（不计分）", 'ERROR')
+            self._finish_ai_move()
+            self._execute_llm_fallback(current_player)
+            return
+
+        self._on_move_success(arb_row, arb_col, arb_to_row, arb_to_col,
+                              current_player,
+                              source=f'仲裁({"LLM" if arb_move == llm_move else "引擎"})')
+
+        if self.main:
+            self.main.board_widget.update()
+            self.main.update_game_status()
+            self.main.update_history_list()
+            self.main.update_player_status()
+
+        self._finish_ai_move()
+
+        if result.get('game_over'):
+            self.handle_game_over(result)
+            return
+
+        # ── 下一步 ──
+        if self.main:
+            self.main.start_thinking_timer(self.game.current_player)
+        next_player = self.game.current_player
+        next_model = self.model1 if next_player == 1 else self.model2
+        if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
+            QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
+                self.make_ai_move(expected_version=v))
 
     def _finish_ai_move(self) -> None:
         self.ai_manager.set_busy(False)

@@ -8,7 +8,7 @@
 """
 
 from domain.game import ChineseChessGame
-from domain.constants import BOARD_HEIGHT, BOARD_WIDTH, PIECE_SYMBOLS
+from domain.constants import BOARD_HEIGHT, BOARD_WIDTH, PIECE_SYMBOLS, MCTS_TIME_LIMIT
 
 # ── 人类玩家 Sentinel ──
 class _HumanSentinel:
@@ -547,6 +547,144 @@ def get_system_prompt_lite() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # 用户提示词 — 当前局面的即时信息
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 仲裁系统提示词与用户提示词 — 第三方 DeepSeek 裁决
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_arbitration_system_prompt() -> str:
+    """仲裁裁判系统提示词：中立、权威，只负责在 LLM 与引擎之间做裁决。"""
+    return """# 身份：中国象棋仲裁裁判
+
+你是中国象棋高级仲裁裁判。当前对局中，LLM 与搜索引擎对最佳走法产生了分歧。
+你将看到：
+1. 当前棋盘局面（含是否被将军、对局阶段）
+2. 所有合法走法
+3. 两个候选走法及其分析
+
+你的唯一任务：**综合战术与战略，判断哪个走法客观上更优**，然后调用 `move_piece` 提交你的选择。
+
+## 评判标准（按优先级）
+1. **杀棋** — 能否直接导致将杀或不可避免的杀棋威胁
+2. **子力优势** — 能否吃子、捉双、抽将获利
+3. **将军/威胁** — 能否将军对方并获取局面优势
+4. **局面改善** — 子力活跃度、控制范围、将/帅的安全性
+5. **战略价值** — 长远来看哪步更有利于取胜
+
+## 约束
+- **必须从给定的两个候选走法中二选一**，不得提出第三步走法。
+- 若两步棋客观上难分高下，优先选择更安全（不给对方留战术机会）的那步。
+- 如果某候选存在明显战术漏洞（被捉双、被抽将、送子等），必须否决。
+
+## 工作流程
+1. 先确认两个候选走法都在合法走法列表中
+2. 简要对比优劣（控制在 200 字以内）
+3. 选择更优的走法
+4. **必须调用 `move_piece(from="...", to="...")` 工具提交**
+
+如果不调用 move_piece 工具，你的裁决将无效。"""
+
+
+def build_arbitration_prompt(
+    player: int,
+    board_str: str,
+    history: str,
+    legal_moves_str: str,
+    llm_move_str: str,
+    llm_reasoning: str,
+    engine_move_str: str,
+    engine_name: str,
+    in_check: bool = False,
+    opponent_in_check: bool = False,
+    move_count: int = 0,
+) -> str:
+    """构建仲裁用户提示词。
+
+    Args:
+        player: 当前走子方 (1=红, 2=黑)
+        board_str: 棋盘文本表示
+        history: 走子历史
+        legal_moves_str: 合法走法列表
+        llm_move_str: LLM 选择的走法描述（如 "車 H10→H8"）
+        llm_reasoning: LLM 的完整思考文本
+        engine_move_str: 引擎推荐的走法描述
+        engine_name: 引擎名称（Pikafish / MCTS）
+        in_check: 当前走子方是否被将军
+        opponent_in_check: 对方是否被将军
+        move_count: 当前回合数
+
+    Returns:
+        完整的仲裁用户提示词
+    """
+    player_display = '红方' if player == 1 else '黑方'
+    opponent_display = '黑方' if player == 1 else '红方'
+    player_color = '大写字母' if player == 1 else '小写字母'
+
+    # 阶段判断
+    if move_count <= 10:
+        phase = '开局'
+    elif move_count <= 25:
+        phase = '中局'
+    else:
+        phase = '残局'
+
+    # 截断 LLM 思考文本（保留最关键的分析部分）
+    llm_summary = llm_reasoning
+    if len(llm_summary) > 800:
+        llm_summary = llm_summary[:500] + "\n...（中间省略）...\n" + llm_summary[-300:]
+
+    parts = []
+    parts.append(f"## 当前局面：{player_display}（{player_color}）走子")
+    parts.append(f"对手：{opponent_display} · 第 {move_count} 回合 · {phase}")
+    parts.append("")
+
+    # 紧急状态
+    if in_check:
+        parts.append("## ⚠️ 当前走子方正在被将军！应将优先。")
+        parts.append("")
+    if opponent_in_check:
+        parts.append("## ✅ 当前走子方正在将军对方！")
+        parts.append("")
+
+    parts.append("## 当前棋盘")
+    parts.append(f"（你 = 大写 {player_display}，对手 = 小写 {opponent_display}，`.` = 空位）")
+    parts.append("```")
+    parts.append(board_str.strip())
+    parts.append("```")
+    parts.append("")
+
+    parts.append("## 走子历史")
+    parts.append(history if history else "（开局第一步）")
+    parts.append("")
+
+    parts.append(legal_moves_str)
+    parts.append("")
+
+    parts.append("---")
+    parts.append("")
+    parts.append("## 分歧：两个候选走法（请从中二选一）")
+    parts.append("")
+
+    parts.append(f"### 候选 1 — LLM 选择：**{llm_move_str}**")
+    parts.append("LLM 分析思路：")
+    parts.append("```")
+    parts.append(llm_summary)
+    parts.append("```")
+    parts.append("")
+
+    parts.append(f"### 候选 2 — {engine_name} 推荐：**{engine_move_str}**")
+    parts.append(f"{engine_name} 通过深度搜索（{MCTS_TIME_LIMIT:.0f} 秒）计算得出，擅长发现捉双、抽将、杀棋等战术手段。")
+    parts.append("")
+
+    parts.append("---")
+    parts.append("")
+    parts.append("## 你的裁决")
+    parts.append("请先确认以上两个走法均在合法走法列表中，然后对比优劣（200 字以内），")
+    parts.append("选择更优者调用 `move_piece` 提交。**必须二选一，不要提出其他走法。**")
+    parts.append("move_piece(from=\"Xy\", to=\"Xy\")  列 A~I, 行 1~10")
+
+    return "\n".join(parts)
+
 
 def format_legal_moves(legal_moves: list, board: list) -> str:
     """将合法走法列表格式化为紧凑的分组文本（公开接口）。

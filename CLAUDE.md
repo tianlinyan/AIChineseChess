@@ -21,84 +21,97 @@ domain/  ──→  ai/  ──→  app/  ──→  ui/  ──→  main.py
 
 ### `domain/` — pure game logic, zero framework imports
 
-- **`game.py`** — `ChineseChessGame`: 10×9 board. Uppercase = Red, lowercase = Black. Core move/checkmate logic.
-- **`evaluation.py`** — Static evaluation from Red's perspective. Detects Chinese Chess patterns: 卧槽马/挂角马, 双车错/重炮, 当头炮.
-- **`search.py`** — `SearchEngine`: Alpha-Beta + quiescence + check extensions. ~3000 nodes/sec.
-- **`openings.py`** — 19 standard opening lines (中炮对屏风马, 顺炮, etc.).
-- **`models.py`** — `ModelInfo` dataclass. `constants.py` — Board size, search config, AI constants.
-- **`prompts.py`** — Tool-calling prompt builder with legal moves, few-shot examples. Tool calling always enforced.
+- **`game.py`** — `ChineseChessGame`: 10×9 board. Uppercase = Red, lowercase = Black. Core move/checkmate logic, move validation, position hashing for repetition detection.
+- **`evaluation.py`** — Static evaluation from Red's perspective (~40 features). Linear model: material + PST (7 piece types × 2 colors) + mobility + pawn structure + king safety + open files + piece coordination + center/river control. Detects tactical patterns: 卧槽马/挂角马, 双车错/重炮/铁门栓/当头炮. Endgame-aware (switches piece values, king activation bonus at ≤14 pieces).
+- **`search.py`** — `SearchEngine`: Alpha-Beta + PVS (Principal Variation Search) + quiescence + check extensions + null-move pruning + transposition table (1M-entry FIFO). Iterative deepening with time control. ~3000 nodes/sec. Used as a **tool by LLM** (not directly by controller).
+- **`mcts.py`** — `MCTSEngine`: Monte Carlo Tree Search with UCB1, prior-guided search (LLM virtual visits), evaluation-function-driven simulation. Used by **controller** for tactical verification and as fallback.
+- **`pikafish.py`** — `PikafishEngine`: UCI protocol wrapper for the Pikafish NNUE engine (Stockfish-derived, master-level). Async search via daemon thread + `pyqtSignal` relay to main thread. Falls back silently to MCTS if binary not found. Binary goes in `engines/pikafish.exe` or set `PIKAFISH_PATH` env var.
+- **`egtb.py`** — Endgame tablebase: queries chessdb.cn cloud database for ≤4-piece endgames (DTM/win/side). Local heuristic for ≤10 pieces. Cached with 5-min TTL.
+- **`openings.py`** — 19 standard opening lines (中炮对屏风马, 顺炮, etc.), weighted random selection by prefix-matching move history.
+- **`models.py`** — `ModelInfo` dataclass (`id`, `name`, `type`, `endpoint`, `model`, `api_key`, `tools_choice`, `system_prompt`, `options`).
+- **`constants.py`** — Board size, search config, MCTS config, AI timeout/retry settings, vision mode config.
+- **`prompts.py`** — System prompts (full ~400 lines + lite version for DeepSeek), user prompt builder, arbitration prompt, legal-move formatter, tool definitions (`move_piece`, `search_best_move`, `evaluate_position`), and `HUMAN_MODEL` sentinel.
 
 ### `ai/` — AI API interaction
 
-- **`worker.py`** — Runs in raw `threading.Thread` (cancellable via `requests.Session.close()`). Sends OpenAI-compatible tool-calling requests. Auto-detects LM Studio for think param handling.
-- **`manager.py`** — Worker lifecycle + stale-response rejection via version gating.
+- **`worker.py`** — `AIWorker` (extends `QRunnable`). Runs in raw `threading.Thread` (cancellable via `requests.Session.close()`). Implements **multi-turn agentic loop** (up to 4 turns): LLM can call `search_best_move` (runs Alpha-Beta engine locally) or `evaluate_position` (runs static eval), then ultimately `move_piece`. Auto-detects LM Studio for `think` param handling. Fallback text parser if tool-calling fails.
+- **`manager.py`** — `AIManager`: worker lifecycle + `cancel_version` gating for stale-response rejection.
+- **`parser.py`** — Regex coordinate parser (`[A-I]\d{1,2}`) as last-resort fallback when LLM returns text without tool calls.
 
 ### `app/` — orchestration
 
-- **`controller.py`** — `GameController`: central state machine. **Three AI modes**: `hybrid` (LLM + search, default), `search_only`, `llm_only`. Fallback chain: LLM failure → search engine. Retry: up to 3 (non-retryable errors skip). Version-gated to reject stale responses.
+- **`controller.py`** — `GameController`: central state machine. Three AI modes: `hybrid` (default), `search_only`, `llm_only`. Manages Pikafish async lifecycle, version gating, retry logic (non-retryable errors skip retries), fallback chain. Key subsystems:
+  - **Opening book** — checked first, saves tokens
+  - **Hybrid mode** — engine (Pikafish→MCTS) runs first → result injected into LLM prompt as "引擎参考走法" → LLM makes final decision → if LLM disagrees with engine, **DeepSeek arbitration** is triggered
+  - **Arbitration** — when LLM and engine disagree in hybrid mode, a third-party DeepSeek model judges which move is better. Scores tracked (`ai_score`): +1 when LLM matches arbitrator, -1 when not. On arbitration failure, LLM's move is used as fallback.
+  - **Fallback chain**: LLM failure → engine result → MCTS search → random move (capped at 3 consecutive)
 - **`protocols.py`** — `MainWindowProtocol`: structural typing for `GameController.main`, breaks circular dependency.
 
-### `services/` + `ui/` — config loading, logging, PyQt6 GUI
+### `services/` — config & logging
 
-### AI Decision Flow (Hybrid Mode — default)
+- **`models.py`** — `ModelManager`: loads `models.json`, resolves `${VAR_NAME}` env-var references in API keys, groups models by `-p1`/`-p2` suffix for player-specific assignment.
+- **`logging.py`** — `LogManager`: HTML-colored log output to `QTextEdit`, timestamped.
+
+### `ui/` — PyQt6 GUI
+
+`board.py` (board widget + image capture for vision mode), `window.py` (main window), `panel.py` (side panel), `theme.py`.
+
+## AI Decision Flow (Hybrid Mode — default)
 
 ```
 Controller.make_ai_move()
-  ├─ 1. Opening book lookup → if found, play immediately (saves tokens)
-  ├─ 2. If search_only mode → MCTS search → best move
-  │    └─ _mcts_search()                  # app/controller.py
-  ├─ 3. Otherwise (hybrid/llm_only):
-  │    ├─ format_legal_moves()          # domain/prompts.py
-  │    ├─ build_move_prompt()           # domain/prompts.py (legal moves included)
-  │    ├─ AIWorker(model, prompt, ...)  # ai/worker.py
-  │    └─ threading.Thread(worker.run)
-  │         └─ requests.post(endpoint)  # OpenAI-compatible API
-  │              └─ signals.finished.emit(...)
-  └─ 4. Controller.on_ai_finished()
-       ├─ Hybrid mode: MCTS 验证 LLM 走法 → 最优走法
-       ├─ Parse coords → game.move_piece()
-       ├─ If illegal → MCTS search fallback (_fallback_to_search)
-       ├─ If legal → update UI → schedule next turn via QTimer
-       └─ If LLM total failure → _fallback_to_search()
+  ├─ 1. Opening book lookup → if found, play immediately
+  ├─ 2. If search_only mode:
+  │    └─ Pikafish async → _on_pikafish_search_done (signal relay)
+  │         └─ Fallback: MCTS sync if Pikafish unavailable
+  ├─ 3. If hybrid mode:
+  │    ├─ Engine-first: Pikafish async → MCTS fallback
+  │    ├─ _on_hybrid_engine_done(): validate engine move, format hint
+  │    ├─ _start_llm_request(): build prompt (with engine hint), launch worker
+  │    ├─ AIWorker._agentic_loop(): multi-turn tool calling
+  │    │    └─ LLM may call search_best_move / evaluate_position before move_piece
+  │    ├─ on_ai_finished(): parse coords
+  │    │    ├─ LLM == engine → execute immediately
+  │    │    └─ LLM != engine → _start_arbitration() (DeepSeek judge)
+  │    │         └─ on_arbitration_finished(): score + execute winner
+  │    └─ LLM failure → _execute_fallback_move (engine result)
+  ├─ 4. If llm_only mode:
+  │    └─ LLM directly, retry up to 3 times, then MCTS fallback
+  └─ 5. Final safety net: _random_move (capped at 3 consecutive)
 ```
 
-### MCTS Search Engine Flow (主要搜索引擎)
+## Two Search Engines — Distinct Roles
 
-```
-MCTSEngine.search(game, player, priors)
-  ├─ 构建根节点，展开所有合法走法
-  ├─ 应用 LLM 先验（虚拟访问次数字段）
-  ├─ 主循环（600次模拟或5秒上限）
-  │    ├─ 1. Selection — 沿 UCB1 最大路径下降
-  │    ├─ 2. Expansion  — 访问0次的叶节点展开子节点
-  │    ├─ 3. Simulation — 用评估函数快速评分（无走法生成）
-  │    └─ 4. Backprop   — 沿路径回传价值
-  └─ 返回访问次数最多的走法
-```
+| Engine | File | Used By | Role |
+|--------|------|---------|------|
+| `MCTSEngine` | `domain/mcts.py` | Controller | Tactical verification, hybrid engine-first, search_only mode, all fallbacks |
+| `SearchEngine` | `domain/search.py` | LLM (via `search_best_move` tool) | On-demand deep analysis requested by LLM during agentic loop |
 
-### Alpha-Beta Search Engine Flow（LLM 工具调用用）
+Both are distinct from **Pikafish** (`domain/pikafish.py`), the external NNUE engine that is the preferred engine for the controller. Priority: Pikafish → MCTSEngine → (last resort: random).
 
-```
-SearchEngine.search(game, player)
-  ├─ Iterative deepening (depth 1 → max_depth)
-  │    └─ For each root move:
-  │         ├─ _make_move (fast board update)
-  │         ├─ _alpha_beta(depth-1, alpha, beta)
-  │         │    ├─ Leaf (depth≤0) → _quiescence (captures only)
-  │         │    │    └─ _fast_eval (no move generation)
-  │         │    ├─ get_all_legal_moves → _order_moves
-  │         │    └─ Recurse with alpha-beta pruning
-  │         └─ _unmake_move (restore board)
-  └─ Return best move found
-```
+## Model Configuration (`models.json`)
+
+Models are configured in `models.json` at project root. Key conventions:
+- API keys use `${VAR_NAME}` syntax for env-var substitution
+- `-p1` suffix on model `id` → shown only in red-side dropdown; `-p2` → black-side only
+- A model with `id: "arbitration"` or `type: "deepseek"` is auto-selected as the arbitration judge
+- `type: "lmstudio"` triggers LM Studio-specific `think` param handling
+- `type: "deepseek"` uses `think` field in API payload
+- `system_prompt` field on a model overrides the default system prompt
+- `tools_choice` field maps to API `tool_choice` parameter
 
 ## Key design decisions
 
-- **Hybrid AI**: LLM provides strategic understanding; MCTS search provides tactical verification and precision. On LLM failure, MCTS takes over (no more random moves).
-- **Legal moves in prompt**: All legal moves are formatted in the prompt grouped by piece type. LLM selects from the list instead of guessing coordinates, drastically reducing error rate.
-- **Opening book**: 19 standard opening lines cover the first 4-6 half-moves, saving tokens and ensuring strong opening play.
-- **Always tool calling**: No UI toggle. Prompts only instruct function calling. Parser exists only as fallback for models that return text despite receiving tools.
+- **Hybrid AI**: Engine (Pikafish/MCTS) provides tactical precision; LLM provides strategic understanding and final authority. On disagreement, DeepSeek arbitrates.
+- **Engine-first in hybrid**: Engine runs before LLM, so engine recommendation is available in the prompt immediately — no second round-trip.
+- **Legal moves in prompt**: All legal moves are formatted grouped by piece type. LLM selects from the list instead of guessing coordinates, drastically reducing error rate.
+- **Multi-turn agentic loop**: LLM can call tools (`search_best_move`, `evaluate_position`) for deeper analysis before committing to `move_piece`. Max 4 turns to prevent infinite loops.
+- **Always tool calling**: No UI toggle. Prompts instruct function calling. Text parser exists only as fallback for models that return text despite receiving tools.
 - **Thread not threadpool**: AIWorker uses raw `threading.Thread` so `requests.Session.close()` can abort in-flight HTTP from `cancel()`.
-- **Version gating**: Every AI request carries `game_version`. Reset/pause increments it. Stale-response rejection prevents race conditions from overlapping AI calls.
+- **Version gating**: Every AI request carries `game_version`. Reset/pause increments it. `cancel_version` (from `AIManager`) adds a second layer. Stale-response rejection prevents race conditions from overlapping AI calls.
+- **Pikafish async via signal relay**: `_PikafishRelay` (QObject with `pyqtSignal`) bridges daemon thread results to Qt main thread, avoiding UI freezes.
 - **Chinese UI**: All UI text and prompts are in Chinese. No i18n infrastructure.
 - **No persistence**: Game state is in-memory only. `QSettings` used only for left-panel collapsed state.
+- **Vision mode**: When enabled, board is sent as JPEG base64 image to multimodal models instead of text representation.
+- **Opening book**: 19 standard opening lines cover the first 4-6 half-moves, saving tokens and ensuring strong opening play.
+- **EGTB integration**: chessdb.cn cloud queries for ≤4-piece endgames with 5-min cache; local heuristic for ≤10 pieces.

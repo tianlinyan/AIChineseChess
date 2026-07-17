@@ -10,7 +10,7 @@ from ai.models import ModelInfo
 from ai.parser import parse_coordinates_from_text
 from domain.constants import (
     AI_TIMEOUT_SECONDS, AI_OUTPUT_TRUNCATE_LENGTH,
-    AI_OUTPUT_MIN_TRIM_POSITION, TOKEN_ESTIMATE_DIVISOR,
+    AI_OUTPUT_MIN_TRIM_POSITION,
     BOARD_HEIGHT, BOARD_WIDTH,
     PIECE_SYMBOLS,
 )
@@ -39,6 +39,7 @@ class AIWorker(QRunnable):
                  think: bool = True,
                  system_prompt: str = '',
                  tools: Optional[tuple] = None,
+                 timeout: int = AI_TIMEOUT_SECONDS,
                  # ── 工具执行所需 ──
                  game: Optional[ChineseChessGame] = None,
                  current_player: int = 0) -> None:
@@ -52,6 +53,7 @@ class AIWorker(QRunnable):
         self.think = think
         self.system_prompt = system_prompt
         self.tools = tools if tools is not None else DEFAULT_TOOLS
+        self.timeout = timeout
         self.game = game
         self.current_player = current_player
         self.signals = AIWorkerSignals()
@@ -65,13 +67,13 @@ class AIWorker(QRunnable):
         self._session = requests.Session()
         self._session.trust_env = False
         try:
-            from_coord, to_coord, full_text, tokens = self._agentic_loop(self._session)
+            from_coord, to_coord, full_text = self._agentic_loop(self._session)
             error = ''
             if (not from_coord or not to_coord) and 'ERROR:' in full_text:
                 error = full_text
                 full_text = ''
             self.signals.finished.emit(
-                from_coord, to_coord, full_text, error, tokens,
+                from_coord, to_coord, full_text, error, 0,
                 self.version, self.cancel_version)
         except Exception as e:
             self.signals.finished.emit(
@@ -95,7 +97,6 @@ class AIWorker(QRunnable):
 
         from_coord = ''
         to_coord = ''
-        total_tokens = 0
 
         for turn in range(MAX_TOOL_TURNS):
             if self._cancelled.is_set():
@@ -120,13 +121,6 @@ class AIWorker(QRunnable):
             if content:
                 self._all_texts.append(content)
 
-            # Token 累计
-            usage = data.get('usage', {})
-            if 'total_tokens' in usage:
-                total_tokens += usage['total_tokens']
-            else:
-                total_tokens += len(content) // TOKEN_ESTIMATE_DIVISOR
-
             # ── 提取 tool_calls ──
             tool_calls = message.get('tool_calls', [])
             if not tool_calls:
@@ -134,7 +128,7 @@ class AIWorker(QRunnable):
                 fc, tc = parse_coordinates_from_text(
                     '\n'.join(self._all_texts))
                 if fc and tc:
-                    return fc, tc, self._build_full_text(), total_tokens
+                    return fc, tc, self._build_full_text()
                 # 无法解析，继续等下一轮（或最终失败）
                 break
 
@@ -154,7 +148,7 @@ class AIWorker(QRunnable):
             if move_piece_call is not None:
                 fc, tc = self._extract_move_from_call(move_piece_call)
                 if fc and tc:
-                    return fc, tc, self._build_full_text(), total_tokens
+                    return fc, tc, self._build_full_text()
                 # move_piece 参数无效，继续
 
             # ── 执行其他工具调用 ──
@@ -188,15 +182,15 @@ class AIWorker(QRunnable):
             for tool_entry in tool_calls:
                 fc2, tc2 = self._extract_move_from_call(tool_entry)
                 if fc2 and tc2:
-                    return fc2, tc2, self._build_full_text(), total_tokens
+                    return fc2, tc2, self._build_full_text()
             break
 
         # ── 所有轮次结束，最后一次尝试文本解析 ──
         full = self._build_full_text()
         fc, tc = parse_coordinates_from_text(full)
         if fc and tc:
-            return fc, tc, full, total_tokens
-        return '', '', f'错误: {MAX_TOOL_TURNS} 轮工具调用后未找到有效走法', total_tokens
+            return fc, tc, full
+        return '', '', f'错误: {MAX_TOOL_TURNS} 轮工具调用后未找到有效走法'
 
     # ── 工具执行 ──
 
@@ -454,7 +448,7 @@ class AIWorker(QRunnable):
         try:
             resp = session.post(
                 self.model_info.endpoint, json=payload, headers=headers,
-                timeout=(AI_TIMEOUT_SECONDS, AI_TIMEOUT_SECONDS))
+                timeout=(self.timeout, self.timeout))
             resp.raise_for_status()
             return resp
         except requests.exceptions.Timeout:
