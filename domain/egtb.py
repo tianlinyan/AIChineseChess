@@ -13,6 +13,8 @@ import urllib.error
 import urllib.parse
 from typing import Optional, Tuple
 
+from domain.fen import board_to_fen
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 配置
@@ -29,33 +31,6 @@ CHESSDB_ENABLED = True         # 是否启用云库查询
 # ══════════════════════════════════════════════════════════════════════════════
 
 _cache: dict = {}              # {fen_key: (dtm, win_side, timestamp)}
-
-
-def _board_to_fen(board: list, current_player: int) -> str:
-    """将 10×9 棋盘转为中国象棋 FEN 字符串（用于 chessdb.cn 查询）。
-
-    FEN 格式：rows/rows/.../rows <side>
-    - 大写=红方，小写=黑方，数字=连续空格数
-    - w=红方走, b=黑方走
-    """
-    rows = []
-    for r in range(10):
-        row_str = ""
-        empty = 0
-        for c in range(9):
-            p = board[r][c]
-            if p == '.':
-                empty += 1
-            else:
-                if empty > 0:
-                    row_str += str(empty)
-                    empty = 0
-                row_str += p
-        if empty > 0:
-            row_str += str(empty)
-        rows.append(row_str)
-    side = 'w' if current_player == 1 else 'b'
-    return '/'.join(rows) + ' ' + side
 
 
 def _fen_cache_key(board: list, current_player: int) -> str:
@@ -92,7 +67,7 @@ def probe_cloud(board: list, current_player: int) -> Optional[dict]:
         del _cache[cache_key]
 
     # 构造 FEN 并查询
-    fen = _board_to_fen(board, current_player)
+    fen = board_to_fen(board, current_player)
     url = CHESSDB_URL + '?fen=' + urllib.parse.quote(fen, safe='')
 
     try:
@@ -128,7 +103,7 @@ def _dtm_to_score(dtm: int, win: int, current_player: int) -> float:
     """
     if win == 0:
         return 0.0
-    base = 99999 - dtm * 10  # 与 search.MATE_SCORE 一致
+    base = 99999 - dtm * 10  # 与 search.JIANGSHA_SCORE 一致
     if win == 1:    # 红胜
         return base if current_player == 1 else -base
     else:            # 黑胜

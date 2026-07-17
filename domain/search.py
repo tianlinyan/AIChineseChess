@@ -25,10 +25,11 @@
 """
 
 import time
+from collections import OrderedDict
 from enum import IntEnum
 from typing import Optional, Callable, NamedTuple
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT
+from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, SEARCH_TIME_LIMIT
 from domain.evaluation import (
     evaluate, evaluate_move_ordering, PIECE_VALUE,
 )
@@ -56,12 +57,12 @@ TT_MAX_SIZE = 1_000_000
 class TranspositionTable:
     """置换表 — 缓存已搜索过的局面，避免跨分支重复计算。
 
-    用 Python dict 实现，key 为 position_hash(), value 为 TTEntry。
-    容量达上限时淘汰最旧的一半条目（FIFO），防止内存无限增长。
+    用 OrderedDict 实现 LRU 淘汰：最近访问的条目移至末尾，
+    容量达上限时淘汰最久未用的条目（O(1)），无大规模内存分配。
     """
 
     def __init__(self) -> None:
-        self._table: dict = {}
+        self._table: OrderedDict = OrderedDict()
         self._hits: int = 0
         self._probes: int = 0
 
@@ -75,8 +76,7 @@ class TranspositionTable:
         """查找置换表。
 
         Negamax 版本：alpha/beta/score 均以当前局面走子方视角表示。
-        置换表中存储的 score 也以存储时走子方视角表示——同一局面的
-        position_hash 包含走子方，因此自动保持视角一致。
+        命中时将条目移至末尾（标记为最近使用）。
 
         Returns:
             (hit: bool, score: float, best_move: tuple | None)
@@ -85,6 +85,8 @@ class TranspositionTable:
         entry = self._table.get(hash_key)
         if entry is None:
             return False, 0.0, None
+        # LRU: 标记为最近访问
+        self._table.move_to_end(hash_key)
         if entry.depth < depth:
             return False, 0.0, entry.best_move  # 深度不够，但 best_move 可用于排序
 
@@ -102,15 +104,20 @@ class TranspositionTable:
 
     def store(self, hash_key: int, depth: int, score: float,
               flag: TTFlag, best_move: tuple) -> None:
-        """存入置换表。深度优先替换：同 hash 下保留深度更大的条目。"""
+        """存入置换表。深度优先替换：同 hash 下保留深度更大的条目。
+
+        LRU 淘汰：满容量时 pop 最旧条目（O(1)），消除旧 FIFO 的
+        list(self._table.keys())[:N] 大规模内存分配。
+        """
         existing = self._table.get(hash_key)
-        if existing is not None and existing.depth >= depth:
-            return  # 已有更深或同深度的条目，保留
-        # 容量控制：达到上限时淘汰最旧的一半条目（FIFO 策略）
+        if existing is not None:
+            if existing.depth >= depth:
+                return  # 已有更深或同深度的条目，保留
+            # 删除旧条目，下面重新插入（更新深度+LRU位置）
+            del self._table[hash_key]
+        # 容量控制：LRU 淘汰最久未用的一个条目
         if len(self._table) >= TT_MAX_SIZE:
-            keys_to_evict = list(self._table.keys())[:len(self._table) // 2]
-            for key in keys_to_evict:
-                del self._table[key]
+            self._table.popitem(last=False)  # O(1) FIFO → 实际即为 LRU
         self._table[hash_key] = TTEntry(depth, score, flag, best_move)
 
     @property
@@ -129,7 +136,7 @@ class TranspositionTable:
 # ══════════════════════════════════════════════════════════════════════════════
 
 DEFAULT_MAX_DEPTH = 5
-DEFAULT_TIME_LIMIT = 15.0
+DEFAULT_TIME_LIMIT = SEARCH_TIME_LIMIT
 DEFAULT_QUIESCENCE_DEPTH = 4    # 静态搜索最大额外深度
 CHECK_EXTENSION_DEPTH = 1       # 将军时加深度（仅每分支一次，防止无限递归）
 NULL_MOVE_R = 3                 # 空着裁剪缩减因子（>2 以保证验证深度足够）
@@ -137,8 +144,8 @@ NULL_MOVE_MIN_DEPTH = 4         # 空着裁剪最小深度（R+1）
 ZUGZWANG_PIECE_LIMIT = 8        # 少于该子力数不进行空着裁剪（防止逼着误判）
 
 # Negamax 特殊分值
-MATE_SCORE = 99999              # 将杀基础分
-STALEMATE_SCORE = 50000         # 困毙基础分（中国象棋中困毙=输）
+JIANGSHA_SCORE = 99999          # 将杀基础分
+KUNBI_SCORE = 50000             # 困毙基础分
 
 
 class SearchEngine:
@@ -311,9 +318,9 @@ class SearchEngine:
             # 中国象棋：无合法走法 = 输棋（将杀或困毙）
             if game._is_in_check(player):
                 # 将杀 — 距离根节点越近（depth 剩余越大）越差
-                return -(MATE_SCORE - (self.max_depth - depth))
+                return -(JIANGSHA_SCORE - (self.max_depth - depth))
             # 困毙（同样输棋，但评分略轻）
-            return -(STALEMATE_SCORE - (self.max_depth - depth))
+            return -(KUNBI_SCORE - (self.max_depth - depth))
 
         ordered_moves = self._order_moves(game.board, moves, player, depth, tt_move)
 

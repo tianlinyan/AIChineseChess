@@ -22,6 +22,8 @@ import atexit
 import shutil
 from typing import Optional, Dict, List, Tuple
 
+from domain.fen import board_to_fen
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 配置
@@ -154,7 +156,7 @@ class PikafishEngine:
 
         with self._lock:
             try:
-                fen = _game_to_fen(game, player)
+                fen = board_to_fen(game.board, player, reverse_rows=True)
                 self._send(f'position fen {fen}')
                 self._send(f'go movetime {time_ms}')
 
@@ -212,7 +214,7 @@ class PikafishEngine:
         # 原子快照：深拷贝棋盘，从副本推导 FEN + 合法走法（避免 TOCTOU）
         try:
             board_copy = [row[:] for row in game.board]
-            fen = _board_to_fen(board_copy, player)
+            fen = board_to_fen(board_copy, player, reverse_rows=True)
             # 用临时 Game 对象计算合法走法（隔离共享状态）
             from domain.game import ChineseChessGame
             tmp_game = ChineseChessGame()
@@ -324,9 +326,6 @@ class PikafishEngine:
                         )
                     return  # self._available stays False
 
-                # 进程已死 → 立即退出
-                if self._proc.poll() is not None:
-                    break
                 line = self._proc.stdout.readline()
                 if not line:
                     time.sleep(0.05)
@@ -401,34 +400,6 @@ class PikafishEngine:
 # ══════════════════════════════════════════════════════════════════════════════
 # 辅助函数
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _board_to_fen(board: list, current_player: int) -> str:
-    """从棋盘副本生成 FEN（无 game 依赖，线程安全）。
-
-    Pikafish 坐标系：row 0 = 红方底线（棋盘底部），row 9 = 黑方底线。
-    内部坐标系：row 0 = 黑方底线（棋盘顶部）。
-    因此 FEN 行序需反转，w/b 为标准 UCI 约定。
-    """
-    rows = []
-    for r in range(10):
-        row_str = ""; empty = 0
-        for c in range(9):
-            p = board[r][c]
-            if p == '.': empty += 1
-            else:
-                if empty > 0: row_str += str(empty); empty = 0
-                row_str += p
-        if empty > 0: row_str += str(empty)
-        rows.append(row_str)
-    rows.reverse()  # Pikafish FEN row 0 = our row 9（红方底线）
-    side = 'w' if current_player == 1 else 'b'  # 标准UCI: w=红方
-    return '/'.join(rows) + ' ' + side
-
-
-def _game_to_fen(game, current_player: int) -> str:
-    """从 game 对象生成 FEN（委托 _board_to_fen，同步接口用）。"""
-    return _board_to_fen(game.board, current_player)
-
 
 def _uci_to_tuple(uci_move: str) -> Optional[tuple]:
     """将 Pikafish UCI 走法字符串转为内部元组格式。

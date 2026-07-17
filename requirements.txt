@@ -1,0 +1,11 @@
+# 中国象棋 AI 对弈 — 依赖项
+# pip install -r requirements.txt
+
+# GUI 框架
+PyQt6>=6.5
+
+# LLM API 调用（OpenAI 兼容接口 + DeepSeek）
+requests>=2.28
+
+# 环境变量加载（可选：用于 .env 文件中管理 API 密钥）
+python-dotenv>=1.0

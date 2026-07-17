@@ -5,7 +5,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QFont, QRadialGradient,
-    QMouseEvent,
+    QMouseEvent, QPixmap,
 )
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 
@@ -178,10 +178,17 @@ class BoardWidget(QWidget):
                     self.selected_col = -1
                     self.update()
                 else:
-                    if self.move_made:
+                    target = self.game.board[row][col]
+                    if target != '.' and self.game.get_piece_owner(target) == self.game.current_player:
+                        # 点击另一己方棋子 → 切换选中
+                        self.selected_row = row
+                        self.selected_col = col
+                        self.update()
+                    else:
+                        # 点击空位或对方棋子 → 走子
                         self.move_made.emit(self.selected_row, self.selected_col, row, col)
-                    self.selected_row = -1
-                    self.selected_col = -1
+                        self.selected_row = -1
+                        self.selected_col = -1
             else:
                 piece = self.game.board[row][col]
                 if piece != '.' and self.game.get_piece_owner(piece) == self.game.current_player:
@@ -194,7 +201,9 @@ class BoardWidget(QWidget):
                     self.update()
 
     def capture_board_image(self):
-        pixmap = self.grab()
+        # 使用 render() 而非 grab()：在窗口遮挡/最小化时仍能正确渲染
+        pixmap = QPixmap(self.size())
+        self.render(pixmap)
         if pixmap.isNull():
             return ""
 

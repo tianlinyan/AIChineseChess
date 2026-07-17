@@ -24,6 +24,8 @@ MCTS_SIMULATIONS = 2000          # 默认模拟次数（每次~5ms，2000次≈1
 MCTS_TIME_LIMIT = 20.0           # MCTS / Pikafish 时间上限（秒）
 MCTS_EXPLORATION = 1.4           # UCB1 探索参数
 MCTS_PRIOR_STRENGTH = 50         # LLM走法先验强度（虚拟访问次数乘数）
+MCTS_FALLBACK_SIMULATIONS = 500  # 回退搜索模拟次数（约2.5s，避免UI长时间冻结）
+MCTS_FALLBACK_TIME_LIMIT = 5.0   # 回退搜索时间上限（秒）
 
 # ── 开局库配置 ──
 OPENING_BOOK_ENABLED = True      # 默认启用开局库
@@ -67,3 +69,27 @@ def format_duration(seconds: int) -> str:
 def format_coord(row: int, col: int) -> str:
     """将棋盘行列索引转换为坐标字符串，如 (9, 0) → 'A10'。"""
     return f"{chr(65 + col)}{row + 1}"
+
+
+def parse_coord(s: str) -> tuple:
+    """将坐标字符串解析为行列索引，如 'A10' → (9, 0)。
+
+    Raises:
+        ValueError: 坐标格式无效或超出棋盘范围。
+    """
+    if not s or len(s) < 2:
+        raise ValueError(f"坐标 '{s}' 格式无效：至少需要列字母+行数字")
+    col = ord(s[0].upper()) - 65
+    try:
+        row = int(s[1:]) - 1
+    except ValueError:
+        raise ValueError(f"坐标 '{s}' 行号无法解析为数字")
+    if not (0 <= col < BOARD_WIDTH and 0 <= row < BOARD_HEIGHT):
+        raise ValueError(
+            f"坐标 '{s}' 超出棋盘范围（列 A-I，行 1-10）")
+    return row, col
+
+
+def format_move(fr: int, fc: int, tr: int, tc: int) -> str:
+    """将走法格式化为 'A1→B2' 形式的字符串。"""
+    return f"{format_coord(fr, fc)}→{format_coord(tr, tc)}"

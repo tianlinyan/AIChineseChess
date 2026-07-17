@@ -163,9 +163,15 @@ class AIWorker(QRunnable):
                 for tool_entry in other_calls:
                     func = tool_entry.get('function', {})
                     name = func.get('name', '')
+                    raw_args = func.get('arguments', '{}')
                     try:
-                        args = json.loads(func.get('arguments', '{}'))
+                        args = json.loads(raw_args)
                     except json.JSONDecodeError:
+                        # JSON 解析失败 → 尝试从原始文本提取坐标（move_piece 专用）
+                        if name == 'move_piece' and isinstance(raw_args, str):
+                            fc, tc = parse_coordinates_from_text(raw_args)
+                            if fc and tc:
+                                return fc, tc, self._build_full_text()
                         args = {}
 
                     result = self._execute_tool(name, args)
@@ -230,6 +236,7 @@ class AIWorker(QRunnable):
             tmp_game = ChineseChessGame()
             tmp_game.board = board_copy
             tmp_game.current_player = self.current_player
+            tmp_game._king_pos = self.game._king_pos.copy()  # 同步缓存，避免回退全盘扫描
             best_move = engine.search(tmp_game, self.current_player)
 
             if not best_move:
@@ -240,7 +247,8 @@ class AIWorker(QRunnable):
             opponent = 3 - player
 
             # 对所有走法用增强评估排序（MVV-LVA + 局面分 + 将军检测）
-            all_moves = self.game.get_all_legal_moves(player)
+            # 使用 tmp_game 隔离，避免工作线程访问 self.game.board 的数据竞争
+            all_moves = tmp_game.get_all_legal_moves(player)
             scored = []
             for fr, fc, tr, tc in all_moves:
                 piece = board[fr][fc]
@@ -251,14 +259,10 @@ class AIWorker(QRunnable):
                 if captured != '.':
                     s += PIECE_VALUE.get(captured.upper(), 0) * 10 - PIECE_VALUE.get(piece.upper(), 0)
                 # 将军奖励：走子后对方被将军额外加分
-                # 注意：_is_in_check 内部使用 self.game.board，
-                # 因此需临时指向已应用候选走法的 board_copy
-                self.game.board = board
-                try:
-                    if self.game._is_in_check(opponent):
-                        s += 50.0 if player == 1 else -50.0
-                finally:
-                    self.game.board = original_board
+                # 使用 tmp_game 隔离，避免修改 self.game.board（防止与主线程/Pikafish 的数据竞争）
+                tmp_game.board = board
+                if tmp_game._is_in_check(opponent):
+                    s += 50.0 if player == 1 else -50.0
                 SearchEngine._unmake_move(board, fr, fc, tr, tc, captured)
                 # 归一化：将评分转为"越高=对当前玩家越有利"
                 if player == 2:
@@ -309,11 +313,17 @@ class AIWorker(QRunnable):
     def _run_evaluate(self) -> str:
         """执行静态局面评估"""
         try:
-            board = self.game.board
-            red_moves = self.game.get_all_legal_moves(1)
-            black_moves = self.game.get_all_legal_moves(2)
-            red_check = self.game._is_in_check(1)
-            black_check = self.game._is_in_check(2)
+            # 使用副本隔离，避免工作线程访问 self.game.board 的数据竞争
+            board = [row[:] for row in self.game.board]
+            from domain.game import ChineseChessGame
+            tmp_game = ChineseChessGame()
+            tmp_game.board = board
+            tmp_game.current_player = self.current_player
+            tmp_game._king_pos = self.game._king_pos.copy()  # 同步缓存
+            red_moves = tmp_game.get_all_legal_moves(1)
+            black_moves = tmp_game.get_all_legal_moves(2)
+            red_check = tmp_game._is_in_check(1)
+            black_check = tmp_game._is_in_check(2)
 
             total_pieces = sum(1 for r in range(BOARD_HEIGHT)
                               for c in range(BOARD_WIDTH) if board[r][c] != '.')
@@ -372,7 +382,7 @@ class AIWorker(QRunnable):
         # 智能截断
         if len(full) > AI_OUTPUT_TRUNCATE_LENGTH:
             m = re.search(
-                r'.*[。！？!?\n]',
+                r'.*[。！？!\?\n]',
                 full[AI_OUTPUT_MIN_TRIM_POSITION:AI_OUTPUT_TRUNCATE_LENGTH]
             )
             if m:

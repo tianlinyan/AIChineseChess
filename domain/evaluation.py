@@ -8,7 +8,7 @@
   B. 位置分 (14) — 7种棋子 × 2方 PST
   C. 机动性 (2) — 红方/黑方合法走法数
   D. 兵卒结构 (6) — 过河兵、兵链、通路兵、兵威胁
-  E. 王安全 (4) — 士相完整性、将军状态、王暴露度
+  E. 将/帅安全 (4) — 士相完整性、将军状态、将/帅暴露度
   F. 开放线 (2) — 车占开放线/半开放线
   G. 子力协调 (4) — 马炮配合、双车连线、担子炮、连环马
   H. 空间控制 (2) — 中心控制、河界控制
@@ -50,7 +50,7 @@ PIECE_VALUE_ENDGAME = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── 兵/卒（分三个阶段：未过河/刚过河/深入敌阵） ──
-RED_PAWN_PST = [
+RED_BING_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],  # row 0
     [90, 100, 110, 120, 130, 120, 110, 100,  90],  # row 1（逼近九宫）
     [70,  85,  95, 110, 120, 110,  95,  85,  70],  # row 2
@@ -64,7 +64,7 @@ RED_PAWN_PST = [
 ]
 
 # ── 马（中心化 + 避免边角） ──
-RED_KNIGHT_PST = [
+RED_MA_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   5,  15,  20,  20,  20,  15,   5,   0],
     [5,  15,  30,  45,  50,  45,  30,  15,   5],
@@ -78,7 +78,7 @@ RED_KNIGHT_PST = [
 ]
 
 # ── 炮（中路+炮架多位置） ──
-RED_CANNON_PST = [
+RED_PAO_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [5,  10,  15,  20,  25,  20,  15,  10,   5],
     [5,  15,  30,  50,  60,  50,  30,  15,   5],
@@ -92,7 +92,7 @@ RED_CANNON_PST = [
 ]
 
 # ── 车（占据要道 + 侵入敌阵） ──
-RED_ROOK_PST = [
+RED_JU_PST = [
     [5,  10,  20,  30,  35,  30,  20,  10,   5],
     [5,  15,  30,  45,  50,  45,  30,  15,   5],
     [5,  15,  35,  55,  65,  55,  35,  15,   5],
@@ -106,7 +106,7 @@ RED_ROOK_PST = [
 ]
 
 # ── 仕/士 ──
-RED_ADVISOR_PST = [
+RED_SHI_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
@@ -120,7 +120,7 @@ RED_ADVISOR_PST = [
 ]
 
 # ── 相/象（连环保护优先） ──
-RED_BISHOP_PST = [
+RED_XIANG_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
@@ -134,7 +134,7 @@ RED_BISHOP_PST = [
 ]
 
 # ── 帅/将（残局宫顶活跃） ──
-RED_KING_PST = [
+RED_SHUAI_PST = [
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
     [0,   0,   0,   0,   0,   0,   0,   0,   0],
@@ -148,9 +148,9 @@ RED_KING_PST = [
 ]
 
 RED_PST = {
-    'K': RED_KING_PST, 'A': RED_ADVISOR_PST, 'B': RED_BISHOP_PST,
-    'N': RED_KNIGHT_PST, 'R': RED_ROOK_PST, 'C': RED_CANNON_PST,
-    'P': RED_PAWN_PST,
+    'K': RED_SHUAI_PST, 'A': RED_SHI_PST, 'B': RED_XIANG_PST,
+    'N': RED_MA_PST, 'R': RED_JU_PST, 'C': RED_PAO_PST,
+    'P': RED_BING_PST,
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -162,14 +162,14 @@ class EvalWeights:
     material = 1.0           # 物质分
     positional = 0.6         # 位置分权重
     mobility = 2.0           # 每走法价值
-    king_safety = 1.0        # 王安全
-    pawn_structure = 0.8     # 兵结构
-    open_file = 25.0         # 开放线
+    shuai_safety = 1.0        # 将/帅安全
+    bing_structure = 0.8      # 兵结构
+    open_column = 25.0         # 开放线
     coordination = 1.0       # 子力协调
     check_bonus = 50.0       # 将军加分
     center_control = 0.5     # 中心控制
     river_control = 0.3      # 河界控制
-    endgame_king_active = 8.0  # 残局将帅活跃加分
+    endgame_shuai_active = 8.0  # 残局将帅活跃加分
 
 
 WEIGHTS = EvalWeights()
@@ -211,16 +211,16 @@ def evaluate(board: list,
     # 统计数据
     red_material = 0
     black_material = 0
-    red_king_pos = None
-    black_king_pos = None
-    red_rooks = []
-    black_rooks = []
-    red_knights = []
-    black_knights = []
+    red_shuai_pos = None
+    black_shuai_pos = None
+    red_ju = []
+    black_ju = []
+    red_ma = []
+    black_ma = []
     red_cannons = []
     black_cannons = []
-    red_pawns = []
-    black_pawns = []
+    red_bing = []
+    black_bing = []
 
     for r in range(BOARD_HEIGHT):
         for c in range(BOARD_WIDTH):
@@ -235,30 +235,30 @@ def evaluate(board: list,
                 if piece_upper in RED_PST:
                     score += w.positional * RED_PST[piece_upper][r][c]
                 if piece == 'K':
-                    red_king_pos = (r, c)
+                    red_shuai_pos = (r, c)
                 elif piece == 'R':
-                    red_rooks.append((r, c))
+                    red_ju.append((r, c))
                 elif piece == 'N':
-                    red_knights.append((r, c))
+                    red_ma.append((r, c))
                 elif piece == 'C':
                     red_cannons.append((r, c))
                 elif piece == 'P':
-                    red_pawns.append((r, c))
+                    red_bing.append((r, c))
             else:
                 vals = PIECE_VALUE_ENDGAME if endgame else PIECE_VALUE
                 black_material += vals.get(piece_upper, 0)
                 if piece_upper in RED_PST:
                     score -= w.positional * RED_PST[piece_upper][_mirror_row(r)][c]
                 if piece == 'k':
-                    black_king_pos = (r, c)
+                    black_shuai_pos = (r, c)
                 elif piece == 'r':
-                    black_rooks.append((r, c))
+                    black_ju.append((r, c))
                 elif piece == 'n':
-                    black_knights.append((r, c))
+                    black_ma.append((r, c))
                 elif piece == 'c':
                     black_cannons.append((r, c))
                 elif piece == 'p':
-                    black_pawns.append((r, c))
+                    black_bing.append((r, c))
 
     # ── A. 物质分 ──
     score += w.material * (red_material - black_material)
@@ -270,14 +270,14 @@ def evaluate(board: list,
         score -= w.mobility * min(legal_moves_black, 80)
 
     # ── D. 兵卒结构 ──
-    score += w.pawn_structure * _pawn_structure(board, red_pawns, is_red=True)
-    score -= w.pawn_structure * _pawn_structure(board, black_pawns, is_red=False)
+    score += w.bing_structure * _bing_structure(board, red_bing, is_red=True)
+    score -= w.bing_structure * _bing_structure(board, black_bing, is_red=False)
 
-    # ── E. 王安全 ──
-    if red_king_pos:
-        score += w.king_safety * _king_safety(board, red_king_pos, is_red=True, endgame=endgame)
-    if black_king_pos:
-        score -= w.king_safety * _king_safety(board, black_king_pos, is_red=False, endgame=endgame)
+    # ── E. 将/帅安全 ──
+    if red_shuai_pos:
+        score += w.shuai_safety * _shuai_safety(board, red_shuai_pos, is_red=True, endgame=endgame)
+    if black_shuai_pos:
+        score -= w.shuai_safety * _shuai_safety(board, black_shuai_pos, is_red=False, endgame=endgame)
 
     # 将军状态
     if red_in_check:
@@ -286,16 +286,16 @@ def evaluate(board: list,
         score += w.check_bonus
 
     # ── F. 开放线 ──
-    for r, c in red_rooks:
-        score += w.open_file * _open_file_bonus(board, c, is_red=True)
-    for r, c in black_rooks:
-        score -= w.open_file * _open_file_bonus(board, c, is_red=False)
+    for r, c in red_ju:
+        score += w.open_column * _open_column_bonus(board, c, is_red=True)
+    for r, c in black_ju:
+        score -= w.open_column * _open_column_bonus(board, c, is_red=False)
 
     # ── G. 子力协调 ──
     score += w.coordination * _piece_coordination(
-        red_knights, red_cannons, red_rooks, is_red=True)
+        red_ma, red_cannons, red_ju, is_red=True)
     score -= w.coordination * _piece_coordination(
-        black_knights, black_cannons, black_rooks, is_red=False)
+        black_ma, black_cannons, black_ju, is_red=False)
 
     # ── H. 空间控制 ──
     score += w.center_control * _center_control(board, is_red=True)
@@ -305,16 +305,16 @@ def evaluate(board: list,
 
     # ── I. 残局将帅活跃 ──
     if endgame:
-        if red_king_pos:
-            score += w.endgame_king_active * (9 - red_king_pos[0])
-        if black_king_pos:
-            score -= w.endgame_king_active * black_king_pos[0]
+        if red_shuai_pos:
+            score += w.endgame_shuai_active * (9 - red_shuai_pos[0])
+        if black_shuai_pos:
+            score -= w.endgame_shuai_active * black_shuai_pos[0]
 
     # ── 模式检测（高价值战术） ──
-    score += _detect_dangerous_knight(red_knights, black_king_pos)
-    score -= _detect_dangerous_knight(black_knights, red_king_pos)
-    score += _detect_battery(board, red_rooks, red_cannons, black_king_pos)
-    score -= _detect_battery(board, black_rooks, black_cannons, red_king_pos)
+    score += _detect_dangerous_ma(red_ma, black_shuai_pos)
+    score -= _detect_dangerous_ma(black_ma, red_shuai_pos)
+    score += _detect_battery(board, red_ju, red_cannons, black_shuai_pos)
+    score -= _detect_battery(board, black_ju, black_cannons, red_shuai_pos)
 
     return float(score)
 
@@ -323,12 +323,12 @@ def evaluate(board: list,
 # 五、特征函数
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _pawn_structure(board: list, pawns: list, is_red: bool) -> float:
+def _bing_structure(board: list, bing_list: list, is_red: bool) -> float:
     """兵卒结构评估：过河兵、通路兵（前方被任意棋子阻挡则非通路兵）"""
-    if not pawns:
+    if not bing_list:
         return 0.0
     score = 0.0
-    for r, c in pawns:
+    for r, c in bing_list:
         crossed = (r <= 4) if is_red else (r >= 5)
         if crossed:
             # 过河基础分
@@ -353,12 +353,12 @@ def _pawn_structure(board: list, pawns: list, is_red: bool) -> float:
     return score
 
 
-def _king_safety(board: list, king_pos: tuple, is_red: bool,
+def _shuai_safety(board: list, shuai_pos: tuple, is_red: bool,
                  endgame: bool) -> float:
-    """王安全评估"""
+    """将/帅安全评估"""
     if endgame:
-        return 0.0  # 残局中王安全不是首要问题
-    kr, kc = king_pos
+        return 0.0  # 残局中将/帅安全不是首要问题
+    kr, kc = shuai_pos
     score = 0.0
     # 士相完整性
     palace_rows = range(7, 10) if is_red else range(0, 3)
@@ -371,39 +371,39 @@ def _king_safety(board: list, king_pos: tuple, is_red: bool,
                 if p.upper() in ('A', 'B'):
                     defenders += 1
     score += defenders * 15.0  # 每个防守棋子+15
-    # 王在宫底更安全（开局中局）
+    # 将/帅在宫底更安全（开局中局）
     safe_row = 9 if is_red else 0
     score -= abs(kr - safe_row) * 5.0
     return score
 
 
-def _open_file_bonus(board: list, col: int, is_red: bool) -> float:
+def _open_column_bonus(board: list, col: int, is_red: bool) -> float:
     """车在开放线/半开放线的加分"""
-    friendly_pawns = 0
-    enemy_pawns = 0
+    friendly_bing = 0
+    enemy_bing = 0
     for r in range(BOARD_HEIGHT):
         p = board[r][col]
         if p.upper() == 'P':
             if (is_red and p.isupper()) or (not is_red and p.islower()):
-                friendly_pawns += 1
+                friendly_bing += 1
             else:
-                enemy_pawns += 1
-    if friendly_pawns == 0 and enemy_pawns == 0:
+                enemy_bing += 1
+    if friendly_bing == 0 and enemy_bing == 0:
         return 1.0   # 全开放线
-    elif friendly_pawns == 0:
+    elif friendly_bing == 0:
         return 0.6   # 半开放线（对敌方有利）
-    elif enemy_pawns == 0:
+    elif enemy_bing == 0:
         return 0.3   # 半开放线（对己方有利）
     return 0.0
 
 
-def _piece_coordination(knights: list, cannons: list,
-                        rooks: list, is_red: bool) -> float:
+def _piece_coordination(ma_list: list, cannons: list,
+                        ju_list: list, is_red: bool) -> float:
     """子力协调：连环马、担子炮、双车连线"""
     score = 0.0
     # 连环马（两马相距一个日字）
-    for i, (r1, c1) in enumerate(knights):
-        for r2, c2 in knights[i + 1:]:
+    for i, (r1, c1) in enumerate(ma_list):
+        for r2, c2 in ma_list[i + 1:]:
             if abs(r1 - r2) + abs(c1 - c2) <= 3:
                 score += 15.0
     # 担子炮（双炮同列或同行，互为炮架）
@@ -414,9 +414,9 @@ def _piece_coordination(knights: list, cannons: list,
             elif r1 == r2 and abs(c1 - c2) <= 3:
                 score += 15.0
     # 双车连线（同列或同行）
-    if len(rooks) >= 2:
-        for i, (r1, c1) in enumerate(rooks):
-            for r2, c2 in rooks[i + 1:]:
+    if len(ju_list) >= 2:
+        for i, (r1, c1) in enumerate(ju_list):
+            for r2, c2 in ju_list[i + 1:]:
                 if c1 == c2:
                     score += 25.0  # 同列双车错
                 elif r1 == r2:
@@ -455,14 +455,14 @@ def _river_control(board: list, is_red: bool) -> float:
     return score
 
 
-def _detect_dangerous_knight(knights: list,
-                              enemy_king_pos: tuple = None) -> float:
+def _detect_dangerous_ma(ma_list: list,
+                              enemy_shuai_pos: tuple = None) -> float:
     """检测卧槽马/挂角马威胁"""
     bonus = 0.0
-    if not enemy_king_pos:
+    if not enemy_shuai_pos:
         return 0.0
-    ekr, ekc = enemy_king_pos
-    for kr, kc in knights:
+    ekr, ekc = enemy_shuai_pos
+    for kr, kc in ma_list:
         # 马在对方九宫对角线位置 = 卧槽马/挂角马
         dr, dc = abs(kr - ekr), abs(kc - ekc)
         if (dr == 1 and dc == 2) or (dr == 2 and dc == 1):
@@ -473,15 +473,15 @@ def _detect_dangerous_knight(knights: list,
     return bonus
 
 
-def _detect_battery(board: list, rooks: list, cannons: list,
-                    enemy_king_pos: tuple = None) -> float:
+def _detect_battery(board: list, ju_list: list, cannons: list,
+                    enemy_shuai_pos: tuple = None) -> float:
     """检测车炮组合威胁（铁门栓、当头炮、沉底炮）"""
     bonus = 0.0
-    if not enemy_king_pos:
+    if not enemy_shuai_pos:
         return 0.0
-    ekr, ekc = enemy_king_pos
+    ekr, ekc = enemy_shuai_pos
     # 车控制将/帅所在列
-    for rr, rc in rooks:
+    for rr, rc in ju_list:
         if rc == ekc:
             obstacles = sum(1 for mr in range(min(rr, ekr) + 1, max(rr, ekr))
                           if board[mr][rc] != '.')

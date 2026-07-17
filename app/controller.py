@@ -11,8 +11,10 @@ from domain.constants import (
     OPENING_BOOK_ENABLED, OPENING_BOOK_MAX_MOVES,
     OPENING_DELAY_MS,
     MCTS_SIMULATIONS, MCTS_TIME_LIMIT,
+    MCTS_FALLBACK_SIMULATIONS, MCTS_FALLBACK_TIME_LIMIT,
     AI_DEFAULT_MODE, ARBITRATION_TIMEOUT_SECONDS,
-    PIECE_SYMBOLS, format_duration,
+    PIECE_SYMBOLS, format_duration, format_coord,
+    parse_coord, format_move,
 )
 from domain.prompts import (
     HUMAN_MODEL, get_system_prompt, build_move_prompt, format_legal_moves,
@@ -22,7 +24,8 @@ from domain.game import ChineseChessGame
 from domain.mcts import MCTSEngine
 from domain.openings import get_opening_move, is_in_opening_book
 try:
-    from domain.pikafish import PikafishEngine, _game_to_fen
+    from domain.pikafish import PikafishEngine
+    from domain.fen import game_to_fen
 except ImportError:
     PikafishEngine = None  # pikafish 模块不可用
 from ai.manager import AIManager
@@ -331,18 +334,11 @@ class GameController:
                     if result['success']:
                         self._on_move_success(fr, fc, tr, tc, current_player,
                                               source='开局库')
-                        self.main.board_widget.update()
-                        self.main.update_game_status()
-                        self.main.update_history_list()
-                        self.main.update_player_status()
+                        self._refresh_ui()
                         if result.get('game_over'):
                             self.handle_game_over(result)
                             return
-                        next_player = self.game.current_player
-                        next_model = self.model1 if next_player == 1 else self.model2
-                        if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
-                            QTimer.singleShot(OPENING_DELAY_MS, lambda v=self.game_version:
-                                self.make_ai_move(expected_version=v))
+                        self._schedule_next_ai_move(delay=OPENING_DELAY_MS)
                         return
 
         # ── 2. 纯搜索模式（Pikafish/MCTS 异步，不阻塞UI）──
@@ -354,11 +350,9 @@ class GameController:
                 if self.is_paused or not self.is_active or self.game.game_over:
                     self._finish_ai_move()
                     return
-                # Pikafish 异步失败 → MCTS 同步回退（不重试Pikafish，避免UI再阻塞15s）
+                # Pikafish 异步失败 → MCTS 快速回退
                 if not move:
-                    mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS, time_limit=MCTS_TIME_LIMIT)
-                    move = mcts.search(self.game, p)
-                    self.stats['search_nodes'] = mcts.simulations
+                    move = self._mcts_fallback(p)
                 if not move:
                     self._finish_ai_move()
                     self._random_move(p)
@@ -367,20 +361,12 @@ class GameController:
                 result = self.game.move_piece(fr, fc, tr, tc)
                 if result['success']:
                     self._on_move_success(fr, fc, tr, tc, p, source='搜索')
-                    if self.main:
-                        self.main.board_widget.update()
-                        self.main.update_game_status()
-                        self.main.update_history_list()
-                        self.main.update_player_status()
+                    self._refresh_ui()
                     if result.get('game_over'):
                         self._finish_ai_move()
                         self.handle_game_over(result)
                         return
-                    np = self.game.current_player
-                    nm = self.model1 if np == 1 else self.model2
-                    if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
-                        QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                            self.make_ai_move(expected_version=v))
+                    self._schedule_next_ai_move()
                     self._finish_ai_move()
                 else:
                     self._finish_ai_move()
@@ -399,11 +385,7 @@ class GameController:
                 if move and self._pikafish and self._pikafish.available:
                     engine_name = 'Pikafish'
                 if not move:
-                    # Pikafish 失败/不可用 → MCTS 同步回退
-                    mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS,
-                                      time_limit=MCTS_TIME_LIMIT)
-                    move = mcts.search(self.game, p)
-                    self.stats['search_nodes'] = mcts.simulations
+                    move = self._mcts_fallback(p)
                 if not self.is_active or self.is_paused or self.game.game_over:
                     self._finish_ai_move()
                     return
@@ -622,7 +604,7 @@ class GameController:
                     self._execute_fallback_move(self._hybrid_engine_move,
                                                 current_player)
                 else:
-                    self._fallback_to_search(current_player)
+                    self._random_move(current_player)
                 return
             else:
                 # llm_only 模式：原有重试逻辑
@@ -631,15 +613,8 @@ class GameController:
 
         # ── 解析坐标 ──
         try:
-            from_col = ord(from_coord[0].upper()) - 65
-            from_row = int(from_coord[1:]) - 1
-            to_col = ord(to_coord[0].upper()) - 65
-            to_row = int(to_coord[1:]) - 1
-            if not (self.game.in_board(from_row, from_col) and
-                    self.game.in_board(to_row, to_col)):
-                raise ValueError
-            if from_row < 0 or from_row > 9 or to_row < 0 or to_row > 9:
-                raise ValueError
+            from_row, from_col = parse_coord(from_coord)
+            to_row, to_col = parse_coord(to_coord)
         except (ValueError, IndexError):
             self.last_move_error = (
                 f"坐标 '{from_coord}'→'{to_coord}' 无法解析。"
@@ -652,7 +627,7 @@ class GameController:
                     self._execute_fallback_move(self._hybrid_engine_move,
                                                 current_player)
                 else:
-                    self._fallback_to_search(current_player)
+                    self._random_move(current_player)
                 return
             else:
                 self.retry_count += 1
@@ -704,13 +679,13 @@ class GameController:
             self.last_move_error = f"{from_coord}→{to_coord}（原因：{reason}）"
 
             if self.ai_mode == 'hybrid':
-                self.log(f"{player_name} 走子非法 ({reason})，尝试引擎兜底", 'WARNING')
+                self.log(f"{player_name} 走子非法 ({reason})，直接采用引擎走法", 'WARNING')
                 self._finish_ai_move()
                 if self._hybrid_engine_move and self._hybrid_engine_move != final_move:
                     self._execute_fallback_move(self._hybrid_engine_move,
                                                 current_player)
                 else:
-                    self._fallback_to_search(current_player)
+                    self._random_move(current_player)
                 return
             else:
                 # llm_only：重试
@@ -729,13 +704,7 @@ class GameController:
         # ── 移动成功 ──
         self._on_move_success(from_row, from_col, to_row, to_col,
                               current_player, source='LLM')
-
-        if self.main:
-            self.main.board_widget.update()
-            self.main.update_game_status()
-            self.main.update_history_list()
-            self.main.update_player_status()
-
+        self._refresh_ui()
         self._finish_ai_move()
 
         if result.get('game_over'):
@@ -743,13 +712,7 @@ class GameController:
             return
 
         # ── 下一步 ──
-        if self.main:
-            self.main.start_thinking_timer(self.game.current_player)
-        next_player = self.game.current_player
-        next_model = self.model1 if next_player == 1 else self.model2
-        if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
-            QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                self.make_ai_move(expected_version=v))
+        self._schedule_next_ai_move()
 
     # ── 搜索引擎集成 ──
 
@@ -763,6 +726,8 @@ class GameController:
 
         on_done 签名为 on_done(best_move_or_None, player)
         """
+        self.log("🔍 启动引擎搜索...", 'INFO')
+
         # ── 异步路径：Pikafish（MCTS 回退在主线程回调中处理）──
         if on_done is not None and self._pikafish and self._pikafish.available:
             time_ms = int(MCTS_TIME_LIMIT * 1000)
@@ -785,7 +750,7 @@ class GameController:
                     piece = self.game.board[fr][fc]
                     if piece == '.':
                         # 走法非法：起始位置无棋子 → 诊断并回退 MCTS
-                        fen = _game_to_fen(self.game, player)
+                        fen = game_to_fen(self.game, player)
                         self.log(
                             f"  ⚠️ Pikafish 返回非法走法 {chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1}"
                             f"（起始位置无棋子），回退 MCTS", 'WARNING')
@@ -857,33 +822,21 @@ class GameController:
             if self.is_paused or not self.is_active or self.game.game_over:
                 self._finish_ai_move()
                 return
-            # Pikafish 异步失败 → MCTS 同步回退
+            # Pikafish 异步失败 → MCTS 快速回退
             if not move:
-                mcts = MCTSEngine(max_simulations=MCTS_SIMULATIONS, time_limit=MCTS_TIME_LIMIT)
-                move = mcts.search(self.game, p)
-                self.stats['search_nodes'] = mcts.simulations
+                move = self._mcts_fallback(p)
             if move:
                 fr, fc, tr, tc = move
                 result = self.game.move_piece(fr, fc, tr, tc)
                 if result['success']:
                     self._on_move_success(fr, fc, tr, tc, p, source='搜索回退')
                     self._random_action_count = 0  # 搜索成功，重置计数
-                    if self.main:
-                        self.main.board_widget.update()
-                        self.main.update_game_status()
-                        self.main.update_history_list()
-                        self.main.update_player_status()
+                    self._refresh_ui()
                     if result.get('game_over'):
                         self._finish_ai_move()
                         self.handle_game_over(result)
                         return
-                    if self.main:
-                        self.main.start_thinking_timer(self.game.current_player)
-                    np = self.game.current_player
-                    nm = self.model1 if np == 1 else self.model2
-                    if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
-                        QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                            self.make_ai_move(expected_version=v))
+                    self._schedule_next_ai_move()
                     self._finish_ai_move()
                     return
                 else:
@@ -1010,6 +963,28 @@ class GameController:
                  f"{piece_name} {from_coord}→{to_coord}",
                  'red' if current_player == 1 else 'black')
 
+    # ── 走子后 UI 刷新辅助方法 ──
+
+    def _refresh_ui(self) -> None:
+        """统一刷新棋盘和状态 UI（替代多处重复的 4 行调用）。"""
+        if self.main:
+            self.main.board_widget.update()
+            self.main.update_game_status()
+            self.main.update_history_list()
+            self.main.update_player_status()
+
+    def _schedule_next_ai_move(self, delay: int = AI_DELAY_MS) -> None:
+        """若游戏仍在进行且下一方为 AI，则调度其走子。"""
+        if not self.is_active or self.is_paused or self.game.game_over:
+            return
+        if self.main:
+            self.main.start_thinking_timer(self.game.current_player)
+        next_player = self.game.current_player
+        next_model = self.model1 if next_player == 1 else self.model2
+        if next_model != HUMAN_MODEL:
+            QTimer.singleShot(delay, lambda v=self.game_version:
+                self.make_ai_move(expected_version=v))
+
     def _on_pikafish_search_done(self, args: tuple) -> None:
         """主线程：处理 Pikafish 异步搜索/回退结果。"""
         try:
@@ -1043,28 +1018,17 @@ class GameController:
         if result['success']:
             self._on_move_success(fr, fc, tr, tc, player, source='引擎兜底')
             self._random_action_count = 0
-            if self.main:
-                self.main.board_widget.update()
-                self.main.update_game_status()
-                self.main.update_history_list()
-    
-                self.main.update_player_status()
+            self._refresh_ui()
             if result.get('game_over'):
                 self._finish_ai_move()
                 self.handle_game_over(result)
                 return
-            if self.main:
-                self.main.start_thinking_timer(self.game.current_player)
-            np = self.game.current_player
-            nm = self.model1 if np == 1 else self.model2
-            if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
-                QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                    self.make_ai_move(expected_version=v))
+            self._schedule_next_ai_move()
             self._finish_ai_move()
         else:
             self.log(f"引擎兜底走子失败: {result.get('message', '未知')}", 'ERROR')
             self._finish_ai_move()
-            self._fallback_to_search(player)
+            self._random_move(player)
 
     def _execute_llm_fallback(self, player: int) -> None:
         """仲裁失败兜底：直接执行 LLM 暂存走法。
@@ -1073,34 +1037,24 @@ class GameController:
         LLM 走法已经过合法性验证（在 on_ai_finished 中解析通过），直接执行。
         """
         if not self._arbitration_llm_move:
-            self._fallback_to_search(player)
+            self._random_move(player)
             return
         fr, fc, tr, tc = self._arbitration_llm_move
         result = self.game.move_piece(fr, fc, tr, tc)
         if result['success']:
             self._on_move_success(fr, fc, tr, tc, player, source='LLM(仲裁失败回退)')
             self._random_action_count = 0
-            if self.main:
-                self.main.board_widget.update()
-                self.main.update_game_status()
-                self.main.update_history_list()
-                self.main.update_player_status()
+            self._refresh_ui()
             if result.get('game_over'):
                 self._finish_ai_move()
                 self.handle_game_over(result)
                 return
-            if self.main:
-                self.main.start_thinking_timer(self.game.current_player)
-            np = self.game.current_player
-            nm = self.model1 if np == 1 else self.model2
-            if nm != HUMAN_MODEL and self.is_active and not self.is_paused:
-                QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                    self.make_ai_move(expected_version=v))
+            self._schedule_next_ai_move()
             self._finish_ai_move()
         else:
             self.log(f"LLM回退走子失败: {result.get('message', '未知')}", 'ERROR')
             self._finish_ai_move()
-            self._fallback_to_search(player)
+            self._random_move(player)
 
     # ── 第三方仲裁（DeepSeek） ──
 
@@ -1241,13 +1195,8 @@ class GameController:
 
         # ── 解析仲裁坐标 ──
         try:
-            arb_col = ord(from_coord[0].upper()) - 65
-            arb_row = int(from_coord[1:]) - 1
-            arb_to_col = ord(to_coord[0].upper()) - 65
-            arb_to_row = int(to_coord[1:]) - 1
-            if not (self.game.in_board(arb_row, arb_col) and
-                    self.game.in_board(arb_to_row, arb_to_col)):
-                raise ValueError
+            arb_row, arb_col = parse_coord(from_coord)
+            arb_to_row, arb_to_col = parse_coord(to_coord)
         except (ValueError, IndexError):
             self.log(f"仲裁坐标解析失败 '{from_coord}'→'{to_coord}'，采用 LLM 走法（不计分）", 'WARNING')
             self._finish_ai_move()
@@ -1263,8 +1212,9 @@ class GameController:
             score_change = '+1'
             score_reason = 'LLM 与仲裁一致'
         else:
-            score_change = '0'
-            score_reason = 'LLM 与仲裁不一致'
+            self.ai_score -= 1
+            score_change = '-1'
+            score_reason = 'LLM 与仲裁不一致（采纳引擎）'
 
         self.log(
             f"📊 仲裁计分: {score_change} (总分: {self.ai_score}) — {score_reason}",
@@ -1310,13 +1260,7 @@ class GameController:
         self._on_move_success(arb_row, arb_col, arb_to_row, arb_to_col,
                               current_player,
                               source=f'仲裁({"LLM" if arb_move == llm_move else "引擎"})')
-
-        if self.main:
-            self.main.board_widget.update()
-            self.main.update_game_status()
-            self.main.update_history_list()
-            self.main.update_player_status()
-
+        self._refresh_ui()
         self._finish_ai_move()
 
         if result.get('game_over'):
@@ -1324,13 +1268,15 @@ class GameController:
             return
 
         # ── 下一步 ──
-        if self.main:
-            self.main.start_thinking_timer(self.game.current_player)
-        next_player = self.game.current_player
-        next_model = self.model1 if next_player == 1 else self.model2
-        if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
-            QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                self.make_ai_move(expected_version=v))
+        self._schedule_next_ai_move()
+
+    def _mcts_fallback(self, player: int) -> Optional[tuple]:
+        """MCTS 快速回退搜索（限时5s），Pikafish 失败时使用。"""
+        mcts = MCTSEngine(max_simulations=MCTS_FALLBACK_SIMULATIONS,
+                          time_limit=MCTS_FALLBACK_TIME_LIMIT)
+        move = mcts.search(self.game, player)
+        self.stats['search_nodes'] = mcts.simulations
+        return move
 
     def _finish_ai_move(self) -> None:
         self.ai_manager.set_busy(False)
@@ -1407,7 +1353,10 @@ class GameController:
             self.main.log_manager.log(text, msg_type)
 
     def shutdown(self) -> None:
-        """清理资源 — 关闭 Pikafish 引擎进程等。"""
+        """清理资源 — 关闭引擎、取消任务、停止计时器。"""
+        self.is_active = False
+        self.stop_thinking_timer()
+        self.ai_manager.shutdown()
         if self._pikafish:
             try:
                 self._pikafish.close()

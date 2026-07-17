@@ -21,7 +21,7 @@ import math
 import random
 from typing import Optional, Callable, Dict, List, Tuple
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_PRIOR_STRENGTH
+from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_PRIOR_STRENGTH, MCTS_TIME_LIMIT
 from domain.evaluation import evaluate
 from domain.game import ChineseChessGame
 
@@ -30,7 +30,7 @@ from domain.game import ChineseChessGame
 # ══════════════════════════════════════════════════════════════════════════════
 
 DEFAULT_SIMULATIONS = 2000      # 默认模拟次数
-DEFAULT_TIME_LIMIT = 15.0       # 时间上限（秒）
+DEFAULT_TIME_LIMIT = MCTS_TIME_LIMIT       # 时间上限（秒），从 constants.py 统一管理
 DEFAULT_EXPLORATION = 1.4       # UCB1 探索参数
 VIRTUAL_LOSS = 3                # 虚拟损失（并行搜索用）
 MAX_SIMULATION_DEPTH = 20       # 模拟最大深度
