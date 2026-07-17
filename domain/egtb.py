@@ -132,8 +132,8 @@ def probe(board: list, current_player: int,
     if local is not None:
         return local
 
-    # 云库查询（子力 ≤ 4 时本地判定不足，主要靠云库）
-    if piece_count <= 4:
+    # 云库查询（子力 ≤ 6 时本地判定不足，主要靠云库）
+    if piece_count <= 6:
         result = probe_cloud(board, current_player)
         if result is not None:
             return (result['score'], result['dtm'])
@@ -142,40 +142,89 @@ def probe(board: list, current_player: int,
 
 
 def _local_egtb(board: list, current_player: int) -> Optional[Tuple[float, int]]:
-    """本地基础残局判定 — 覆盖最简单的必胜/必和局面。
+    """本地基础残局判定 — 覆盖常见必胜/必和局面。
 
-    当前支持：
-    - 单子杀（对方无子）：必胜，返回高分
-    - 对方无合法走法：困毙 -> 对方负
+    支持：
+    - 无攻击子力双方 → 和棋
+    - 一方有攻击子对一方无 → 必胜（需验证能否赢）
+    - 单車必胜、单馬不和、单炮不和
+    - 双車/車炮/車馬必胜
     """
-    from domain.game import ChineseChessGame
-    from domain.evaluation import PIECE_VALUE
+    red_attackers = []   # 红方攻击子力列表 (piece, row, col)
+    black_attackers = [] # 黑方攻击子力列表
 
-    # 统计子力
-    red_has_attackers = False
-    black_has_attackers = False
     for r in range(10):
         for c in range(9):
             p = board[r][c]
             if p == '.' or p.upper() in ('K', 'A', 'B'):
                 continue
             if p.isupper():
-                red_has_attackers = True
+                red_attackers.append((p.upper(), r, c))
             else:
-                black_has_attackers = True
+                black_attackers.append((p.upper(), r, c))
 
-    # 只有将+士/相 → 和棋（无攻击子力）
-    if current_player == 1:
-        if not red_has_attackers and not black_has_attackers:
-            return (0.0, 0)  # 和棋
-        if not black_has_attackers:
-            # 红方有攻击子，黑方没有 → 红方必胜
-            return (80000.0, 10)  # 必胜但不确定具体步数
-    else:
-        if not red_has_attackers and not black_has_attackers:
-            return (0.0, 0)
-        if not red_has_attackers:
-            return (80000.0, 10)  # 黑方必胜（但从黑方视角返回正分）
+    red_count = len(red_attackers)
+    black_count = len(black_attackers)
+
+    # ── 双方无攻击子 → 和棋 ──
+    if red_count == 0 and black_count == 0:
+        return (0.0, 0)
+
+    # ── 单方有攻击子 → 判定能否必胜 ──
+    if black_count == 0:
+        return _can_win(red_attackers, current_player, 1)
+    if red_count == 0:
+        return _can_win(black_attackers, current_player, 2)
+
+    return None
+
+
+def _can_win(attackers: list, current_player: int, owner: int) -> Optional[Tuple[float, int]]:
+    """判断一组攻击子力能否必胜。
+
+    中国象棋残局常识：
+    - 单車 → 必胜
+    - 单馬 → 必和（无法将死）
+    - 单炮 → 必和（无炮架）
+    - 单卒 → 需具体判断（过河未过河、是否被阻挡）
+    - 双車/車炮/車馬/双炮有架 → 必胜
+    """
+    has_rook = any(p == 'R' for p, _, _ in attackers)
+    has_cannon = any(p == 'C' for p, _, _ in attackers)
+    has_knight = any(p == 'N' for p, _, _ in attackers)
+    has_pawn = any(p == 'P' for p, _, _ in attackers)
+    count = len(attackers)
+
+    # 单子
+    if count == 1:
+        p, r, c = attackers[0]
+        if p == 'R':
+            score = 80000 if owner == current_player else -80000
+            return (score, 20)  # 单车必胜，~20步
+        if p in ('N', 'C'):
+            return (0.0, 0)     # 单马/单炮 → 和棋
+        if p == 'P':
+            # 单卒：过河且未被阻挡 → 可能赢；否则和
+            crossed = (r <= 4) if owner == 1 else (r >= 5)
+            if crossed:
+                score = 5000 if owner == current_player else -5000
+                return (score, 30)
+            return (0.0, 0)     # 未过河卒 → 和棋
+
+    # 多子：有車则必胜
+    if has_rook:
+        score = 85000 if owner == current_player else -85000
+        return (score, 15)
+
+    # 双炮无車：可能不够赢，给中等优势分
+    if has_cannon and count >= 2:
+        score = 50000 if owner == current_player else -50000
+        return (score, 25)
+
+    # 其他组合：有子力优势但不确定
+    if count >= 2:
+        score = 30000 if owner == current_player else -30000
+        return (score, 30)
 
     return None
 

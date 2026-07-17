@@ -136,6 +136,8 @@ class GameController:
         if not self.main:
             return
 
+        self.main.log_manager.clear()
+
         model1_id = self.main.model1_combo.currentData()
         model2_id = self.main.model2_combo.currentData()
         if not model1_id or not model2_id:

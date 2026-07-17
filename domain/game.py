@@ -30,6 +30,7 @@ class ChineseChessGame:
         self.winner = None     # None=进行中, 1=红胜, 2=黑胜, 0=和棋
         self.last_move = None
         self._position_history: list = []  # 走子历史哈希，用于着法重复检测
+        self._move_checks: list = []       # 并行记录：每步是否将军（用于长将检测）
         self.total_moves_count = 0        # 总步数（自游戏开始计，reset 清零）
         # 将位置缓存（O(1) 将军检测，move_piece 时增量更新）
         self._king_pos = {1: (9, 4), 2: (0, 4)}
@@ -42,6 +43,7 @@ class ChineseChessGame:
         self.winner = None
         self.last_move = None
         self._position_history = []
+        self._move_checks = []
         self.total_moves_count = 0
         self._king_pos = {1: (9, 4), 2: (0, 4)}
 
@@ -102,22 +104,29 @@ class ChineseChessGame:
         self.moves.append((from_row, from_col, to_row, to_col, self.current_player, captured, piece))
         self.total_moves_count += 1
 
-        # 记录走子后的局面哈希（着法重复检测）
+        # 记录走子后的局面哈希 + 是否将军（着法重复/长将检测）
         self._position_history.append(self.position_hash())
-        # 保留最近 500 条，防止超长对局无限增长
+        opponent = 2 if self.current_player == 1 else 1
+        self._move_checks.append(self._is_in_check(opponent))
+        # 保留最近 500 条
         if len(self._position_history) > 500:
             self._position_history = self._position_history[-500:]
+            self._move_checks = self._move_checks[-500:]
 
-        opponent = 2 if self.current_player == 1 else 1
-
-        # ── 着法重复检测：同局面第3次出现 → 和棋 ──
-        if self._is_threefold_repetition():
+        # ── 着法重复检测：同局面第3次出现 → 长将/和棋判决 ──
+        rep_verdict = self._check_repetition()
+        if rep_verdict is not None:
             self.game_over = True
-            self.winner = 0  # 0 = 和棋
-            return {
-                'success': True, 'game_over': True, 'winner': 0,
-                'message': '着法重复三次 — 和棋'
-            }
+            if rep_verdict == 0:
+                self.winner = 0  # 和棋
+                return {'success': True, 'game_over': True, 'winner': 0,
+                        'message': '着法重复三次 — 和棋'}
+            else:
+                self.winner = 3 - rep_verdict  # rep_verdict=1(红犯规)→winner=2(黑胜)
+                loser_name = '红方' if rep_verdict == 1 else '黑方'
+                return {'success': True, 'game_over': True,
+                        'winner': self.winner,
+                        'message': f'{loser_name}长将犯规，判负！'}
 
         if self._is_jiangsha(opponent):
             self.game_over = True
@@ -135,6 +144,13 @@ class ChineseChessGame:
                 'message': f"{'红方' if self.current_player == 1 else '黑方'}困毙对方获胜！"
             }
 
+        # 双方无攻击子力 → 和棋（只剩将+士+相，无車馬炮兵）
+        if self._no_attacking_pieces():
+            self.game_over = True
+            self.winner = 0
+            return {'success': True, 'game_over': True, 'winner': 0,
+                    'message': '双方均无攻击子力 — 和棋'}
+
         self.current_player = opponent
         return {'success': True, 'game_over': False}
 
@@ -144,33 +160,33 @@ class ChineseChessGame:
 
         优先使用缓存位置（O(1)），缓存失效时回退全盘扫描。
         """
-        red_king_pos = self._king_pos.get(1)
-        black_king_pos = self._king_pos.get(2)
+        red_shuai_pos = self._king_pos.get(1)
+        black_jiang_pos = self._king_pos.get(2)
 
         # 缓存验证
-        if (not red_king_pos or not black_king_pos
-                or self.board[red_king_pos[0]][red_king_pos[1]] != 'K'
-                or self.board[black_king_pos[0]][black_king_pos[1]] != 'k'):
+        if (not red_shuai_pos or not black_jiang_pos
+                or self.board[red_shuai_pos[0]][red_shuai_pos[1]] != 'K'
+                or self.board[black_jiang_pos[0]][black_jiang_pos[1]] != 'k'):
             # 回退全盘扫描并修复缓存
-            red_king_pos = black_king_pos = None
+            red_shuai_pos = black_jiang_pos = None
             for r in range(self.size_rows):
                 for c in range(self.size_cols):
                     piece = self.board[r][c]
                     if piece == 'K':
-                        red_king_pos = (r, c)
+                        red_shuai_pos = (r, c)
                         self._king_pos[1] = (r, c)
                     elif piece == 'k':
-                        black_king_pos = (r, c)
+                        black_jiang_pos = (r, c)
                         self._king_pos[2] = (r, c)
-            if not red_king_pos or not black_king_pos:
+            if not red_shuai_pos or not black_jiang_pos:
                 return False
 
-        if red_king_pos[1] != black_king_pos[1]:
+        if red_shuai_pos[1] != black_jiang_pos[1]:
             return False
-        min_row = min(red_king_pos[0], black_king_pos[0])
-        max_row = max(red_king_pos[0], black_king_pos[0])
+        min_row = min(red_shuai_pos[0], black_jiang_pos[0])
+        max_row = max(red_shuai_pos[0], black_jiang_pos[0])
         for r in range(min_row + 1, max_row):
-            if self.board[r][red_king_pos[1]] != '.':
+            if self.board[r][red_shuai_pos[1]] != '.':
                 return False
         return True
 
@@ -181,21 +197,21 @@ class ChineseChessGame:
         self.board[fr][fc] = '.'
 
         # 如果临时移动了将，更新缓存以保证 _is_king_facing 正确
-        saved_king = None
+        saved_pos = None
         saved_player = None
         if piece == 'K':
             saved_player = 1
-            saved_king = self._king_pos.get(1)
+            saved_pos = self._king_pos.get(1)
             self._king_pos[1] = (tr, tc)
         elif piece == 'k':
             saved_player = 2
-            saved_king = self._king_pos.get(2)
+            saved_pos = self._king_pos.get(2)
             self._king_pos[2] = (tr, tc)
 
         facing = self._is_king_facing()
 
         if saved_player is not None:
-            self._king_pos[saved_player] = saved_king
+            self._king_pos[saved_player] = saved_pos
 
         self.board[fr][fc] = piece
         self.board[tr][tc] = target
@@ -317,16 +333,16 @@ class ChineseChessGame:
         self.board[fr][fc] = '.'
 
         # 如果临时移动了将，更新缓存以保证 _is_in_check 正确
-        saved_king = None
+        saved_pos = None
         if piece.upper() == 'K':
-            saved_king = self._king_pos.get(player)
+            saved_pos = self._king_pos.get(player)
             self._king_pos[player] = (tr, tc)
 
         illegal = self._is_in_check(player) or self._is_king_facing()
 
         # 恢复缓存
-        if saved_king is not None:
-            self._king_pos[player] = saved_king
+        if saved_pos is not None:
+            self._king_pos[player] = saved_pos
 
         self.board[fr][fc] = piece
         self.board[tr][tc] = target
@@ -493,20 +509,53 @@ class ChineseChessGame:
         """
         return self.board_hash() ^ (self.current_player * 0x9E3779B9)
 
-    def _is_threefold_repetition(self) -> bool:
-        """检测当前局面是否第 3 次出现（着法重复 → 和棋）。
-
-        中国象棋规则：同局面（相同棋盘 + 相同走子方）出现 3 次，
-        任一方可提和。此处自动判定。
+    def _check_repetition(self):
+        """检测局面重复，按 Pikafish 规则判决。
 
         Returns:
-            True 如果当前 position_hash 在历史中出现 ≥3 次（第 3 次出现）
+            None — 无重复
+            0    — 三局面重复，和棋（允许循环或双方同责）
+            1    — 红方长将犯规，黑胜
+            2    — 黑方长将犯规，红胜
+
+        长将判定：循环序列中某一方的每一步均为将军 → 该方犯规判负。
+        长捉判定：暂未实现，遇长捉按和棋处理。
         """
         if len(self._position_history) < 5:
-            return False  # 至少 5 步才可能形成 3 次重复
+            return None
         current = self.position_hash()
-        count = sum(1 for h in self._position_history if h == current)
-        return count >= 3
+
+        # 找到所有出现位置
+        indices = [i for i, h in enumerate(self._position_history) if h == current]
+        if len(indices) < 3:
+            return None
+
+        # 取最近 3 次出现，分析中间的循环序列
+        i1, i2, i3 = indices[-3], indices[-2], indices[-1]
+
+        # 长将检测：循环中每步是否将军
+        # 红方在奇数步(0,2,4...)，黑方在偶数步(1,3,5...)
+        # move_piece 时记录的是当前走子方走后对方是否被将军
+        # _move_checks[j] = True 表示走第 j 步后对方被将军
+        # 即 step j 的走子方在将军
+        # 步数编号从 0 开始，偶数步=红方，奇数步=黑方
+        red_all_checks = True
+        black_all_checks = True
+        for j in range(i1, i3):
+            is_check = self._move_checks[j]
+            if j % 2 == 0:  # 红方走的步
+                if not is_check:
+                    red_all_checks = False
+            else:            # 黑方走的步
+                if not is_check:
+                    black_all_checks = False
+
+        if red_all_checks and not black_all_checks:
+            return 1  # 红方长将
+        if black_all_checks and not red_all_checks:
+            return 2  # 黑方长将
+
+        return 0  # 三局面重复，和棋
 
     def get_move_key(self) -> tuple:
         """返回当前走子序列的关键字（用于开局库精确匹配）。
@@ -515,6 +564,15 @@ class ChineseChessGame:
             ((fr,fc,tr,tc), ...) 走法序列元组
         """
         return tuple((m[0], m[1], m[2], m[3]) for m in self.moves)
+
+    def _no_attacking_pieces(self) -> bool:
+        """双方均无攻击子力（車馬炮兵）→ 和棋。"""
+        for r in range(self.size_rows):
+            for c in range(self.size_cols):
+                p = self.board[r][c]
+                if p.upper() in ('R', 'N', 'C', 'P'):
+                    return False
+        return True
 
     def get_board_copy(self) -> list:
         """返回棋盘副本（用于搜索等只读操作）"""

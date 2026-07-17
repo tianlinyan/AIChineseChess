@@ -24,3 +24,4 @@ dist/
 # Sensitive config (contains API keys)
 models.json
 .env
+中国象棋程序竞赛规则.html
