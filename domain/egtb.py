@@ -14,6 +14,7 @@ import urllib.parse
 from typing import Optional, Tuple
 
 from domain.fen import board_to_fen
+from domain.constants import EGTB_MAX_PIECES, EGTB_CLOUD_MAX_PIECES
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -123,8 +124,8 @@ def probe(board: list, current_player: int,
         None — 残局库中无此局面
         (score, dtm) — 评估分数和距离杀棋步数
     """
-    # 只有子力 ≤ 10 才查询（全盘局面残局库覆盖有限且网络开销大）
-    if piece_count > 10:
+    # 只有子力 ≤ EGTB_MAX_PIECES 才查询
+    if piece_count > EGTB_MAX_PIECES:
         return None
 
     # 本地基础判定
@@ -132,8 +133,8 @@ def probe(board: list, current_player: int,
     if local is not None:
         return local
 
-    # 云库查询（子力 ≤ 6 时本地判定不足，主要靠云库）
-    if piece_count <= 6:
+    # 云库查询
+    if piece_count <= EGTB_CLOUD_MAX_PIECES:
         result = probe_cloud(board, current_player)
         if result is not None:
             return (result['score'], result['dtm'])

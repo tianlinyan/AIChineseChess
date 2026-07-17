@@ -27,14 +27,19 @@ MCTS_PRIOR_STRENGTH = 50         # LLM走法先验强度（虚拟访问次数乘
 MCTS_FALLBACK_SIMULATIONS = 500  # 回退搜索模拟次数（约2.5s，避免UI长时间冻结）
 MCTS_FALLBACK_TIME_LIMIT = 5.0   # 回退搜索时间上限（秒）
 
+# ── 残局库配置 ──
+EGTB_MAX_PIECES = 10             # 残局库查询的最大子力数
+EGTB_CLOUD_MAX_PIECES = 6        # 云库查询的最大子力数
+ENDGAME_PIECE_THRESHOLD = 14     # 残局阶段判定阈值（≤此值切换估值策略）
+
 # ── 开局库配置 ──
 OPENING_BOOK_ENABLED = True      # 默认启用开局库
 OPENING_BOOK_MAX_MOVES = 12      # 开局库最大走子数（之后退出开局库）
 
 # ── AI 模式配置 ──
-# "hybrid": LLM + 搜索混合模式（推荐）— LLM分析局面，搜索验证并选最优
-# "search_only": 纯搜索模式 — 不使用LLM，仅Alpha-Beta搜索
-# "llm_only": 纯LLM模式 — 不使用搜索，仅LLM走子（原行为）
+# "hybrid": AI + 搜索混合模式（推荐）— AI分析局面，搜索验证并选最优
+# "search_only": 纯搜索模式 — 不使用AI，仅引擎搜索
+# "llm_only": 仅AI模式 — 不使用搜索，仅AI走子
 AI_DEFAULT_MODE = "hybrid"
 
 # ── UI 计时 ──

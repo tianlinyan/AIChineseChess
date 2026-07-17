@@ -88,9 +88,9 @@ def setup_left_expanded(parent) -> None:
 
     engine_layout.addWidget(QLabel("AI 模式:"), 0, 0)
     parent.ai_mode_combo = QComboBox()
-    parent.ai_mode_combo.addItem("LLM + 搜索（推荐）", "hybrid")
+    parent.ai_mode_combo.addItem("AI + 搜索（推荐）", "hybrid")
     parent.ai_mode_combo.addItem("仅搜索", "search_only")
-    parent.ai_mode_combo.addItem("仅 LLM", "llm_only")
+    parent.ai_mode_combo.addItem("仅 AI", "llm_only")
     parent.ai_mode_combo.setCurrentIndex(0)
     parent.ai_mode_combo.currentIndexChanged.connect(parent.on_ai_mode_changed)
     engine_layout.addWidget(parent.ai_mode_combo, 0, 1, 1, 2)

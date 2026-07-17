@@ -21,7 +21,7 @@ import math
 import random
 from typing import Optional, Callable, Dict, List, Tuple
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_PRIOR_STRENGTH, MCTS_TIME_LIMIT
+from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_PRIOR_STRENGTH, MCTS_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
 from domain.evaluation import evaluate
 from domain.game import ChineseChessGame
 
@@ -224,22 +224,36 @@ class MCTSEngine:
     def _simulate(self, game, player: int) -> float:
         """Simulation: 用评估函数替代随机走子（更精确）
 
-        执行几步快速走子（优先吃子/将军），然后用评估函数评分。
+        优先查残局库（精确DTM），不可用时回退评估函数。
         返回从 player 视角的价值（正值=对player有利）。
         """
         board = game.board
-        # 使用快速评估路径（不经走法生成，约50×速度提升）
-        red_check = game._is_in_check(1)
-        black_check = game._is_in_check(2)
 
         total_pieces = sum(1 for r in range(BOARD_HEIGHT)
                           for c in range(BOARD_WIDTH) if board[r][c] != '.')
-        endgame = total_pieces <= 14
+        endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
+
+        # ── 残局库查询（DTM 比分比启发式评估精确）──
+        if total_pieces <= EGTB_MAX_PIECES:
+            try:
+                from domain.egtb import probe
+                egtb_result = probe(board, player, total_pieces)
+                if egtb_result is not None:
+                    score = egtb_result[0]
+                    normalized = 1.0 / (1.0 + math.exp(-score / 1000.0))
+                    if player == 2:
+                        normalized = 1.0 - normalized
+                    return normalized
+            except Exception:
+                pass
+
+        red_check = game._is_in_check(1)
+        black_check = game._is_in_check(2)
 
         score = evaluate(
             board,
-            legal_moves_red=0,   # 跳过走法生成，机动性对仿真贡献小
-            legal_moves_black=0,  # 跳过走法生成
+            legal_moves_red=0,
+            legal_moves_black=0,
             red_in_check=red_check,
             black_in_check=black_check,
             endgame=endgame,

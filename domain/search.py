@@ -29,7 +29,7 @@ from collections import OrderedDict
 from enum import IntEnum
 from typing import Optional, Callable, NamedTuple
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, SEARCH_TIME_LIMIT
+from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, SEARCH_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
 from domain.evaluation import (
     evaluate, evaluate_move_ordering, PIECE_VALUE,
 )
@@ -469,7 +469,7 @@ class SearchEngine:
         total_pieces = red_pieces + black_pieces
 
         # ── 残局库查询 ──
-        if total_pieces <= 10:
+        if total_pieces <= EGTB_MAX_PIECES:
             try:
                 from domain.egtb import probe
                 egtb_result = probe(board, player, total_pieces)
@@ -480,7 +480,7 @@ class SearchEngine:
                 pass  # EGTB 不可用/异常时静默跳过，不影响搜索
 
         # 判断是否残局
-        endgame = total_pieces <= 14
+        endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
 
         # 将军检测（始终检查双方）
         red_in_check = game._is_in_check(1)
