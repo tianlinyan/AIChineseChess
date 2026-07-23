@@ -4,7 +4,7 @@ import threading
 from typing import Optional
 
 import requests
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from ai.models import ModelInfo
 from ai.parser import parse_coordinates_from_text
@@ -15,8 +15,9 @@ from domain.constants import (
     PIECE_SYMBOLS,
 )
 from domain.prompts import DEFAULT_TOOLS
-from domain.evaluation import evaluate, PIECE_VALUE
+from domain.evaluation import evaluate, PIECE_VALUE, compute_material
 from domain.game import ChineseChessGame
+from domain.search import SearchEngine
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -31,7 +32,12 @@ class AIWorkerSignals(QObject):
     # from_coord, to_coord, full_text, error, tokens, version, cancel_version
 
 
-class AIWorker(QRunnable):
+class AIWorker:
+    """LLM 请求工作器 — 由 controller 在裸 threading.Thread 中运行。
+
+    （不是 QRunnable：继承它只是历史遗留，实际从未进入 QThreadPool；
+    用裸线程是为了 cancel() 时能直接中断 requests.Session。）
+    """
     def __init__(self, model_info: ModelInfo, prompt: str,
                  image_base64: Optional[str] = None,
                  player_name: str = '', version: int = 0,
@@ -124,9 +130,11 @@ class AIWorker(QRunnable):
             # ── 提取 tool_calls ──
             tool_calls = message.get('tool_calls', [])
             if not tool_calls:
-                # 无 tool_calls → 尝试文本解析
-                fc, tc = parse_coordinates_from_text(
-                    '\n'.join(self._all_texts))
+                # 无 tool_calls → 尝试文本解析（仅从 LLM 文本提取，
+                # 排除 [Tool: ...] 工具结果里的坐标干扰）
+                llm_texts = [t for t in self._all_texts
+                             if not t.startswith('[Tool:')]
+                fc, tc = parse_coordinates_from_text('\n'.join(llm_texts))
                 if fc and tc:
                     return fc, tc, self._build_full_text()
                 # 无法解析，继续等下一轮（或最终失败）
@@ -193,10 +201,11 @@ class AIWorker(QRunnable):
 
         # ── 所有轮次结束，最后一次尝试文本解析 ──
         full = self._build_full_text()
-        fc, tc = parse_coordinates_from_text(full)
+        llm_texts = [t for t in self._all_texts if not t.startswith('[Tool:')]
+        fc, tc = parse_coordinates_from_text('\n'.join(llm_texts))
         if fc and tc:
             return fc, tc, full
-        return '', '', f'错误: {MAX_TOOL_TURNS} 轮工具调用后未找到有效走法'
+        return '', '', f'ERROR: {MAX_TOOL_TURNS} 轮工具调用后未找到有效走法'
 
     # ── 工具执行 ──
 
@@ -214,13 +223,11 @@ class AIWorker(QRunnable):
             return json.dumps({'error': f'未知工具: {name}'}, ensure_ascii=False)
 
     def _run_search(self, args: dict) -> str:
-        """执行 Alpha-Beta 搜索，返回引擎最佳走法及快速评估的候选列表。
+        """执行 Alpha-Beta 搜索，返回搜索最佳走法及快速评估的候选列表。
 
         使用两步策略：①Alpha-Beta 深搜索找最佳走法；
         ②对所有合法走法用快速静态评估（~0.05ms/步）排序，返回 top-N。
         """
-        from domain.search import SearchEngine
-
         depth = min(max(args.get('depth', 3), 2), 5)
         top_n = min(max(args.get('top_n', 3), 1), 5)
 
@@ -232,11 +239,11 @@ class AIWorker(QRunnable):
                 time_limit=min(15.0, 2.0 + depth * 3.0),
             )
             # 创建临时 Game，避免替换 self.game.board（防止 Pikafish 快照读到修改中棋盘）
-            from domain.game import ChineseChessGame
             tmp_game = ChineseChessGame()
             tmp_game.board = board_copy
             tmp_game.current_player = self.current_player
             tmp_game._king_pos = self.game._king_pos.copy()  # 同步缓存，避免回退全盘扫描
+            tmp_game.recompute_hash()  # board 被直接替换，重建 Zobrist 哈希
             best_move = engine.search(tmp_game, self.current_player)
 
             if not best_move:
@@ -252,7 +259,7 @@ class AIWorker(QRunnable):
             scored = []
             for fr, fc, tr, tc in all_moves:
                 piece = board[fr][fc]
-                captured = SearchEngine._make_move(board, fr, fc, tr, tc)
+                captured = SearchEngine._make_move(tmp_game, fr, fc, tr, tc)
                 # 静态局面分
                 s = evaluate(board)
                 # MVV-LVA 吃子加分
@@ -263,7 +270,7 @@ class AIWorker(QRunnable):
                 tmp_game.board = board
                 if tmp_game._is_in_check(opponent):
                     s += 50.0 if player == 1 else -50.0
-                SearchEngine._unmake_move(board, fr, fc, tr, tc, captured)
+                SearchEngine._unmake_move(tmp_game, fr, fc, tr, tc, captured)
                 # 归一化：将评分转为"越高=对当前玩家越有利"
                 if player == 2:
                     s = -s
@@ -277,16 +284,16 @@ class AIWorker(QRunnable):
             # 格式化
             lines = []
             lines.append(f"Alpha-Beta 搜索完成（深度={depth}，{engine.nodes_searched} 节点）")
-            lines.append(f"引擎最佳评分: {best_score:+.0f}（正值=红优，负值=黑优）")
+            lines.append(f"搜索最佳评分: {best_score:+.0f}（正值=红优，负值=黑优）")
             lines.append("")
 
-            # 引擎最佳走法高亮
+            # 搜索最佳走法高亮
             bfr, bfc, btr, btc = best_move
             bp = board[bfr][bfc]
             bpn = PIECE_SYMBOLS.get(bp, bp)
             bc = board[btr][btc]
             bcap = f" 吃{PIECE_SYMBOLS.get(bc, bc)}" if bc != '.' else ''
-            lines.append(f"★ 引擎首选: {bpn} {chr(65+bfc)}{bfr+1}→{chr(65+btc)}{btr+1}{bcap}")
+            lines.append(f"★ 搜索首选: {bpn} {chr(65+bfc)}{bfr+1}→{chr(65+btc)}{btr+1}{bcap}")
             lines.append("")
 
             lines.append(f"候选走法 Top-{len(top_moves)}（静态评估排序）：")
@@ -300,11 +307,11 @@ class AIWorker(QRunnable):
                 if captured != '.':
                     cap_name = PIECE_SYMBOLS.get(captured, captured)
                     cap_info = f" 吃{cap_name}"
-                marker = ' ← 引擎首选' if (fr, fc, tr, tc) == best_move else ''
+                marker = ' ← 搜索首选' if (fr, fc, tr, tc) == best_move else ''
                 lines.append(f"  {i}. [{s:+.0f}] {piece_name} {from_c}→{to_c}{cap_info}{marker}")
 
             lines.append("")
-            lines.append("请综合考虑引擎建议和你的战略判断，选择最优走法。最终调用 move_piece 提交。")
+            lines.append("请综合考虑搜索建议和你的战略判断，选择最优走法。最终调用 move_piece 提交。")
             return json.dumps({'result': '\n'.join(lines)}, ensure_ascii=False)
 
         except Exception as e:
@@ -315,7 +322,6 @@ class AIWorker(QRunnable):
         try:
             # 使用副本隔离，避免工作线程访问 self.game.board 的数据竞争
             board = [row[:] for row in self.game.board]
-            from domain.game import ChineseChessGame
             tmp_game = ChineseChessGame()
             tmp_game.board = board
             tmp_game.current_player = self.current_player
@@ -338,27 +344,17 @@ class AIWorker(QRunnable):
                 endgame=endgame,
             )
 
-            # 统计子力
-            red_material = 0
-            black_material = 0
-            for r in range(BOARD_HEIGHT):
-                for c in range(BOARD_WIDTH):
-                    p = board[r][c]
-                    if p == '.':
-                        continue
-                    if p.isupper():
-                        red_material += PIECE_VALUE.get(p, 0)
-                    else:
-                        black_material += PIECE_VALUE.get(p.upper(), 0)
+            # 统计子力（共享函数，不含将/帥，单位=兵）
+            red_material, black_material, _, _ = compute_material(board)
 
             lines = []
             lines.append(f"局面评估: {score:+.0f}（正值=红优，负值=黑优）")
-            lines.append(f"红方子力: {red_material}  |  黑方子力: {black_material}")
+            lines.append(f"红方子力: {red_material:g}  |  黑方子力: {black_material:g}")
             material_diff = red_material - black_material
             if material_diff > 0:
-                lines.append(f"红方多子 +{material_diff}")
+                lines.append(f"红方多子 +{material_diff:g}")
             elif material_diff < 0:
-                lines.append(f"黑方多子 +{-material_diff}")
+                lines.append(f"黑方多子 +{-material_diff:g}")
             else:
                 lines.append("子力均等")
             lines.append(f"红方走法: {len(red_moves)} 种  |  黑方走法: {len(black_moves)} 种")
@@ -472,6 +468,10 @@ class AIWorker(QRunnable):
             except Exception:
                 pass
             status = resp.status_code if resp is not None else 0
+            if status in (408, 429):
+                # 请求超时/速率限制：最值得退避重试的错误，
+                # 不能归入"客户端错误"（controller 对那类直接放弃 LLM）
+                raise Exception(f"限流错误: API 请求失败: {e}\n响应: {error_detail}")
             if 400 <= status < 500:
                 raise Exception(f"客户端错误: API 请求失败: {e}\n响应: {error_detail}")
             raise Exception(f"服务器错误: API 请求失败: {e}\n响应: {error_detail}")
