@@ -14,6 +14,7 @@ UCI 协议要点：
 - 当引擎二进制不可用时静默回退，不影响正常使用
 """
 
+import queue
 import subprocess
 import threading
 import time
@@ -104,6 +105,11 @@ class PikafishEngine:
         self._available = False
         self._error_msg: str = ''  # 启动失败时的诊断信息
         self._pending_async: int = 0   # 进行中的异步搜索计数
+        # 引擎 stdout 由独立 reader 线程读入行队列 —— 主逻辑按截止时间
+        # queue.get(timeout=...) 取行，避免 readline() 在引擎静默挂起时
+        # 永久阻塞（旧实现会连关窗退出都一起卡死）
+        self._out_q: 'queue.Queue' = queue.Queue()
+        self._reader_thread: Optional[threading.Thread] = None
 
         if binary_path is None:
             binary_path = _find_pikafish()
@@ -261,29 +267,40 @@ class PikafishEngine:
         return []
 
     def close(self):
-        """关闭引擎进程。"""
-        with self._lock:
-            if self._proc:
-                try:
-                    self._send('quit')
-                    self._proc.wait(timeout=3.0)
-                except Exception:
-                    self._proc.kill()
-                finally:
-                    self._proc = None
-                    self._available = False
+        """关闭引擎进程。
 
-    def _kill_proc(self):
-        """强制终止引擎进程（异常恢复用）。"""
-        with self._lock:
-            if self._proc:
+        先杀进程再收锁：进程死后 reader 线程 EOF → 队列哨兵唤醒
+        等待中的搜索（持锁方）尽快返回，close 不会被挂起的搜索拖住。
+        """
+        proc = self._proc
+        if proc:
+            try:
+                self._send('quit')
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=2.0)
+            except Exception:
                 try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2.0)
+                    proc.kill()
+                    proc.wait(timeout=2.0)
                 except Exception:
                     pass
-                finally:
-                    self._proc = None
+        with self._lock:
+            self._proc = None
+            self._available = False
+
+    def _kill_proc(self):
+        """强制终止引擎进程（异常恢复用）。同 close：先杀后收锁。"""
+        proc = self._proc
+        if proc:
+            try:
+                proc.kill()
+                proc.wait(timeout=2.0)
+            except Exception:
+                pass
+        with self._lock:
+            self._proc = None
 
     # ── UCI 协议通信 ──
 
@@ -298,10 +315,18 @@ class PikafishEngine:
                 text=True,
                 bufsize=1,
             )
+            # 独立 reader 线程：引擎 stdout → 行队列
+            self._reader_thread = threading.Thread(
+                target=self._reader_loop, daemon=True)
+            self._reader_thread.start()
+
             self._send('uci')
             # 等待 uciok
-            start = time.time()
-            while time.time() - start < ENGINE_STARTUP_TIMEOUT:
+            deadline = time.time() + ENGINE_STARTUP_TIMEOUT
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
                 # 检查进程是否意外退出
                 if self._proc.poll() is not None:
                     rc = self._proc.returncode
@@ -326,11 +351,8 @@ class PikafishEngine:
                         )
                     return  # self._available stays False
 
-                line = self._proc.stdout.readline()
-                if not line:
-                    time.sleep(0.05)
-                    continue
-                if 'uciok' in line:
+                line = self._read_line(remaining)
+                if line and 'uciok' in line:
                     self._available = True
                     return
             # 超时未收到 uciok → 清理僵尸进程
@@ -340,6 +362,27 @@ class PikafishEngine:
             self._kill_proc()
         except (OSError, FileNotFoundError) as e:
             self._error_msg = f'无法启动 Pikafish: {e}'
+
+    def _reader_loop(self):
+        """daemon 线程：持续读取引擎 stdout 到行队列（EOF 时放哨兵）。"""
+        proc = self._proc
+        try:
+            while proc and proc.stdout:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                self._out_q.put(line)
+        except Exception:
+            pass
+        finally:
+            self._out_q.put(None)  # EOF 哨兵，唤醒所有等待中的读取方
+
+    def _read_line(self, timeout: float) -> Optional[str]:
+        """从行队列取一行。超时/EOF 返回 None（绝不永久阻塞）。"""
+        try:
+            return self._out_q.get(timeout=max(timeout, 0.0))
+        except queue.Empty:
+            return None
 
     def _send(self, command: str):
         """发送命令到引擎。"""
@@ -351,7 +394,8 @@ class PikafishEngine:
         """读取引擎输出直到 bestmove 行。
 
         安全机制：
-        - 每次读取前检查进程是否存活（poll）
+        - 从 reader 线程的行队列按剩余时间 queue.get(timeout=...) 取行，
+          引擎静默挂起也只会等到截止时间，绝不永久阻塞
         - 总时间上限 = 实际搜索时间 + 30s 兜底
         - 超时或进程死亡时返回 None（调用方回退 MCTS）
         """
@@ -360,14 +404,17 @@ class PikafishEngine:
 
         # 总时间上限：实际搜索时间 + 30s 兜底
         deadline = time.time() + (time_ms / 1000.0) + 30.0
-        while time.time() < deadline:
-            # 进程已死 → 立即退出，不再阻塞 readline
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            # 进程已死 → 立即退出
             if self._proc.poll() is not None:
                 break
 
-            line = self._proc.stdout.readline()
-            if not line:
-                break  # EOF
+            line = self._read_line(remaining)
+            if line is None:
+                break  # 超时或 EOF
 
             line = line.strip()
 
@@ -383,15 +430,17 @@ class PikafishEngine:
             self._send('stop')
             # 继续读取直到收到（过期）bestmove 或 EOF
             drain_deadline = time.time() + 5.0
-            while time.time() < drain_deadline:
+            while True:
+                remaining = drain_deadline - time.time()
+                if remaining <= 0:
+                    break
                 if self._proc and self._proc.poll() is not None:
                     break
-                if self._proc and self._proc.stdout:
-                    line = self._proc.stdout.readline()
-                    if not line:
-                        break
-                    if line.strip().startswith('bestmove'):
-                        break
+                line = self._read_line(remaining)
+                if line is None:
+                    break
+                if line.strip().startswith('bestmove'):
+                    break
         except Exception:
             pass
         return None
