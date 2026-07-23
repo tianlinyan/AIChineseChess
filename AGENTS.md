@@ -42,7 +42,7 @@ domain/ ──→ ai/ ──→ app/ ──→ ui/ ──→ main.py
 - `openings.py` — 19 条标准开局谱，按走子历史前缀匹配加权随机选取
 - `fen.py` — 共享 FEN 生成（`board_to_fen` / `game_to_fen`），供 pikafish 和 egtb 使用，勿再各自重复实现
 - `prompts.py` — 系统提示词（完整版/精简版均接受 `include_analysis_tools` 参数）、仲裁提示词、合法走法格式化（带 ×吃子/+将军 战术标注，将军>吃子>其他 排序）、工具定义（`DEFAULT_TOOLS` 三个工具；`TOOLS_BASIC` 仅 `move_piece`，用于 llm_only 模式和仲裁）
-- `constants.py` — 全部可调常量与坐标格式化工具函数。**注意：`SEARCH_MAX_DEPTH`（UI 上的"搜索强度" 1~6）不是 Alpha-Beta 深度**，它映射到 MCTS 模拟次数（500~3000，见 controller `_DEPTH_SIMS_MAP`）和 Pikafish 时限（强度×3 秒）
+- `constants.py` — 全部可调常量与坐标格式化工具函数。**注意：`SEARCH_MAX_DEPTH`（UI 上的"搜索强度" 1~6）不是 Alpha-Beta 深度**，它映射到 MCTS 模拟次数（500~3000，见 controller `_DEPTH_SIMS_MAP`）和 Pikafish 时限（强度×3 秒，封顶 `MCTS_TIME_LIMIT`=15 秒）
 - `models.py` — `ModelInfo` 数据类
 
 ### `ai/` — LLM API 交互

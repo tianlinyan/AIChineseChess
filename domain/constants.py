@@ -14,7 +14,7 @@ AI_RETRY_DELAY_MS = 3000
 LM_STUDIO_DEFAULT_PORT = 1234
 
 # ── 搜索引擎配置 ──
-SEARCH_MAX_DEPTH = 5             # 搜索强度 (1-6)：MCTS模拟次数 500~3000，Pikafish时限 depth×3s
+SEARCH_MAX_DEPTH = 5             # 搜索强度 (1-6)：MCTS模拟次数 500~3000，Pikafish时限 depth×3s（封顶 MCTS_TIME_LIMIT=15s）
 SEARCH_TIME_LIMIT = 20.0         # 搜索时间上限（秒）
 SEARCH_QUIESCENCE_DEPTH = 4      # 静态搜索额外深度
 SEARCH_BLUNDER_CHECK_DEPTH = 2   # LLM 走法验证用浅搜索深度

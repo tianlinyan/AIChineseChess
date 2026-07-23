@@ -201,7 +201,7 @@ class PikafishEngine:
         """异步搜索 — 在后台线程执行，不阻塞调用线程（UI）。
 
         在调用线程上快照 FEN + 合法走法（避免竞态），
-        UCI 通信在 daemon 线程中执行，完成时回调 callback(move)。
+        UCI 通信在 daemon 线程中执行，完成时回调 callback(move, error)。
 
         callback 在**工作线程**中被调用，调用方负责用
         QTimer.singleShot / pyqtSignal 将结果调度回主线程。
@@ -210,10 +210,11 @@ class PikafishEngine:
             game: ChineseChessGame 实例（仅用于快照，不在工作线程中访问）
             player: 当前走子方
             time_ms: 搜索时间（毫秒）
-            callback: callable(move_or_None)，在工作线程中调用
+            callback: callable(move_or_None, error_str)，在工作线程中调用；
+                error_str 为空表示成功，否则为失败原因（用于日志展示）
         """
         if not self._available:
-            callback(None)
+            callback(None, '引擎不可用')
             return
 
         self._pending_async += 1
@@ -229,11 +230,12 @@ class PikafishEngine:
             legal_moves = set(tmp_game.get_all_legal_moves(player))
         except Exception as e:
             self._pending_async -= 1
-            callback(None)
+            callback(None, f'棋盘快照失败: {e}')
             return
 
         def _run():
             move = None
+            error = ''
             try:
                 with self._lock:
                     self._send(f'position fen {fen}')
@@ -242,14 +244,18 @@ class PikafishEngine:
                     if uci:
                         move = _uci_to_tuple(uci)
                         if not (move and move in legal_moves):
+                            error = f'返回非法或无法解析的走法: {uci!r}'
                             move = None
-            except (OSError, ValueError, BrokenPipeError):
+                    else:
+                        error = f'引擎无响应/超时（{time_ms}ms + 30s 兜底）'
+            except (OSError, ValueError, BrokenPipeError) as e:
+                error = f'引擎通信异常（进程已终止）: {e}'
                 self._available = False
                 self._kill_proc()
-            except Exception:
-                pass
+            except Exception as e:
+                error = f'搜索异常: {e}'
             try:
-                callback(move)
+                callback(move, error)
             except Exception:
                 pass
             finally:

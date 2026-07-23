@@ -329,6 +329,12 @@ class GameController:
         if model == HUMAN_MODEL:
             return
 
+        # 回合分隔标记（重试/兜底链再入时不重复打印）
+        if self.retry_count == 0:
+            ply = len(self.game.moves) + 1
+            player_name = '红方' if current_player == 1 else '黑方'
+            self.log(f"━━ 第 {ply} 手 · {player_name}（{model.name}）━━", 'INFO')
+
         # ── 1. 开局库查询 ──
         if self.use_opening_book and len(self.game.moves) < OPENING_BOOK_MAX_MOVES:
             # get_opening_move 不在库中时返回 None，无需 is_in_opening_book 预检
@@ -377,7 +383,7 @@ class GameController:
             def _on_engine_done(move, p):
                 if move and self._pikafish and self._pikafish.available:
                     engine_name = 'Pikafish'
-                    engine_desc = f"经深度搜索（时限 {self.search_depth * 3}s）"
+                    engine_desc = f"经深度搜索（时限 {self._pikafish_time_s()}s）"
                 else:
                     engine_name = 'MCTS'
                     engine_desc = f"经蒙特卡洛搜索（{self._depth_to_sims()} 次模拟）"
@@ -527,6 +533,15 @@ class GameController:
 
         # 工具选择：仅 LLM 模式只用 move_piece；其他模式用全部工具
         worker_tools = TOOLS_BASIC if self.ai_mode == 'llm_only' else DEFAULT_TOOLS
+
+        # LLM 启动日志：显示模型名与关键上下文（视觉/引擎参考）
+        extras = []
+        if use_vision:
+            extras.append('视觉模式')
+        if engine_hint:
+            extras.append('含引擎参考')
+        extra_str = f" · {'，'.join(extras)}" if extras else ''
+        self.log(f"🤖 {player_name} {model.name} 思考中{extra_str}...", 'INFO')
 
         # 标记忙碌
         self.ai_manager.set_busy(True)
@@ -731,6 +746,11 @@ class GameController:
             self._start_arbitration(current_player)
             return  # 暂不执行走子，等待仲裁结果
 
+        # ── Hybrid 模式且 LLM 采纳了引擎走法 → 记一致性日志（最常见路径不再静默）──
+        if (self.ai_mode == 'hybrid' and self._hybrid_engine_move
+                and final_move == self._hybrid_engine_move):
+            self.log("🤝 LLM 与引擎意见一致", 'INFO')
+
         # ── 执行最终走法 ──
         result = self.game.move_piece(from_row, from_col, to_row, to_col)
         if not result['success']:
@@ -782,6 +802,10 @@ class GameController:
         """将 UI 搜索深度(1~6)映射为 MCTS 模拟次数。"""
         return self._DEPTH_SIMS_MAP.get(self.search_depth, 2000)
 
+    def _pikafish_time_s(self) -> int:
+        """Pikafish 每步搜索秒数：深度×3s，封顶 MCTS_TIME_LIMIT(15s)。"""
+        return min(self.search_depth * 3, int(MCTS_TIME_LIMIT))
+
     def _mcts_search(self, player: int,
                      priors: dict = None,
                      on_done = None) -> Optional[tuple]:
@@ -794,15 +818,28 @@ class GameController:
 
         # ── Pikafish 异步（daemon 线程搜索，信号回主线程）──
         if on_done is not None and self._pikafish and self._pikafish.available:
-            time_ms = self.search_depth * 3 * 1000  # 深度×3秒
+            time_ms = self._pikafish_time_s() * 1000  # 深度×3秒，封顶15s
+            self.log(f"  🐟 Pikafish 搜索中（时限 {time_ms // 1000}s）...", 'INFO')
             captured_version = self.game_version
             # 同时捕获 cancel_version：暂停/恢复只自增 cancel_version，
             # 缺少这层门控时旧搜索回调会与新搜索叠加 → 同一回合走两步
             captured_cancel = self.ai_manager.cancel_version
+
+            def _logged_pf_done(move, p, _od=on_done, _ms=time_ms):
+                # 主线程：先补 Pikafish 结果日志，再转交原始回调
+                if move:
+                    fr, fc, tr, tc = move
+                    pn = PIECE_SYMBOLS.get(self.game.board[fr][fc], '?')
+                    self.log(f"  ✅ Pikafish选择: {pn} "
+                             f"{chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1} "
+                             f"({_ms}ms)", 'INFO')
+                _od(move, p)
+
             self._pikafish.search_async(
                 self.game, player, time_ms=time_ms,
-                callback=lambda m: self._pikafish_relay.search_done.emit(
-                    (m, player, on_done, captured_version, captured_cancel)))
+                callback=lambda m, err: self._pikafish_relay.search_done.emit(
+                    (m, player, _logged_pf_done,
+                     captured_version, captured_cancel, err)))
             return None
 
         # ── MCTS 后台线程异步（旧实现主线程同步跑最长 15s，UI 冻结）──
@@ -835,12 +872,18 @@ class GameController:
             g._king_pos = king_pos
             g.recompute_hash()
             engine = MCTSEngine(max_simulations=sims, time_limit=time_limit)
-            move = engine.search(g, player, priors=priors)
+            move = None
+            try:
+                move = engine.search(g, player, priors=priors)
+            except Exception as e:
+                # 异常详情交由 _logged_on_done 展示（relay 层的失败日志
+                # 只挂 Pikafish 来源，避免误标）
+                result['error'] = f'MCTS 搜索异常: {e}'
             result['sims'] = engine.simulations
             result['top'] = engine.get_top_moves(3)
             self._pikafish_relay.search_done.emit(
                 (move, player, _logged_on_done,
-                 captured_version, captured_cancel))
+                 captured_version, captured_cancel, ''))
 
         def _logged_on_done(move, p):
             # 主线程：先补 MCTS 结果日志，再转交原始回调
@@ -856,7 +899,8 @@ class GameController:
                     self.log(f"    {i+1}. {mpn} {chr(65+mfc)}{mfr+1}→{chr(65+mtc)}{mtr+1} "
                              f"[访问{visits}次, 价值{val:.3f}]", 'INFO')
             else:
-                self.log("  ⚠️ MCTS未找到走法", 'WARNING')
+                detail = f"（{result['error']}）" if result.get('error') else ''
+                self.log(f"  ⚠️ MCTS未找到走法{detail}", 'WARNING')
             on_done(move, p)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -1064,9 +1108,9 @@ class GameController:
                 self.make_ai_move(expected_version=v))
 
     def _on_pikafish_search_done(self, args: tuple) -> None:
-        """主线程：处理 Pikafish 异步搜索/回退结果。"""
+        """主线程：处理 Pikafish/MCTS 异步搜索结果。"""
         try:
-            move, player, on_done, captured_version, captured_cancel = args
+            move, player, on_done, captured_version, captured_cancel, error = args
         except Exception as e:
             self.log(f"[PF错误] 搜索回调参数解包失败: {e}", 'ERROR')
             return
@@ -1082,6 +1126,9 @@ class GameController:
             if self.ai_manager._shutting_down or self.is_paused or not self.is_active or self.game.game_over:
                 self.log(f"[PF诊断] 搜索回调状态异常(shutdown={self.ai_manager._shutting_down} paused={self.is_paused} active={self.is_active} over={self.game.game_over})，丢弃", 'INFO')
                 return
+            # Pikafish 失败：把原因写进思考日志（随后调用方会启动 MCTS 回退）
+            if move is None and error:
+                self.log(f"  ⚠️ Pikafish 搜索失败: {error}，回退到 MCTS", 'WARNING')
             on_done(move, player)
         except Exception as e:
             self.log(f"[PF诊断] 搜索回调异常: {e}", 'ERROR')
