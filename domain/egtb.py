@@ -22,9 +22,13 @@ from domain.constants import EGTB_MAX_PIECES, EGTB_CLOUD_MAX_PIECES
 # ══════════════════════════════════════════════════════════════════════════════
 
 CHESSDB_URL = "https://www.chessdb.cn/query/"
-CHESSDB_TIMEOUT = 2.0          # 查询超时（秒）
-CHESSDB_CACHE_TTL = 300        # 缓存有效期（秒）
+CHESSDB_TIMEOUT = 1.0          # 查询超时（秒）
+CHESSDB_CACHE_TTL = 300        # 正缓存有效期（秒）
+CHESSDB_NEG_CACHE_TTL = 60     # 负缓存（未找到/查询失败）有效期（秒）
 CHESSDB_ENABLED = True         # 是否启用云库查询
+CACHE_MAX_SIZE = 5000          # 正缓存最大条目数（超出淘汰最旧）
+CLOUD_FAIL_BREAKER_COUNT = 3   # 连续网络失败次数上限，达到后熔断
+CLOUD_BREAKER_SECONDS = 120    # 熔断后暂停云查询的秒数
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -32,6 +36,9 @@ CHESSDB_ENABLED = True         # 是否启用云库查询
 # ══════════════════════════════════════════════════════════════════════════════
 
 _cache: dict = {}              # {fen_key: (dtm, win_side, timestamp)}
+_neg_cache: dict = {}          # {fen_key: timestamp} 未命中/失败负缓存
+_cloud_fail_count = 0          # 连续网络失败计数（熔断器）
+_cloud_disabled_until = 0.0    # 熔断截止时间戳
 
 
 def _fen_cache_key(board: list, current_player: int) -> str:
@@ -54,18 +61,30 @@ def probe_cloud(board: list, current_player: int) -> Optional[dict]:
           win: 1=红胜, 2=黑胜, 0=和棋
           score: 局面评分（mate分）
     """
+    global _cloud_fail_count, _cloud_disabled_until
     if not CHESSDB_ENABLED:
         return None
 
     cache_key = _fen_cache_key(board, current_player)
     now = time.time()
 
-    # 检查缓存
+    # 检查正缓存
     if cache_key in _cache:
         dtm, win, ts = _cache[cache_key]
         if now - ts < CHESSDB_CACHE_TTL:
             return {'dtm': dtm, 'win': win, 'score': _dtm_to_score(dtm, win, current_player)}
         del _cache[cache_key]
+
+    # 检查负缓存（未找到/失败的结果也缓存，避免同一局面反复发 HTTP）
+    if cache_key in _neg_cache:
+        ts = _neg_cache[cache_key]
+        if now - ts < CHESSDB_NEG_CACHE_TTL:
+            return None
+        del _neg_cache[cache_key]
+
+    # 熔断器：连续网络失败过多，暂停云查询一段时间
+    if now < _cloud_disabled_until:
+        return None
 
     # 构造 FEN 并查询
     fen = board_to_fen(board, current_player)
@@ -78,19 +97,30 @@ def probe_cloud(board: list, current_player: int) -> Optional[dict]:
             data = json.loads(resp.read().decode('utf-8'))
     except (urllib.error.URLError, urllib.error.HTTPError,
             json.JSONDecodeError, OSError, ValueError):
-        # 网络不可用、超时、非 JSON → 静默回退
+        # 网络不可用、超时、非 JSON → 负缓存 + 熔断计数
+        _neg_cache[cache_key] = now
+        _cloud_fail_count += 1
+        if _cloud_fail_count >= CLOUD_FAIL_BREAKER_COUNT:
+            _cloud_disabled_until = now + CLOUD_BREAKER_SECONDS
+            _cloud_fail_count = 0
         return None
 
+    _cloud_fail_count = 0  # 成功通信，重置熔断计数
+
     if not isinstance(data, dict):
+        _neg_cache[cache_key] = now
         return None
 
     win = data.get('win', 0)     # 1=红胜, 2=黑胜, 0=和棋/未知
     dtm = data.get('dtm', 0)     # 距离杀棋步数
 
     if win == 0 and dtm == 0:
-        return None  # 云库中无此局面
+        _neg_cache[cache_key] = now  # 云库中无此局面 → 负缓存
+        return None
 
-    # 缓存结果
+    # 缓存结果（容量上限：淘汰最旧条目）
+    if len(_cache) >= CACHE_MAX_SIZE:
+        _cache.pop(next(iter(_cache)))
     _cache[cache_key] = (dtm, win, now)
 
     score = _dtm_to_score(dtm, win, current_player)
@@ -112,17 +142,21 @@ def _dtm_to_score(dtm: int, win: int, current_player: int) -> float:
 
 
 def probe(board: list, current_player: int,
-          piece_count: int = 32) -> Optional[Tuple[float, int]]:
+          piece_count: int = 32,
+          allow_cloud: bool = True) -> Optional[Tuple[float, int]]:
     """查询残局库 — 自动选择本地判定或云库查询。
 
     Args:
         board: 10×9 棋盘
         current_player: 当前走子方 (1=红, 2=黑)
         piece_count: 棋盘上的棋子总数（调用方可预先计算）
+        allow_cloud: 是否允许 chessdb.cn 云查询。搜索/MCTS 的叶节点
+            必须传 False（同步 HTTP 会让搜索瘫痪）；UI 层单次查询
+            或根节点预取可用 True。
 
     Returns:
         None — 残局库中无此局面
-        (score, dtm) — 评估分数和距离杀棋步数
+        (score, dtm) — 评估分数（current_player 视角）和距离杀棋步数
     """
     # 只有子力 ≤ EGTB_MAX_PIECES 才查询
     if piece_count > EGTB_MAX_PIECES:
@@ -134,7 +168,7 @@ def probe(board: list, current_player: int,
         return local
 
     # 云库查询
-    if piece_count <= EGTB_CLOUD_MAX_PIECES:
+    if allow_cloud and piece_count <= EGTB_CLOUD_MAX_PIECES:
         result = probe_cloud(board, current_player)
         if result is not None:
             return (result['score'], result['dtm'])
@@ -147,17 +181,31 @@ def _local_egtb(board: list, current_player: int) -> Optional[Tuple[float, int]]
 
     支持：
     - 无攻击子力双方 → 和棋
-    - 一方有攻击子对一方无 → 必胜（需验证能否赢）
-    - 单車必胜、单馬不和、单炮不和
+    - 一方有攻击子对一方无 → 按残局常识判定（结合防守方士象数量）
+    - 单車必胜（对士象全为官和）、单馬必胜孤将、双炮必胜孤将
     - 双車/車炮/車馬必胜
     """
     red_attackers = []   # 红方攻击子力列表 (piece, row, col)
     black_attackers = [] # 黑方攻击子力列表
+    red_advisors = red_bishops = 0      # 红方士/相数量（防守力）
+    black_advisors = black_bishops = 0  # 黑方士/象数量
 
     for r in range(10):
         for c in range(9):
             p = board[r][c]
-            if p == '.' or p.upper() in ('K', 'A', 'B'):
+            if p == '.' or p.upper() == 'K':
+                continue
+            if p.upper() == 'A':
+                if p.isupper():
+                    red_advisors += 1
+                else:
+                    black_advisors += 1
+                continue
+            if p.upper() == 'B':
+                if p.isupper():
+                    red_bishops += 1
+                else:
+                    black_bishops += 1
                 continue
             if p.isupper():
                 red_attackers.append((p.upper(), r, c))
@@ -173,37 +221,53 @@ def _local_egtb(board: list, current_player: int) -> Optional[Tuple[float, int]]
 
     # ── 单方有攻击子 → 判定能否必胜 ──
     if black_count == 0:
-        return _can_win(red_attackers, current_player, 1)
+        return _can_win(red_attackers, current_player, 1,
+                        black_advisors, black_bishops)
     if red_count == 0:
-        return _can_win(black_attackers, current_player, 2)
+        return _can_win(black_attackers, current_player, 2,
+                        red_advisors, red_bishops)
 
     return None
 
 
-def _can_win(attackers: list, current_player: int, owner: int) -> Optional[Tuple[float, int]]:
-    """判断一组攻击子力能否必胜。
+def _can_win(attackers: list, current_player: int, owner: int,
+             defender_advisors: int = 0,
+             defender_bishops: int = 0) -> Optional[Tuple[float, int]]:
+    """判断一组攻击子力能否必胜（结合防守方士/象数量）。
 
     中国象棋残局常识：
-    - 单車 → 必胜
-    - 单馬 → 必和（无法将死）
+    - 单車 → 必胜；但对士象全（2士2象）是官和
+    - 单馬 → 必胜孤将、可胜单士；有象防守则和
     - 单炮 → 必和（无炮架）
     - 单卒 → 需具体判断（过河未过河、是否被阻挡）
-    - 双車/車炮/車馬/双炮有架 → 必胜
+    - 双炮（互为炮架）→ 必胜孤将
+    - 双車/車炮/車馬 → 必胜
     """
     has_rook = any(p == 'R' for p, _, _ in attackers)
     has_cannon = any(p == 'C' for p, _, _ in attackers)
-    has_knight = any(p == 'N' for p, _, _ in attackers)
-    has_pawn = any(p == 'P' for p, _, _ in attackers)
     count = len(attackers)
+    defender_total = defender_advisors + defender_bishops
 
     # 单子
     if count == 1:
         p, r, c = attackers[0]
         if p == 'R':
+            # 单車 vs 士象全 → 官和
+            if defender_advisors >= 2 and defender_bishops >= 2:
+                return (0.0, 0)
             score = 80000 if owner == current_player else -80000
             return (score, 20)  # 单车必胜，~20步
-        if p in ('N', 'C'):
-            return (0.0, 0)     # 单马/单炮 → 和棋
+        if p == 'N':
+            # 单馬必胜孤将；单士可擒；有象则和
+            if defender_total == 0:
+                score = 40000 if owner == current_player else -40000
+                return (score, 30)
+            if defender_advisors == 1 and defender_bishops == 0:
+                score = 20000 if owner == current_player else -20000
+                return (score, 40)
+            return (0.0, 0)
+        if p == 'C':
+            return (0.0, 0)     # 单炮（无炮架）→ 和棋
         if p == 'P':
             # 单卒：过河且未被阻挡 → 可能赢；否则和
             crossed = (r <= 4) if owner == 1 else (r >= 5)
@@ -217,7 +281,14 @@ def _can_win(attackers: list, current_player: int, owner: int) -> Optional[Tuple
         score = 85000 if owner == current_player else -85000
         return (score, 15)
 
-    # 双炮无車：可能不够赢，给中等优势分
+    # 双炮 vs 孤将：互为炮架，必胜
+    if (count == 2 and has_cannon
+            and all(p == 'C' for p, _, _ in attackers)
+            and defender_total == 0):
+        score = 80000 if owner == current_player else -80000
+        return (score, 20)
+
+    # 其他含炮组合：可能不够赢，给中等优势分
     if has_cannon and count >= 2:
         score = 50000 if owner == current_player else -50000
         return (score, 25)
@@ -231,5 +302,6 @@ def _can_win(attackers: list, current_player: int, owner: int) -> Optional[Tuple
 
 
 def clear_cache() -> None:
-    """清空查询缓存。"""
+    """清空查询缓存（含负缓存）。"""
     _cache.clear()
+    _neg_cache.clear()

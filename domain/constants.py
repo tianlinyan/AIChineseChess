@@ -14,17 +14,17 @@ AI_RETRY_DELAY_MS = 3000
 LM_STUDIO_DEFAULT_PORT = 1234
 
 # ── 搜索引擎配置 ──
-SEARCH_MAX_DEPTH = 5             # Alpha-Beta 最大搜索深度 (1-6) [仅 search_only 模式使用]
+SEARCH_MAX_DEPTH = 5             # 搜索强度 (1-6)：MCTS模拟次数 500~3000，Pikafish时限 depth×3s
 SEARCH_TIME_LIMIT = 20.0         # 搜索时间上限（秒）
 SEARCH_QUIESCENCE_DEPTH = 4      # 静态搜索额外深度
 SEARCH_BLUNDER_CHECK_DEPTH = 2   # LLM 走法验证用浅搜索深度
 
 # ── MCTS 配置 ──
-MCTS_SIMULATIONS = 2000          # 默认模拟次数（每次~5ms，2000次≈10s）
-MCTS_TIME_LIMIT = 20.0           # MCTS / Pikafish 时间上限（秒）
+MCTS_SIMULATIONS = 2000          # 默认模拟次数（真搜索后单次模拟≈0.1~0.5ms，主要耗在叶评估）
+MCTS_TIME_LIMIT = 15.0           # MCTS / Pikafish 时间上限（秒）
 MCTS_EXPLORATION = 1.4           # UCB1 探索参数
 MCTS_PRIOR_STRENGTH = 50         # LLM走法先验强度（虚拟访问次数乘数）
-MCTS_FALLBACK_SIMULATIONS = 500  # 回退搜索模拟次数（约2.5s，避免UI长时间冻结）
+MCTS_FALLBACK_SIMULATIONS = 500  # 回退搜索模拟次数（后台线程执行，不阻塞 UI）
 MCTS_FALLBACK_TIME_LIMIT = 5.0   # 回退搜索时间上限（秒）
 
 # ── 残局库配置 ──
@@ -46,6 +46,12 @@ AI_DEFAULT_MODE = "hybrid"
 THINKING_TIMER_INTERVAL = 1000
 AI_DELAY_MS = 0
 OPENING_DELAY_MS = 2000          # 开局库每步间隔（ms），让玩家看清走子
+
+# ── 日志 ──
+LOG_MAX_BLOCKS = 2000            # 思考日志最大块数（超出裁最旧；不限制时长对局会拖慢 QTextEdit）
+
+# ── 提示词配置 ──
+PROMPT_HISTORY_MAX_ITEMS = 24    # 提示词中走子历史的最大条数（超长截断，控制 token）
 
 # ── 视觉模式 ──
 VISION_IMAGE_QUALITY = 80        # JPEG 质量 (1-100)，越低文件越小

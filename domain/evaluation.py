@@ -6,7 +6,8 @@
 特征组（~40个特征）：
   A. 物质分 (2) — 红方/黑方子力值
   B. 位置分 (14) — 7种棋子 × 2方 PST
-  C. 机动性 (2) — 红方/黑方合法走法数
+  C. 机动性 (2) — 红方/黑方合法走法数（仅调用方提供时计入：LLM 工具/
+     评估面板会生成真实走法数；搜索叶节点为速度传 0 跳过，不计入）
   D. 卒结构 (6) — 过河卒、卒链、通路卒、卒威胁
   E. 将安全 (4) — 士相完整性、将军状态、将暴露度
   F. 开放线 (2) — 車占开放线/半开放线
@@ -17,7 +18,7 @@
 设计原则：所有特征可增量更新（为将来NNUE做准备），当前总耗时 < 0.1ms。
 """
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT
+from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, ENDGAME_PIECE_THRESHOLD
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 一、棋子基础价值（厘兵单位，参考Pikafish权重）
@@ -43,6 +44,46 @@ PIECE_VALUE_ENDGAME = {
     'A': 180,
     'P': 200,    # 卒大幅升值
 }
+
+
+def compute_material(board: list) -> tuple:
+    """统计双方子力与棋子数。
+
+    Args:
+        board: 10×9 棋盘，大写=红，小写=黑，'.'=空。
+
+    Returns:
+        (red_material, black_material, red_count, black_count)
+        子力单位为"兵"（PIECE_VALUE ÷ 100：車9 · 炮4.5 · 馬4 · 相/士2 · 兵1），
+        不含将/帥（价值∞，双方各一，纳入统计只会干扰对比）。
+        总子数 ≤ ENDGAME_PIECE_THRESHOLD 时自动切换残局估值表。
+    """
+    red_count = 0
+    black_count = 0
+    # 单遍收集棋子列表，随后一次决定估值表（避免两次全盘扫描）
+    pieces = []
+    for r in range(BOARD_HEIGHT):
+        for c in range(BOARD_WIDTH):
+            p = board[r][c]
+            if p == '.':
+                continue
+            pieces.append(p)
+            if p.isupper():
+                red_count += 1
+            else:
+                black_count += 1
+    vals = PIECE_VALUE_ENDGAME if red_count + black_count <= ENDGAME_PIECE_THRESHOLD \
+        else PIECE_VALUE
+    red_material = 0.0
+    black_material = 0.0
+    for p in pieces:
+        if p in ('K', 'k'):
+            continue
+        if p.isupper():
+            red_material += vals.get(p, 0)
+        else:
+            black_material += vals.get(p.upper(), 0)
+    return red_material / 100, black_material / 100, red_count, black_count
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 二、增强Piece-Square Tables（基于大师对局统计调优）
@@ -184,11 +225,11 @@ def _mirror_row(row: int) -> int:
 
 
 def _is_red(piece: str) -> bool:
-    return piece.isupper() and piece != '.'
+    return piece.isupper()
 
 
 def _is_black(piece: str) -> bool:
-    return piece.islower() and piece != '.'
+    return piece.islower()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -222,6 +263,7 @@ def evaluate(board: list,
     red_bing = []
     black_bing = []
 
+    vals = PIECE_VALUE_ENDGAME if endgame else PIECE_VALUE
     for r in range(BOARD_HEIGHT):
         for c in range(BOARD_WIDTH):
             piece = board[r][c]
@@ -230,7 +272,6 @@ def evaluate(board: list,
             piece_upper = piece.upper()
 
             if _is_red(piece):
-                vals = PIECE_VALUE_ENDGAME if endgame else PIECE_VALUE
                 red_material += vals.get(piece_upper, 0)
                 if piece_upper in RED_PST:
                     score += w.positional * RED_PST[piece_upper][r][c]
@@ -245,7 +286,6 @@ def evaluate(board: list,
                 elif piece == 'P':
                     red_bing.append((r, c))
             else:
-                vals = PIECE_VALUE_ENDGAME if endgame else PIECE_VALUE
                 black_material += vals.get(piece_upper, 0)
                 if piece_upper in RED_PST:
                     score -= w.positional * RED_PST[piece_upper][_mirror_row(r)][c]
@@ -311,8 +351,8 @@ def evaluate(board: list,
             score -= w.endgame_shuai_active * black_shuai_pos[0]
 
     # ── 模式检测（高价值战术） ──
-    score += _detect_dangerous_ma(red_ma, black_shuai_pos)
-    score -= _detect_dangerous_ma(black_ma, red_shuai_pos)
+    score += _detect_dangerous_ma(board, red_ma, black_shuai_pos)
+    score -= _detect_dangerous_ma(board, black_ma, red_shuai_pos)
     score += _detect_battery(board, red_ju, red_cannons, black_shuai_pos)
     score -= _detect_battery(board, black_ju, black_cannons, red_shuai_pos)
 
@@ -333,9 +373,11 @@ def _bing_structure(board: list, bing_list: list, is_red: bool) -> float:
         if crossed:
             # 过河基础分
             score += 15.0
-            # 深入敌阵（越靠近底线越好）
+            # 深入敌阵加分（但冲到底线的"老兵"价值骤降，不再加分 ——
+            # 与 RED_BING_PST 底线 0 分保持一致）
             advance = r if is_red else (9 - r)
-            score += (4 - advance) * 8.0 if advance <= 3 else 0
+            if 1 <= advance <= 3:
+                score += (4 - advance) * 8.0
             # 中心卒价值更高
             if 3 <= c <= 5:
                 score += 10.0
@@ -455,20 +497,27 @@ def _river_control(board: list, is_red: bool) -> float:
     return score
 
 
-def _detect_dangerous_ma(ma_list: list,
-                              enemy_shuai_pos: tuple = None) -> float:
-    """检测卧槽馬/挂角馬威胁"""
+def _detect_dangerous_ma(board: list, ma_list: list,
+                         enemy_shuai_pos: tuple = None) -> float:
+    """检测卧槽馬/挂角馬威胁（验蹩马腿：腿被塞的马不构成将军威胁）"""
     bonus = 0.0
     if not enemy_shuai_pos:
         return 0.0
     ekr, ekc = enemy_shuai_pos
     for kr, kc in ma_list:
-        # 馬在对方九宫对角线位置 = 卧槽馬/挂角馬
-        dr, dc = abs(kr - ekr), abs(kc - ekc)
-        if (dr == 1 and dc == 2) or (dr == 2 and dc == 1):
-            bonus += 60.0
+        # 馬以日字攻击对方将 = 卧槽馬/挂角馬
+        dr, dc = kr - ekr, kc - ekc
+        adr, adc = abs(dr), abs(dc)
+        if (adr == 1 and adc == 2) or (adr == 2 and adc == 1):
+            # 蹩马腿检查（腿位在马一侧：纵向跳在马同列，横向跳在马同行）
+            if adr == 2:
+                leg_r, leg_c = kr - dr // 2, kc
+            else:
+                leg_r, leg_c = kr, kc - dc // 2
+            if board[leg_r][leg_c] == '.':
+                bonus += 60.0
         # 馬在对方九宫一格内
-        elif dr <= 2 and dc <= 2 and abs(kr - ekr) + abs(kc - ekc) <= 3:
+        elif adr <= 2 and adc <= 2 and adr + adc <= 3:
             bonus += 20.0
     return bonus
 

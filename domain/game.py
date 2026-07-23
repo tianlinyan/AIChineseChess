@@ -1,6 +1,18 @@
 """中国象棋游戏逻辑核心，管理棋盘状态、移动、胜负判断等"""
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, PIECE_SYMBOLS
+import random as _random
+
+from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, PIECE_SYMBOLS, ENDGAME_PIECE_THRESHOLD
+
+# ── Zobrist 哈希表（固定种子，进程内可复现）──
+# 旧实现是 ord(piece)*31 + r*7 + c*13 的线性组合加权，不同棋子/格子
+# 容易碰撞（置换表命中错误分数、重复检测误判）。标准 Zobrist：
+# 每个 (棋子, 格子) 一个 64 位随机数，哈希 = 各棋子异或。
+_PIECE_TYPES = 'KABNRCPkabnrcp'
+_z_rng = _random.Random(20260723)
+ZOBRIST_TABLE = {p: [_z_rng.getrandbits(64) for _ in range(90)]
+                 for p in _PIECE_TYPES}
+_ZOBRIST_SIDE = {1: _z_rng.getrandbits(64), 2: _z_rng.getrandbits(64)}
 
 
 class ChineseChessGame:
@@ -30,10 +42,12 @@ class ChineseChessGame:
         self.winner = None     # None=进行中, 1=红胜, 2=黑胜, 0=和棋
         self.last_move = None
         self._position_history: list = []  # 走子历史哈希，用于着法重复检测
-        self._move_checks: list = []       # 并行记录：每步是否将军（用于长将检测）
+        self._move_checks: list = []       # 并行记录：（走子方, 走后对方是否被将军），用于长将检测
         self.total_moves_count = 0        # 总步数（自游戏开始计，reset 清零）
         # 将位置缓存（O(1) 将军检测，move_piece 时增量更新）
         self._king_pos = {1: (9, 4), 2: (0, 4)}
+        # Zobrist 哈希（move_piece / 搜索 make/unmake 增量维护）
+        self._zobrist = self._compute_zobrist()
 
     def reset(self):
         self.board = [row[:] for row in self.STANDARD_BOARD]
@@ -46,6 +60,7 @@ class ChineseChessGame:
         self._move_checks = []
         self.total_moves_count = 0
         self._king_pos = {1: (9, 4), 2: (0, 4)}
+        self._zobrist = self._compute_zobrist()
 
     def is_red(self, piece):
         return piece.isupper()
@@ -94,6 +109,14 @@ class ChineseChessGame:
         self.board[to_row][to_col] = piece
         self.board[from_row][from_col] = '.'
 
+        # 增量维护 Zobrist 哈希
+        _zi_from = from_row * self.size_cols + from_col
+        _zi_to = to_row * self.size_cols + to_col
+        self._zobrist ^= (ZOBRIST_TABLE[piece][_zi_from]
+                          ^ ZOBRIST_TABLE[piece][_zi_to])
+        if captured != '.':
+            self._zobrist ^= ZOBRIST_TABLE[captured][_zi_to]
+
         # 将移动时增量更新缓存
         if piece == 'K':
             self._king_pos[1] = (to_row, to_col)
@@ -107,7 +130,8 @@ class ChineseChessGame:
         # 记录走子后的局面哈希 + 是否将军（着法重复/长将检测）
         self._position_history.append(self.position_hash())
         opponent = 2 if self.current_player == 1 else 1
-        self._move_checks.append(self._is_in_check(opponent))
+        # 显式记录走子方：不依赖索引奇偶（500 条截断后奇偶会整体翻转）
+        self._move_checks.append((self.current_player, self._is_in_check(opponent)))
         # 保留最近 500 条
         if len(self._position_history) > 500:
             self._position_history = self._position_history[-500:]
@@ -128,21 +152,17 @@ class ChineseChessGame:
                         'winner': self.winner,
                         'message': f'{loser_name}长将犯规，判负！'}
 
-        if self._is_jiangsha(opponent):
+        # ── 将杀/困毙判定：一次生成对方走法，两种结局共用 ──
+        if not self.get_all_legal_moves(opponent):
             self.game_over = True
             self.winner = self.current_player
-            return {
-                'success': True, 'game_over': True, 'winner': self.current_player,
-                'message': f"{'红方' if self.current_player == 1 else '黑方'}将死对方获胜！"
-            }
-
-        if not self._has_any_legal_move(opponent):
-            self.game_over = True
-            self.winner = self.current_player
-            return {
-                'success': True, 'game_over': True, 'winner': self.current_player,
-                'message': f"{'红方' if self.current_player == 1 else '黑方'}困毙对方获胜！"
-            }
+            player_name = '红方' if self.current_player == 1 else '黑方'
+            if self._is_in_check(opponent):
+                msg = f'{player_name}将死对方获胜！'
+            else:
+                msg = f'{player_name}困毙对方获胜！'
+            return {'success': True, 'game_over': True,
+                    'winner': self.current_player, 'message': msg}
 
         # 双方无攻击子力 → 和棋（只剩将+士+相，无車馬炮兵）
         if self._no_attacking_pieces():
@@ -351,7 +371,11 @@ class ChineseChessGame:
     def _is_in_check(self, player):
         """检测 player 方是否被将军。
 
-        优先使用缓存的将位置（O(1)），缓存失效时回退全盘扫描（O(90)）。
+        从将位反向检测：車/炮四条射线、馬 8 个攻击位（验蹩腿）、
+        兵/卒 3 个攻击位 —— O(~20) 替代"对方全子 × 走法校验"的 O(90×16)。
+        与旧暴力版语义完全等价（士/相不出九宫/不过河不可能攻击到对方将，
+        双将永不相邻，将帅对面由 _is_king_facing 单独处理）。
+        将位置优先用缓存，缓存失效时回退全盘扫描修复。
         """
         king_piece = 'K' if player == 1 else 'k'
         kr, kc = self._king_pos.get(player, (None, None))
@@ -371,53 +395,249 @@ class ChineseChessGame:
             else:
                 return False  # 将不在棋盘上（不应出现）
 
-        opponent = 2 if player == 1 else 1
-        for r in range(self.size_rows):
-            for c in range(self.size_cols):
-                piece = self.board[r][c]
-                if piece != '.' and self.get_piece_owner(piece) == opponent:
-                    if self._is_legal_move(piece, r, c, kr, kc):
-                        return True
-        return False
+        board = self.board
+        if player == 1:
+            opp_rook, opp_cannon, opp_knight, opp_pawn = 'r', 'c', 'n', 'p'
+        else:
+            opp_rook, opp_cannon, opp_knight, opp_pawn = 'R', 'C', 'N', 'P'
 
-    def _is_jiangsha(self, player):
-        if not self._is_in_check(player):
-            return False
-        for r in range(self.size_rows):
-            for c in range(self.size_cols):
-                piece = self.board[r][c]
-                if piece != '.' and self.get_piece_owner(piece) == player:
-                    for tr in range(self.size_rows):
-                        for tc in range(self.size_cols):
-                            if self._is_legal_move(piece, r, c, tr, tc):
-                                if not self._would_be_illegal(r, c, tr, tc, player):
-                                    return False
-        return True
+        # ── 車 / 炮：四条射线（車打直线，炮隔一子）──
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            r, c = kr + dr, kc + dc
+            screened = False
+            while self.in_board(r, c):
+                p = board[r][c]
+                if p != '.':
+                    if not screened:
+                        if p == opp_rook:
+                            return True
+                        screened = True
+                    else:
+                        if p == opp_cannon:
+                            return True
+                        break
+                r += dr
+                c += dc
 
-    def _has_any_legal_move(self, player):
-        for r in range(self.size_rows):
-            for c in range(self.size_cols):
-                piece = self.board[r][c]
-                if piece != '.' and self.get_piece_owner(piece) == player:
-                    for tr in range(self.size_rows):
-                        for tc in range(self.size_cols):
-                            if self._is_legal_move(piece, r, c, tr, tc):
-                                if not self._would_be_illegal(r, c, tr, tc, player):
-                                    return True
+        # ── 馬：8 个攻击位（验蹩马腿）──
+        # 蹩腿格在"马一侧"：纵向跳时腿在马的同一列、横向跳时在马的同一行
+        for dr, dc in ((2, 1), (2, -1), (-2, 1), (-2, -1),
+                       (1, 2), (1, -2), (-1, 2), (-1, -2)):
+            r, c = kr + dr, kc + dc
+            if self.in_board(r, c) and board[r][c] == opp_knight:
+                if abs(dr) == 2:
+                    leg_r, leg_c = kr + dr // 2, kc + dc
+                else:
+                    leg_r, leg_c = kr + dr, kc + dc // 2
+                if board[leg_r][leg_c] == '.':
+                    return True
+
+        # ── 兵/卒：正面一格 + 过河后横向 ──
+        if player == 1:
+            # 黑卒向下攻（行号增大），横向攻击要求卒已过河（行≥5）
+            if kr > 0 and board[kr - 1][kc] == 'p':
+                return True
+            if kr >= 5:
+                if kc > 0 and board[kr][kc - 1] == 'p':
+                    return True
+                if kc < self.size_cols - 1 and board[kr][kc + 1] == 'p':
+                    return True
+        else:
+            # 红兵向上攻（行号减小），横向攻击要求兵已过河（行≤4）
+            if kr < self.size_rows - 1 and board[kr + 1][kc] == 'P':
+                return True
+            if kr <= 4:
+                if kc > 0 and board[kr][kc - 1] == 'P':
+                    return True
+                if kc < self.size_cols - 1 and board[kr][kc + 1] == 'P':
+                    return True
         return False
 
     def get_all_legal_moves(self, player):
+        """生成全部合法走法（定向生成 + 应将校验）。
+
+        按棋种生成候选目标：車/炮沿四条射线步进、馬 8 个日字（验蹩腿）、
+        相 4 个田字（验塞眼+不过河）、士/将宫内 4 格、兵/卒 3 个方向，
+        再逐一 _would_be_illegal 校验。与旧"全 90 格 × _is_legal_move"
+        实现的走法集合完全等价（tests/compare_movegen.py 对拍验证）。
+        """
         moves = []
+        board = self.board
         for r in range(self.size_rows):
             for c in range(self.size_cols):
-                piece = self.board[r][c]
-                if piece != '.' and self.get_piece_owner(piece) == player:
-                    for tr in range(self.size_rows):
-                        for tc in range(self.size_cols):
-                            if self._is_legal_move(piece, r, c, tr, tc):
-                                if not self._would_be_illegal(r, c, tr, tc, player):
-                                    moves.append((r, c, tr, tc))
+                piece = board[r][c]
+                if piece == '.' or self.get_piece_owner(piece) != player:
+                    continue
+                upper = piece.upper()
+                if upper == 'R':
+                    self._gen_ray_moves(moves, r, c, player, cannon=False)
+                elif upper == 'C':
+                    self._gen_ray_moves(moves, r, c, player, cannon=True)
+                elif upper == 'N':
+                    self._gen_knight_moves(moves, r, c, player)
+                elif upper == 'B':
+                    self._gen_bishop_moves(moves, r, c, player)
+                elif upper == 'A':
+                    self._gen_advisor_moves(moves, r, c, player)
+                elif upper == 'K':
+                    self._gen_king_moves(moves, r, c, player)
+                elif upper == 'P':
+                    self._gen_pawn_moves(moves, r, c, player)
         return moves
+
+    def get_capture_moves(self, player):
+        """只生成吃子走法（目标格有对方棋子）— 静止搜索专用。
+
+        与 get_all_legal_moves 过滤吃子的结果等价，但不为非吃子走法
+        做 _would_be_illegal 校验，qs 节点省掉约 85% 的生成开销。
+        """
+        moves = []
+        board = self.board
+        for r in range(self.size_rows):
+            for c in range(self.size_cols):
+                piece = board[r][c]
+                if piece == '.' or self.get_piece_owner(piece) != player:
+                    continue
+                upper = piece.upper()
+                if upper == 'R':
+                    self._gen_ray_moves(moves, r, c, player,
+                                        cannon=False, captures_only=True)
+                elif upper == 'C':
+                    self._gen_ray_moves(moves, r, c, player,
+                                        cannon=True, captures_only=True)
+                elif upper == 'N':
+                    self._gen_knight_moves(moves, r, c, player,
+                                           captures_only=True)
+                elif upper == 'B':
+                    self._gen_bishop_moves(moves, r, c, player,
+                                           captures_only=True)
+                elif upper == 'A':
+                    self._gen_advisor_moves(moves, r, c, player,
+                                            captures_only=True)
+                elif upper == 'K':
+                    self._gen_king_moves(moves, r, c, player,
+                                         captures_only=True)
+                elif upper == 'P':
+                    self._gen_pawn_moves(moves, r, c, player,
+                                         captures_only=True)
+        return moves
+
+    # ── 定向走法生成辅助（captures_only=True 时只保留吃子）──
+
+    def _append_if_legal(self, moves, fr, fc, tr, tc, player,
+                         captures_only=False):
+        target = self.board[tr][tc]
+        if target == '.':
+            if captures_only:
+                return
+        elif self.get_piece_owner(target) == player:
+            return
+        if not self._would_be_illegal(fr, fc, tr, tc, player):
+            moves.append((fr, fc, tr, tc))
+
+    def _gen_ray_moves(self, moves, r, c, player, cannon,
+                       captures_only=False):
+        """車：直线步进遇子即止（可吃）；炮：不吃子走空格，隔一子吃子。"""
+        board = self.board
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr, nc = r + dr, c + dc
+            screened = False
+            while self.in_board(nr, nc):
+                t = board[nr][nc]
+                if not cannon:
+                    if t == '.':
+                        if not captures_only:
+                            self._append_if_legal(
+                                moves, r, c, nr, nc, player)
+                    else:
+                        if self.get_piece_owner(t) != player:
+                            self._append_if_legal(
+                                moves, r, c, nr, nc, player)
+                        break
+                else:
+                    if not screened:
+                        if t == '.':
+                            if not captures_only:
+                                self._append_if_legal(
+                                    moves, r, c, nr, nc, player)
+                        else:
+                            screened = True
+                    else:
+                        if t != '.':
+                            if self.get_piece_owner(t) != player:
+                                self._append_if_legal(
+                                    moves, r, c, nr, nc, player)
+                            break
+                nr += dr
+                nc += dc
+
+    def _gen_knight_moves(self, moves, r, c, player, captures_only=False):
+        board = self.board
+        for dr, dc in ((2, 1), (2, -1), (-2, 1), (-2, -1),
+                       (1, 2), (1, -2), (-1, 2), (-1, -2)):
+            tr, tc = r + dr, c + dc
+            if not self.in_board(tr, tc):
+                continue
+            # 蹩马腿
+            if abs(dr) == 2:
+                leg_r, leg_c = r + dr // 2, c
+            else:
+                leg_r, leg_c = r, c + dc // 2
+            if board[leg_r][leg_c] != '.':
+                continue
+            self._append_if_legal(moves, r, c, tr, tc, player,
+                                  captures_only)
+
+    def _gen_bishop_moves(self, moves, r, c, player, captures_only=False):
+        red = self.is_red(self.board[r][c])
+        for dr, dc in ((2, 2), (2, -2), (-2, 2), (-2, -2)):
+            tr, tc = r + dr, c + dc
+            if not self.in_board(tr, tc):
+                continue
+            # 相不过河
+            if red and tr < 5 or not red and tr > 4:
+                continue
+            # 塞象眼
+            if self.board[r + dr // 2][c + dc // 2] != '.':
+                continue
+            self._append_if_legal(moves, r, c, tr, tc, player,
+                                  captures_only)
+
+    def _gen_advisor_moves(self, moves, r, c, player, captures_only=False):
+        red = self.is_red(self.board[r][c])
+        row_lo, row_hi = (7, 9) if red else (0, 2)
+        for dr, dc in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            tr, tc = r + dr, c + dc
+            if not (row_lo <= tr <= row_hi and 3 <= tc <= 5):
+                continue
+            self._append_if_legal(moves, r, c, tr, tc, player,
+                                  captures_only)
+
+    def _gen_king_moves(self, moves, r, c, player, captures_only=False):
+        red = self.is_red(self.board[r][c])
+        row_lo, row_hi = (7, 9) if red else (0, 2)
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            tr, tc = r + dr, c + dc
+            if not (row_lo <= tr <= row_hi and 3 <= tc <= 5):
+                continue
+            self._append_if_legal(moves, r, c, tr, tc, player,
+                                  captures_only)
+
+    def _gen_pawn_moves(self, moves, r, c, player, captures_only=False):
+        red = self.is_red(self.board[r][c])
+        # 前进方向：红兵行号减小，黑卒行号增大
+        fwd = -1 if red else 1
+        tr = r + fwd
+        if self.in_board(tr, c):
+            self._append_if_legal(moves, r, c, tr, c, player,
+                                  captures_only)
+        # 过河后才能横走：红兵 r<=4，黑卒 r>=5
+        crossed = r <= 4 if red else r >= 5
+        if crossed:
+            for tc in (c - 1, c + 1):
+                if self.in_board(r, tc):
+                    self._append_if_legal(moves, r, c, r, tc, player,
+                                          captures_only)
 
     def get_board_state_string(self):
         s = "   " + " ".join(chr(65 + i) for i in range(self.size_cols)) + "\n"
@@ -425,12 +645,24 @@ class ChineseChessGame:
             s += f"{r+1:2d} " + " ".join(self.board[r][c] for c in range(self.size_cols)) + "\n"
         return s
 
-    def format_move_history(self):
-        """格式化走子历史，包含棋子名称、坐标、吃子标记"""
+    def format_move_history(self, max_items: int = 0):
+        """格式化走子历史，包含棋子名称、坐标、吃子标记。
+
+        max_items > 0 时只保留最近 N 手（编号保持原始连续），
+        前缀标注省略条数 —— 用于提示词中控制 token 成本。
+        """
         if not self.moves:
             return "暂无移动"
+        moves = self.moves
+        omitted = 0
+        if max_items > 0 and len(moves) > max_items:
+            omitted = len(moves) - max_items
+            moves = moves[-max_items:]
         lines = []
-        for idx, (fr, fc, tr, tc, player, captured, piece) in enumerate(self.moves, 1):
+        if omitted:
+            lines.append(f"…（前 {omitted} 手略）…")
+        for idx, (fr, fc, tr, tc, player, captured, piece) in enumerate(
+                moves, omitted + 1):
             piece_name = PIECE_SYMBOLS.get(piece, piece)
             from_coord = f"{chr(65 + fc)}{fr + 1}"
             to_coord = f"{chr(65 + tc)}{tr + 1}"
@@ -455,16 +687,10 @@ class ChineseChessGame:
     def is_endgame(self) -> bool:
         """判断是否进入残局阶段。
 
-        启发式标准：总子力 <= 14（大约初始子力的一半）视为残局。
-        残局中卒和将的估值策略需要调整。
+        启发式标准：总子力 <= ENDGAME_PIECE_THRESHOLD（初始 32 子的一半左右）
+        视为残局。残局中卒和将的估值策略需要调整。
         """
-        count = 0
-        for r in range(self.size_rows):
-            for c in range(self.size_cols):
-                if self.board[r][c] != '.':
-                    count += 1
-        # 初始 32 子，<= 14 子 ≈ 残局
-        return count <= 14
+        return self.count_pieces(0) <= ENDGAME_PIECE_THRESHOLD
 
     def count_pieces(self, player: int = 0) -> int:
         """统计棋子数量。
@@ -486,28 +712,39 @@ class ChineseChessGame:
                     count += 1
         return count
 
-    def board_hash(self) -> int:
-        """计算当前棋盘局面的哈希值（用于开局库查询和置换表）。
-
-        使用 Zobrist-like 简化哈希：将每格的棋子字符转为整数加权。
-        注意：此哈希不考虑走子方，仅用于识别局面。
-        """
+    def _compute_zobrist(self) -> int:
+        """从当前棋盘全量计算 Zobrist 哈希（初始化/棋盘被外部替换时用）。"""
         h = 0
+        table = ZOBRIST_TABLE
+        cols = self.size_cols
         for r in range(self.size_rows):
             for c in range(self.size_cols):
-                piece = self.board[r][c]
-                if piece != '.':
-                    # 将棋子字符映射为唯一编号
-                    piece_id = ord(piece) * 31 + r * 7 + c * 13
-                    h ^= piece_id << ((r * self.size_cols + c) % 16)
+                p = self.board[r][c]
+                if p != '.':
+                    h ^= table[p][r * cols + c]
         return h
+
+    def recompute_hash(self) -> None:
+        """board 被外部直接替换/修改后调用，重建增量 Zobrist 哈希。
+
+        正常走子（move_piece）和搜索的 make/unmake 都会自动增量维护，
+        只有绕过这两者直接改 board 的调用方需要显式重建。
+        """
+        self._zobrist = self._compute_zobrist()
+
+    def board_hash(self) -> int:
+        """当前棋盘局面的 Zobrist 哈希（不含走子方，O(1) 增量维护）。
+
+        注意：此哈希不考虑走子方，仅用于识别局面。
+        """
+        return self._zobrist
 
     def position_hash(self) -> int:
         """计算包含走子方的局面哈希（用于置换表去重）。
 
         同一棋盘但不同走子方视为不同局面，用 current_player 搅动哈希。
         """
-        return self.board_hash() ^ (self.current_player * 0x9E3779B9)
+        return self._zobrist ^ _ZOBRIST_SIDE[self.current_player]
 
     def _check_repetition(self):
         """检测局面重复，按 Pikafish 规则判决。
@@ -534,16 +771,13 @@ class ChineseChessGame:
         i1, i2, i3 = indices[-3], indices[-2], indices[-1]
 
         # 长将检测：循环中每步是否将军
-        # 红方在奇数步(0,2,4...)，黑方在偶数步(1,3,5...)
-        # move_piece 时记录的是当前走子方走后对方是否被将军
-        # _move_checks[j] = True 表示走第 j 步后对方被将军
-        # 即 step j 的走子方在将军
-        # 步数编号从 0 开始，偶数步=红方，奇数步=黑方
+        # _move_checks[j] = (走子方, 走后对方是否被将军)
+        # 即第 j 步的走子方在将军；归属直接读元组，不用索引奇偶
         red_all_checks = True
         black_all_checks = True
         for j in range(i1, i3):
-            is_check = self._move_checks[j]
-            if j % 2 == 0:  # 红方走的步
+            mover, is_check = self._move_checks[j]
+            if mover == 1:   # 红方走的步
                 if not is_check:
                     red_all_checks = False
             else:            # 黑方走的步

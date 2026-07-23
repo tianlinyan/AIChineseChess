@@ -33,6 +33,7 @@ from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, SEARCH_TIME_LIMIT, EGTB_
 from domain.evaluation import (
     evaluate, evaluate_move_ordering, PIECE_VALUE,
 )
+from domain.game import ZOBRIST_TABLE
 
 
 class TTFlag(IntEnum):
@@ -138,9 +139,11 @@ class TranspositionTable:
 DEFAULT_MAX_DEPTH = 5
 DEFAULT_TIME_LIMIT = SEARCH_TIME_LIMIT
 DEFAULT_QUIESCENCE_DEPTH = 4    # 静态搜索最大额外深度
+QS_EVASION_EXTRA_DEPTH = 4      # 被将军时 qs 允许超出深度上限的额外层数（防长将链无限递归）
 CHECK_EXTENSION_DEPTH = 1       # 将军时加深度（仅每分支一次，防止无限递归）
-NULL_MOVE_R = 3                 # 空着裁剪缩减因子（>2 以保证验证深度足够）
-NULL_MOVE_MIN_DEPTH = 4         # 空着裁剪最小深度（R+1）
+NULL_MOVE_R = 2                 # 空着裁剪缩减因子
+NULL_MOVE_MIN_DEPTH = 6         # 空着裁剪最小深度（验证深度=depth-1-R≥3；
+                                # 浅验证误剪风险高，宁可不裁）
 ZUGZWANG_PIECE_LIMIT = 8        # 少于该子力数不进行空着裁剪（防止逼着误判）
 
 # Negamax 特殊分值
@@ -208,7 +211,7 @@ class SearchEngine:
         self._history_table = {}
         self._tt.clear()
 
-        ordered_moves = self._order_moves(game.board, all_moves, player, 0)
+        ordered_moves = None
 
         try:
             # 迭代加深（Negamax 统一框架——不再区分红/黑）
@@ -221,17 +224,34 @@ class SearchEngine:
                 best_score = float('-inf')
                 current_best_move = None
 
-                for move in ordered_moves:
+                # 每层迭代完整重排（上轮最佳作 TT 走法 + killer + history），
+                # 旧实现只把上轮最佳提前，积累的排序信息全被浪费
+                ordered_moves = self._order_moves(
+                    game.board, all_moves, player, 0,
+                    tt_move=self._best_move if depth > 1 else None)
+
+                for i, move in enumerate(ordered_moves):
                     if self._is_time_up():
                         break
                     fr, fc, tr, tc = move
-                    captured = self._make_move(game.board, fr, fc, tr, tc)
+                    captured = self._make_move(game, fr, fc, tr, tc)
                     in_check = game._is_in_check(3 - player)
                     ext = CHECK_EXTENSION_DEPTH if in_check else 0
                     # Negamax：递归返回 3-player 视角，取反得 player 视角
-                    score = -self._alpha_beta(
-                        game, depth - 1 + ext, -beta, -alpha, 3 - player)
-                    self._unmake_move(game.board, fr, fc, tr, tc, captured)
+                    if i == 0:
+                        # 第一个走法（大概率最优）：全窗口搜索
+                        score = -self._alpha_beta(
+                            game, depth - 1 + ext, -beta, -alpha, 3 - player)
+                    else:
+                        # 根节点 PVS：零窗口试探，优于预期再全窗口重搜
+                        score = -self._alpha_beta(
+                            game, depth - 1 + ext, -alpha - 1, -alpha,
+                            3 - player)
+                        if score > alpha:
+                            score = -self._alpha_beta(
+                                game, depth - 1 + ext, -beta, -alpha,
+                                3 - player)
+                    self._unmake_move(game, fr, fc, tr, tc, captured)
 
                     if score > best_score:
                         best_score = score
@@ -242,7 +262,6 @@ class SearchEngine:
                     self._best_move = current_best_move
                     # _best_score 对外保持红方视角（正值=红优）
                     self._best_score = best_score if player == 1 else -best_score
-                    ordered_moves = self._promote_best(ordered_moves, current_best_move)
 
                 if on_progress:
                     on_progress(depth, self._best_score, self._best_move,
@@ -333,7 +352,7 @@ class SearchEngine:
                 break
 
             fr, fc, tr, tc = move
-            captured = self._make_move(game.board, fr, fc, tr, tc)
+            captured = self._make_move(game, fr, fc, tr, tc)
             in_check = game._is_in_check(3 - player)
             # 将军延伸：仅允许每分支一次，防止连续将军导致无限递归
             ext = CHECK_EXTENSION_DEPTH if (in_check and not extended) else 0
@@ -354,7 +373,7 @@ class SearchEngine:
                         game, depth - 1 + ext, -beta, -alpha, 3 - player,
                         extended=extended or (ext > 0))
 
-            self._unmake_move(game.board, fr, fc, tr, tc, captured)
+            self._unmake_move(game, fr, fc, tr, tc, captured)
 
             if score > best:
                 best = score
@@ -385,6 +404,8 @@ class SearchEngine:
         """静态搜索（Negamax 版本）— 仅搜索吃子走法，消除地平线效应。
 
         返回从 player 视角的评分。
+        被将军时禁止 stand_pat：必须搜索全部应将走法，无走法 = 被将杀，
+        否则深度边界的将杀会被系统性漏判。
         """
         # 同步 game.current_player（与 _alpha_beta 一致）
         game.current_player = player
@@ -393,7 +414,41 @@ class SearchEngine:
         if self._nodes_searched % 200 == 0 and self._is_time_up():
             return self._fast_eval(game, player)
 
+        in_check = game._is_in_check(player)
         stand_pat = self._fast_eval(game, player)
+
+        if in_check:
+            # 被将军：生成全部合法应将走法（不限吃子）
+            evasions = game.get_all_legal_moves(player)
+            if not evasions:
+                # 将杀 — 离根越近越糟（depth 越大越接近 qs 入口）
+                return -(JIANGSHA_SCORE
+                         - (self.max_depth + self.quiescence_depth - depth))
+            if depth <= -QS_EVASION_EXTRA_DEPTH:
+                # 将军链过长（长将类线路）：截断递归，退化为静态评估，
+                # 防止连续将军导致 qs 无限延伸
+                return stand_pat
+            ordered_moves = sorted(
+                evasions,
+                key=lambda m: evaluate_move_ordering(
+                    game.board, m[0], m[1], m[2], m[3],
+                    game.board[m[0]][m[1]], game.board[m[2]][m[3]]),
+                reverse=True,
+            )
+            best = float('-inf')
+            for i, (fr, fc, tr, tc) in enumerate(ordered_moves):
+                if i % 50 == 0 and self._is_time_up():
+                    break
+                captured = self._make_move(game, fr, fc, tr, tc)
+                self._nodes_searched += 1
+                score = -self._quiescence(
+                    game, depth - 1, -beta, -alpha, 3 - player)
+                self._unmake_move(game, fr, fc, tr, tc, captured)
+                if score >= beta:
+                    return beta
+                best = max(best, score)
+                alpha = max(alpha, score)
+            return alpha if best != float('-inf') else stand_pat
 
         if stand_pat >= beta:
             return beta
@@ -402,10 +457,8 @@ class SearchEngine:
         if depth <= 0:
             return stand_pat
 
-        # 只生成吃子走法
-        all_moves = game.get_all_legal_moves(player)
-        captures = [(fr, fc, tr, tc) for fr, fc, tr, tc in all_moves
-                     if game.board[tr][tc] != '.']
+        # 只生成吃子走法（定向生成，跳过非吃子的应将校验）
+        captures = game.get_capture_moves(player)
 
         if not captures:
             return stand_pat
@@ -430,12 +483,12 @@ class SearchEngine:
             if stand_pat + captured_val + 50 < alpha:
                 continue
 
-            captured = self._make_move(game.board, fr, fc, tr, tc)
+            captured = self._make_move(game, fr, fc, tr, tc)
             self._nodes_searched += 1
             # Negamax 递归：对手视角取反
             score = -self._quiescence(
                 game, depth - 1, -beta, -alpha, 3 - player)
-            self._unmake_move(game.board, fr, fc, tr, tc, captured)
+            self._unmake_move(game, fr, fc, tr, tc, captured)
 
             if score >= beta:
                 return beta
@@ -468,11 +521,13 @@ class SearchEngine:
 
         total_pieces = red_pieces + black_pieces
 
-        # ── 残局库查询 ──
+        # ── 残局库查询（仅本地库：搜索叶节点禁止同步联网，
+        #    否则残局阶段每个叶子都可能等 HTTP 超时，搜索实质瘫痪）──
         if total_pieces <= EGTB_MAX_PIECES:
             try:
                 from domain.egtb import probe
-                egtb_result = probe(board, player, total_pieces)
+                egtb_result = probe(board, player, total_pieces,
+                                    allow_cloud=False)
                 if egtb_result is not None:
                     # probe 返回的 score 已是 player 视角
                     return egtb_result[0]
@@ -551,30 +606,53 @@ class SearchEngine:
             self._history_table.get(move_key, 0) + depth * depth
         )
 
-    def _promote_best(self, moves: list, best_move: tuple) -> list:
-        result = list(moves)
-        try:
-            idx = result.index(best_move)
-            result.insert(0, result.pop(idx))
-        except ValueError:
-            pass
-        return result
-
     # ── 走子执行/撤销 ──
 
     @staticmethod
-    def _make_move(board: list, fr: int, fc: int,
+    def _make_move(game, fr: int, fc: int,
                    tr: int, tc: int) -> str:
+        """在 game 上执行走法并同步 _king_pos 缓存与 Zobrist 哈希，
+        返回被吃棋子。
+
+        注意：不修改 current_player、不走合法性校验，仅供搜索内部
+        （及 MCTS / worker 的临时局面）配合 _unmake_move 成对使用。
+        """
+        board = game.board
+        piece = board[fr][fc]
         captured = board[tr][tc]
-        board[tr][tc] = board[fr][fc]
+        board[tr][tc] = piece
         board[fr][fc] = '.'
+        # 动将时同步缓存，避免后续 _is_in_check 全部回退全盘扫描
+        if piece == 'K':
+            game._king_pos[1] = (tr, tc)
+        elif piece == 'k':
+            game._king_pos[2] = (tr, tc)
+        zi_from = fr * game.size_cols + fc
+        zi_to = tr * game.size_cols + tc
+        game._zobrist ^= (ZOBRIST_TABLE[piece][zi_from]
+                          ^ ZOBRIST_TABLE[piece][zi_to])
+        if captured != '.':
+            game._zobrist ^= ZOBRIST_TABLE[captured][zi_to]
         return captured
 
     @staticmethod
-    def _unmake_move(board: list, fr: int, fc: int,
+    def _unmake_move(game, fr: int, fc: int,
                      tr: int, tc: int, captured: str):
-        board[fr][fc] = board[tr][tc]
+        """撤销 _make_move 的走法并恢复 _king_pos 缓存与 Zobrist 哈希。"""
+        board = game.board
+        piece = board[tr][tc]
+        board[fr][fc] = piece
         board[tr][tc] = captured
+        if piece == 'K':
+            game._king_pos[1] = (fr, fc)
+        elif piece == 'k':
+            game._king_pos[2] = (fr, fc)
+        zi_from = fr * game.size_cols + fc
+        zi_to = tr * game.size_cols + tc
+        game._zobrist ^= (ZOBRIST_TABLE[piece][zi_from]
+                          ^ ZOBRIST_TABLE[piece][zi_to])
+        if captured != '.':
+            game._zobrist ^= ZOBRIST_TABLE[captured][zi_to]
 
     # ── 时间控制 ──
 

@@ -12,8 +12,11 @@
   - UCB1 选择策略（探索/利用平衡）
   - 先验概率支持（LLM 引导搜索）
   - 时间控制（模拟次数+时间限制）
-  - 虚拟损失（可选并行搜索准备）
   - 评估函数驱动的模拟（比随机走子更准确）
+
+注意：Selection 下降时会在工作局面上真实走子（SearchEngine._make_move），
+Expansion/Simulation 作用于到达的叶局面，回溯后撤销 —— 树中每个节点
+都对应真实局面，而不是始终评估根局面。
 """
 
 import time
@@ -24,6 +27,7 @@ from typing import Optional, Callable, Dict, List, Tuple
 from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_PRIOR_STRENGTH, MCTS_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
 from domain.evaluation import evaluate
 from domain.game import ChineseChessGame
+from domain.search import SearchEngine
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 配置
@@ -32,8 +36,6 @@ from domain.game import ChineseChessGame
 DEFAULT_SIMULATIONS = 2000      # 默认模拟次数
 DEFAULT_TIME_LIMIT = MCTS_TIME_LIMIT       # 时间上限（秒），从 constants.py 统一管理
 DEFAULT_EXPLORATION = 1.4       # UCB1 探索参数
-VIRTUAL_LOSS = 3                # 虚拟损失（并行搜索用）
-MAX_SIMULATION_DEPTH = 20       # 模拟最大深度
 PRIOR_STRENGTH = MCTS_PRIOR_STRENGTH  # from domain/constants.py
 
 
@@ -66,23 +68,11 @@ class MCTSNode:
             return 0.0
         return self.value / self.visits
 
-    def ucb1(self, total_visits: int, exploration: float = DEFAULT_EXPLORATION) -> float:
-        """UCB1 公式：平均价值 + 探索项 × 先验"""
-        if self.visits == 0:
-            return float('inf')  # 未访问的节点优先
-        exploitation = self.avg_value
-        exploration_term = exploration * math.sqrt(
-            math.log(total_visits + 1) / self.visits)
-        prior_term = self.prior / (1 + self.visits)
-        return exploitation + exploration_term + prior_term * 0.1
-
-    def best_child(self, exploration: float = 0.0) -> 'MCTSNode':
-        """返回最优子节点（exploration=0 时选最大访问次数）"""
+    def best_child(self) -> 'MCTSNode':
+        """返回最优子节点（访问次数最多）"""
         if not self.children:
             return None
-        if exploration == 0:
-            return max(self.children, key=lambda c: c.visits)
-        return max(self.children, key=lambda c: c.ucb1(self.visits, exploration))
+        return max(self.children, key=lambda c: c.visits)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -149,20 +139,31 @@ class MCTSEngine:
 
         self._root.is_expanded = True
 
+        # 工作局面副本：Selection/Expansion/Simulation 在其上真实走子，
+        # 不污染调用方的 game（棋子在棋盘上的移动见 _select/_expand）
+        work = ChineseChessGame()
+        work.board = game.get_board_copy()
+        work.current_player = player
+        work._king_pos = dict(game._king_pos)
+
         # 主循环
         while self._simulations < self.max_simulations:
             if self._is_time_up():
                 break
 
-            # 1. Selection — 从根沿 UCB1 下降到叶节点
-            node = self._select(self._root)
+            # 1. Selection — 从根沿 UCB1 下降到叶节点，沿途在 work 上走子
+            node, path, captured_list = self._select(self._root, work)
 
-            # 2. Expansion — 如果是叶节点（未展开），展开它
-            if node.visits == 0 and not node.is_expanded:
-                self._expand(node, game)
+            # 2. Expansion — 叶节点未展开则在当前（真实）局面上展开
+            if not node.is_expanded:
+                self._expand(node, work)
 
-            # 3. Simulation — 评估当前局面
-            value = self._simulate(game, node.player)
+            # 3. Simulation — 评估到达的叶局面
+            value = self._simulate(work, node.player)
+
+            # 撤销路径走子，恢复根局面（回溯前必须先 unmake）
+            for move, captured in zip(reversed(path), reversed(captured_list)):
+                SearchEngine._unmake_move(work, *move, captured)
 
             # 4. Backpropagation — 回传结果
             self._backpropagate(node, value, node.player)
@@ -173,7 +174,7 @@ class MCTSEngine:
                 on_progress(self._simulations, self._root)
 
         # 选择最优走法（访问次数最多的子节点）
-        best = self._root.best_child(exploration=0)
+        best = self._root.best_child()
         if best is None:
             return legal_moves[0]
 
@@ -185,21 +186,29 @@ class MCTSEngine:
 
     # ── 四阶段 ──
 
-    def _select(self, node: MCTSNode) -> MCTSNode:
-        """Selection: 沿 UCB1 最优路径下降到未完全展开或叶节点。
+    def _select(self, node: MCTSNode, game) -> tuple:
+        """Selection: 沿 UCB1 最优路径下降到叶节点。
 
+        沿途在 game 上真实执行走法（调用方负责在模拟后按逆序 unmake）。
         由于子节点的 value 从子节点玩家视角存储，父节点需要选取对
         自己最有利（即子节点视角下最不利）的子节点。因此对子节点
         UCB1 中的 exploitation 项取反，exploration 保持正向。
+
+        Returns:
+            (叶节点, 路径走法列表, 每步被吃子列表)
         """
+        path = []
+        captured_list = []
         while node.is_expanded and node.children:
-            best_child = None
-            best_score = float('-inf')
             # 收集未访问子节点，随机选（避免走法排序偏差）
             unvisited = [c for c in node.children if c.visits == 0]
             if unvisited:
                 node = random.choice(unvisited)
-                continue
+                path.append(node.move)
+                captured_list.append(SearchEngine._make_move(game, *node.move))
+                break
+            best_child = None
+            best_score = float('-inf')
             for child in node.children:
                 # exploitation: 子节点 value 来自对方视角，取反才是己方视角
                 exploit = -child.avg_value
@@ -211,7 +220,9 @@ class MCTSEngine:
                     best_score = score
                     best_child = child
             node = best_child
-        return node
+            path.append(node.move)
+            captured_list.append(SearchEngine._make_move(game, *node.move))
+        return node, path, captured_list
 
     def _expand(self, node: MCTSNode, game) -> None:
         """Expansion: 为叶节点生成所有合法子节点"""
@@ -233,17 +244,17 @@ class MCTSEngine:
                           for c in range(BOARD_WIDTH) if board[r][c] != '.')
         endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
 
-        # ── 残局库查询（DTM 比分比启发式评估精确）──
+        # ── 残局库查询（仅本地库，搜索循环内禁止同步联网）──
         if total_pieces <= EGTB_MAX_PIECES:
             try:
                 from domain.egtb import probe
-                egtb_result = probe(board, player, total_pieces)
+                egtb_result = probe(board, player, total_pieces,
+                                    allow_cloud=False)
                 if egtb_result is not None:
+                    # probe 返回的 score 已是 player 视角，直接归一化，
+                    # 不要像下面 evaluate() 那样再按 player 翻转
                     score = egtb_result[0]
-                    normalized = 1.0 / (1.0 + math.exp(-score / 1000.0))
-                    if player == 2:
-                        normalized = 1.0 - normalized
-                    return normalized
+                    return 1.0 / (1.0 + math.exp(-score / 1000.0))
             except Exception:
                 pass
 
@@ -268,12 +279,16 @@ class MCTSEngine:
             normalized = 1.0 - normalized
         return normalized
 
-    def _backpropagate(self, node: MCTSNode, value: float, root_player: int) -> None:
-        """Backpropagation: 将模拟结果沿路径回传到根节点"""
+    def _backpropagate(self, node: MCTSNode, value: float, leaf_player: int) -> None:
+        """Backpropagation: 将模拟结果沿路径回传到根节点。
+
+        value 从 leaf_player（被模拟局面的走子方）视角；路径上各节点
+        按自己的走子方交替取 1-value。
+        """
         while node is not None:
             node.visits += 1
             # 价值从当前节点玩家的视角存储
-            if node.player == root_player:
+            if node.player == leaf_player:
                 node.value += value
             else:
                 node.value += (1.0 - value)
