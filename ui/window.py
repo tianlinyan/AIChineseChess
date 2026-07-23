@@ -1,6 +1,6 @@
 """主窗口"""
 
-from PyQt6.QtCore import Qt, QSettings, QByteArray
+from PyQt6.QtCore import Qt, QSettings, QByteArray, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -9,7 +9,9 @@ from PyQt6.QtWidgets import (
 )
 
 from domain.game import ChineseChessGame
+from domain.evaluation import compute_material
 from domain.prompts import HUMAN_MODEL
+from domain.constants import format_move
 from services.logging import LogManager
 from services.models import ModelManager
 from ai.manager import AIManager
@@ -44,8 +46,9 @@ class MainWindow(QMainWindow):
         self.load_models()
         self.game_controller.reset_game()
 
-        # 必须在 setup_ui() 之后调用——日志面板的 widget 在那时才创建
-        self.game_controller._init_pikafish()
+        # 推迟到事件循环执行，避免引擎子进程启动/UCI 握手卡住窗口显示；
+        # 排在 setup_ui() 之后，事件循环启动时日志面板 widget 早已创建
+        QTimer.singleShot(0, self.game_controller._init_pikafish)
 
         self.settings = QSettings('ChineseChessAI', 'ChineseChess')
 
@@ -118,6 +121,9 @@ class MainWindow(QMainWindow):
         self.history_mini_layout.setContentsMargins(5, 0, 5, 10)
         self.history_label = QLabel("📋 落子历史:")
         self.history_mini_layout.addWidget(self.history_label)
+        # 走子记录用单个 QLabel 拼接纯文本，避免每次刷新都 deleteLater/新建控件
+        self.history_moves_label = QLabel('')
+        self.history_mini_layout.addWidget(self.history_moves_label)
         self.history_mini_layout.addStretch()
         middle_layout.addWidget(self.history_mini)
 
@@ -159,7 +165,7 @@ class MainWindow(QMainWindow):
             if state and isinstance(state, QByteArray):
                 self.splitter.restoreState(state)
             else:
-                self.splitter.setSizes([280, self.splitter.sizes()[1], self.splitter.sizes()[2]])
+                self.splitter.setSizes([SPLITTER_SIZES[0], self.splitter.sizes()[1], self.splitter.sizes()[2]])
         else:
             state = self.splitter.saveState()
             self.settings.setValue('splitter_expanded_state', state)
@@ -276,23 +282,21 @@ class MainWindow(QMainWindow):
 
         self.total_moves_label.setText(f"总步数: {g.total_moves_count}")
 
-    def update_history_list(self) -> None:
-        # 删除除 history_label 之外的所有旧走子标签和 stretch
-        for i in range(self.history_mini_layout.count() - 1, 0, -1):
-            item = self.history_mini_layout.takeAt(i)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
+        # ── 棋力显示（共享子力统计：不含将/帥，单位=兵，残局自动切换估值表）──
+        red_mat, black_mat, red_count, black_count = compute_material(g.board)
+        self.red_material_label.setText(f"红: {red_mat:g}")
+        self.black_material_label.setText(f"黑: {black_mat:g}")
+        self.red_pieces_label.setText(f"红子: {red_count}")
+        self.black_pieces_label.setText(f"黑子: {black_count}")
 
-        # 添加最近的走子记录
+    def update_history_list(self) -> None:
+        # 最近 8 手拼成纯文本一次 setText（无走子时清空），不再反复增删 QLabel
+        parts = []
         for move in self.game.moves[-8:]:
             fr, fc, tr, tc, player = move[0:5]
-            from_coord = f"{chr(65 + fc)}{fr + 1}"
-            to_coord = f"{chr(65 + tc)}{tr + 1}"
-            label = QLabel(f"{'🔴' if player == 1 else '⚫'} {from_coord}→{to_coord}")
-            self.history_mini_layout.addWidget(label)
-
-        self.history_mini_layout.addStretch()
+            parts.append(
+                f"{'🔴' if player == 1 else '⚫'} {format_move(fr, fc, tr, tc)}")
+        self.history_moves_label.setText('  '.join(parts))
 
     def update_ai_score(self) -> None:
         """更新左侧面板的 AI 仲裁计分显示。"""
@@ -355,6 +359,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.game_controller.stop_thinking_timer()
+        # GameController.shutdown() 内部已调用 ai_manager.shutdown()，此处不再重复
         self.game_controller.shutdown()
-        self.ai_manager.shutdown()
         event.accept()
