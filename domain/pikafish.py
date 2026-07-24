@@ -418,7 +418,18 @@ class PikafishEngine:
         _read_bestmove 第一行读到——把上一局的走法当成本局结果返回
         （合法性校验拦不住"合法但错误"的走法）。每次发 position 前
         调用（持锁状态下，残留只可能来自上次超时）。
+
+        引擎收到 stop 后吐出 bestmove 存在几十 ms 延迟：单次排空可能
+        刚好错过，导致残留 bestmove 被下一次 _read_bestmove 消费。
+        50ms 后二次排空覆盖这一窗口（搜索耗时以秒计，代价可忽略）。
         """
+        try:
+            while True:
+                self._out_q.get_nowait()
+        except queue.Empty:
+            pass
+        # 二次排空：覆盖 stop→bestmove 的异步延迟窗口
+        time.sleep(0.05)
         try:
             while True:
                 self._out_q.get_nowait()

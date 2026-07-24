@@ -204,11 +204,19 @@ class GameController:
 
         过期结果本就由版本门控丢弃，这里只为尽快释放 CPU 与搜索锁
         （否则新对局首次 Pikafish 搜索最坏被旧搜索拖约 45s）。
+
+        注：_active_mcts 由后台 MCTS 线程写入、主线程读取，
+        CPython GIL 保证引用读写原子性；本地捕获引用 + try/except
+        防止 isnull 检查与 .stop() 之间被置 None 的 TOCTOU 窗口。
         """
         if self._pikafish is not None:
             self._pikafish.stop()
-        if self._active_mcts is not None:
-            self._active_mcts.stop()
+        mcts = self._active_mcts
+        if mcts is not None:
+            try:
+                mcts.stop()
+            except Exception:
+                pass
 
     def reset_game(self) -> None:
         self.game_version += 1
@@ -940,7 +948,8 @@ class GameController:
                 self.log(f"  ⚠️ MCTS未找到走法{detail}", 'WARNING')
             on_done(move, p)
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._mcts_thread = threading.Thread(target=_run, daemon=True)
+        self._mcts_thread.start()
 
     def _execute_engine_move_or_random(self, move: Optional[tuple],
                                        player: int, source: str,
