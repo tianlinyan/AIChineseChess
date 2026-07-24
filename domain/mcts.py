@@ -159,7 +159,13 @@ class MCTSEngine:
                 self._expand(node, work)
 
             # 3. Simulation — 评估到达的叶局面
-            value = self._simulate(work, node.player)
+            # 展开后仍无子节点 = 终端局面（走子方被将杀/困毙，判负），
+            # 必须直接给 0 分——静态评估的将军罚分仅 ±50，
+            # 一步杀会被误判为均势，导致 MCTS 选不出也防不住杀棋
+            if not node.children:
+                value = 0.0
+            else:
+                value = self._simulate(work, node.player)
 
             # 撤销路径走子，恢复根局面（回溯前必须先 unmake）
             for move, captured in zip(reversed(path), reversed(captured_list)):

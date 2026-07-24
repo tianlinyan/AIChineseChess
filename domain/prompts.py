@@ -547,7 +547,11 @@ def build_arbitration_prompt(
     for label, (move_s, basis_s) in zip(('A', 'B'), candidates):
         parts.append(f"### 候选 {label}：**{move_s}**")
         parts.append("```")
-        parts.append(basis_s)
+        # 上场模型的原文须清洗后再嵌入：反引号可闭合围栏、
+        # 向裁判注入指令（跨模型 prompt-injection 通道）
+        safe_basis = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '',
+                            basis_s.replace('`', "'"))
+        parts.append(safe_basis)
         parts.append("```")
         parts.append("")
     parts.append("---")

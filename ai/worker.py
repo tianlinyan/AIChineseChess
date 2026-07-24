@@ -9,8 +9,8 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ai.models import ModelInfo
 from ai.parser import parse_coordinates_from_text
 from domain.constants import (
-    AI_TIMEOUT_SECONDS, AI_OUTPUT_TRUNCATE_LENGTH,
-    AI_OUTPUT_MIN_TRIM_POSITION,
+    AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT,
+    AI_OUTPUT_TRUNCATE_LENGTH, AI_OUTPUT_MIN_TRIM_POSITION,
     BOARD_HEIGHT, BOARD_WIDTH,
     PIECE_SYMBOLS,
 )
@@ -116,8 +116,12 @@ class AIWorker:
             except Exception as e:
                 raise Exception(f"API 响应不是有效的 JSON: {e}")
 
-            choice = data.get('choices', [{}])[0]
-            message = choice.get('message', {})
+            # 防御畸形响应：choices 为空 / message 为 null 在内容过滤、
+            # 弱本地模型与部分代理上是常态，不应以未分类异常终止循环
+            choices = data.get('choices') or []
+            if not choices:
+                raise Exception(f"API 响应缺少 choices: {str(data)[:200]}")
+            message = choices[0].get('message') or {}
             content = (message.get('content') or '').strip()
             reasoning = message.get('reasoning_content', '')
 
@@ -145,7 +149,8 @@ class AIWorker:
             other_calls = []
 
             for tool_entry in tool_calls:
-                func = tool_entry.get('function', {})
+                # function 可能为 null（弱本地模型常见），防御 None
+                func = tool_entry.get('function') or {}
                 name = func.get('name', '')
                 if name == 'move_piece':
                     move_piece_call = tool_entry
@@ -163,23 +168,30 @@ class AIWorker:
             if other_calls:
                 # 将 assistant message（仅含已执行工具）加入历史
                 # 若有无效 move_piece 调用，排除它以保持历史一致
-                clean_message = dict(message)
+                # 仅保留 role/content/tool_calls：reasoning_content 回传
+                # 会被严格校验的部署（DeepSeek/vLLM）拒绝
                 clean_calls = [t for t in tool_calls if t in other_calls]
-                clean_message['tool_calls'] = clean_calls
-                messages.append(clean_message)
+                messages.append({
+                    'role': 'assistant',
+                    'content': message.get('content') or '',
+                    'tool_calls': clean_calls,
+                })
 
                 for tool_entry in other_calls:
-                    func = tool_entry.get('function', {})
+                    func = tool_entry.get('function') or {}
                     name = func.get('name', '')
                     raw_args = func.get('arguments', '{}')
                     try:
                         args = json.loads(raw_args)
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, TypeError):
                         # JSON 解析失败 → 尝试从原始文本提取坐标（move_piece 专用）
                         if name == 'move_piece' and isinstance(raw_args, str):
                             fc, tc = parse_coordinates_from_text(raw_args)
                             if fc and tc:
                                 return fc, tc, self._build_full_text()
+                        args = {}
+                    if not isinstance(args, dict):
+                        # arguments 解析成 list/标量 → 视为无参，避免 .get 崩溃
                         args = {}
 
                     result = self._execute_tool(name, args)
@@ -260,11 +272,8 @@ class AIWorker:
             for fr, fc, tr, tc in all_moves:
                 piece = board[fr][fc]
                 captured = SearchEngine._make_move(tmp_game, fr, fc, tr, tc)
-                # 静态局面分
+                # 静态局面分（红方视角）
                 s = evaluate(board)
-                # MVV-LVA 吃子加分
-                if captured != '.':
-                    s += PIECE_VALUE.get(captured.upper(), 0) * 10 - PIECE_VALUE.get(piece.upper(), 0)
                 # 将军奖励：走子后对方被将军额外加分
                 # 使用 tmp_game 隔离，避免修改 self.game.board（防止与主线程/Pikafish 的数据竞争）
                 tmp_game.board = board
@@ -274,6 +283,10 @@ class AIWorker:
                 # 归一化：将评分转为"越高=对当前玩家越有利"
                 if player == 2:
                     s = -s
+                # MVV-LVA 吃子加分（当前玩家视角）
+                # 必须在归一化之后加：先加再取反会让黑方吃子加分变减分
+                if captured != '.':
+                    s += PIECE_VALUE.get(captured.upper(), 0) * 10 - PIECE_VALUE.get(piece.upper(), 0)
                 scored.append((fr, fc, tr, tc, s))
 
             # 归一化后高分=好棋 → 始终降序排列（最佳走法排最前）
@@ -396,10 +409,12 @@ class AIWorker:
         if isinstance(args_data, str):
             try:
                 args = json.loads(args_data)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 return '', ''
         else:
             args = args_data
+        if not isinstance(args, dict):
+            return '', ''  # arguments 为 null/list/标量（弱模型常见）
         return args.get('from', ''), args.get('to', '')
 
     # ── API 请求 ──
@@ -454,7 +469,9 @@ class AIWorker:
         try:
             resp = session.post(
                 self.model_info.endpoint, json=payload, headers=headers,
-                timeout=(self.timeout, self.timeout))
+                # 连接/读取超时分离：端点黑洞时连接阶段快速失败，
+                # 读取阶段仍允许长思考（每轮请求独立计时）
+                timeout=(AI_CONNECT_TIMEOUT, self.timeout))
             resp.raise_for_status()
             return resp
         except requests.exceptions.Timeout:
@@ -464,7 +481,9 @@ class AIWorker:
         except requests.exceptions.HTTPError as e:
             error_detail = ''
             try:
-                error_detail = resp.text if resp is not None else '无响应'
+                # 截断：防整页 HTML 灌入日志、防网关回显请求头（含 Bearer key）
+                error_detail = (resp.text[:500] if resp is not None
+                                else '无响应')
             except Exception:
                 pass
             status = resp.status_code if resp is not None else 0

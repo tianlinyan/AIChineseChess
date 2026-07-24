@@ -2,7 +2,8 @@
 
 import random as _random
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, PIECE_SYMBOLS, ENDGAME_PIECE_THRESHOLD
+from domain.constants import (BOARD_WIDTH, BOARD_HEIGHT, PIECE_SYMBOLS,
+                              ENDGAME_PIECE_THRESHOLD, NATURAL_LIMIT_MOVES)
 
 # ── Zobrist 哈希表（固定种子，进程内可复现）──
 # 旧实现是 ord(piece)*31 + r*7 + c*13 的线性组合加权，不同棋子/格子
@@ -44,6 +45,7 @@ class ChineseChessGame:
         self._position_history: list = []  # 走子历史哈希，用于着法重复检测
         self._move_checks: list = []       # 并行记录：（走子方, 走后对方是否被将军），用于长将检测
         self.total_moves_count = 0        # 总步数（自游戏开始计，reset 清零）
+        self.moves_since_capture = 0      # 自然限着计数（连续未吃子步数，120 步判和）
         # 将位置缓存（O(1) 将军检测，move_piece 时增量更新）
         self._king_pos = {1: (9, 4), 2: (0, 4)}
         # Zobrist 哈希（move_piece / 搜索 make/unmake 增量维护）
@@ -59,6 +61,7 @@ class ChineseChessGame:
         self._position_history = []
         self._move_checks = []
         self.total_moves_count = 0
+        self.moves_since_capture = 0  # 自然限着计数（连续未吃子步数，120 步判和）
         self._king_pos = {1: (9, 4), 2: (0, 4)}
         self._zobrist = self._compute_zobrist()
 
@@ -126,6 +129,9 @@ class ChineseChessGame:
         self.last_move = (from_row, from_col, to_row, to_col, self.current_player)
         self.moves.append((from_row, from_col, to_row, to_col, self.current_player, captured, piece))
         self.total_moves_count += 1
+        # 自然限着计数：吃子清零，未吃子累进（竞赛规则：120 步未吃子判和）
+        self.moves_since_capture = (0 if captured != '.'
+                                    else self.moves_since_capture + 1)
 
         # 记录走子后的局面哈希 + 是否将军（着法重复/长将检测）
         self._position_history.append(self.position_hash())
@@ -163,6 +169,15 @@ class ChineseChessGame:
                 msg = f'{player_name}困毙对方获胜！'
             return {'success': True, 'game_over': True,
                     'winner': self.current_player, 'message': msg}
+
+        # ── 自然限着：连续 120 步未吃子判和（竞赛规则）──
+        # 将杀/困毙优先：第 120 步同时将死/困毙对方则限着失效（规则原文）
+        # 注：搜索的 _make_move 不经过 move_piece，搜索内部不感知该规则
+        if self.moves_since_capture >= NATURAL_LIMIT_MOVES:
+            self.game_over = True
+            self.winner = 0
+            return {'success': True, 'game_over': True, 'winner': 0,
+                    'message': f'{NATURAL_LIMIT_MOVES} 步未吃子 — 自然限着，和棋'}
 
         # 双方无攻击子力 → 和棋（只剩将+士+相，无車馬炮兵）
         if self._no_attacking_pieces():

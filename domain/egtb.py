@@ -6,7 +6,8 @@
 - 无缝回退：云库不可用时不影响正常搜索
 """
 
-import json
+import re
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -21,12 +22,13 @@ from domain.constants import EGTB_MAX_PIECES, EGTB_CLOUD_MAX_PIECES
 # 配置
 # ══════════════════════════════════════════════════════════════════════════════
 
-CHESSDB_URL = "https://www.chessdb.cn/query/"
+CHESSDB_URL = "https://www.chessdb.cn/chessdb.php"
 CHESSDB_TIMEOUT = 1.0          # 查询超时（秒）
 CHESSDB_CACHE_TTL = 300        # 正缓存有效期（秒）
 CHESSDB_NEG_CACHE_TTL = 60     # 负缓存（未找到/查询失败）有效期（秒）
 CHESSDB_ENABLED = True         # 是否启用云库查询
 CACHE_MAX_SIZE = 5000          # 正缓存最大条目数（超出淘汰最旧）
+NEG_CACHE_MAX_SIZE = 5000      # 负缓存最大条目数（与正缓存同上限，防长会话膨胀）
 CLOUD_FAIL_BREAKER_COUNT = 3   # 连续网络失败次数上限，达到后熔断
 CLOUD_BREAKER_SECONDS = 120    # 熔断后暂停云查询的秒数
 
@@ -51,15 +53,31 @@ def _fen_cache_key(board: list, current_player: int) -> str:
     return ''.join(key_parts)
 
 
+def _neg_cache_put(key: str, ts: float) -> None:
+    """写负缓存（容量上限：满时先清扫过期项，仍满则淘汰最旧）。"""
+    if len(_neg_cache) >= NEG_CACHE_MAX_SIZE:
+        expired = [k for k, t in _neg_cache.items()
+                   if ts - t >= CHESSDB_NEG_CACHE_TTL]
+        for k in expired:
+            del _neg_cache[k]
+    if len(_neg_cache) >= NEG_CACHE_MAX_SIZE:
+        _neg_cache.pop(next(iter(_neg_cache)))
+    _neg_cache[key] = ts
+
+
 def probe_cloud(board: list, current_player: int) -> Optional[dict]:
-    """查询 chessdb.cn 云库。
+    """查询 chessdb.cn 云库（chessdb.php?action=queryall API）。
+
+    响应为管道分隔文本（非 JSON），按 score 降序排列，首条即最佳走法：
+      move:c0c8,score:29999,rank:2,note:! (W-M-0001)|move:...
+    note 中的 (W/D/L-M-NNNN) 为**走子方视角**的胜/和/负与 DTM。
 
     Returns:
         None — 查询失败或未找到
         dict — {'dtm': int, 'win': int, 'score': int}
-          dtm: 距离杀棋的步数（0=已杀）
+          dtm: 距离杀棋的步数（0=已杀/和棋）
           win: 1=红胜, 2=黑胜, 0=和棋
-          score: 局面评分（mate分）
+          score: 局面评分（mate分，current_player 视角）
     """
     global _cloud_fail_count, _cloud_disabled_until
     if not CHESSDB_ENABLED:
@@ -88,17 +106,18 @@ def probe_cloud(board: list, current_player: int) -> Optional[dict]:
 
     # 构造 FEN 并查询
     fen = board_to_fen(board, current_player)
-    url = CHESSDB_URL + '?fen=' + urllib.parse.quote(fen, safe='')
+    url = (CHESSDB_URL + '?action=queryall&board='
+           + urllib.parse.quote(fen, safe=''))
 
     try:
         req = urllib.request.Request(url)
         req.add_header('User-Agent', 'AIChineseChess/1.0')
         with urllib.request.urlopen(req, timeout=CHESSDB_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-    except (urllib.error.URLError, urllib.error.HTTPError,
-            json.JSONDecodeError, OSError, ValueError):
-        # 网络不可用、超时、非 JSON → 负缓存 + 熔断计数
-        _neg_cache[cache_key] = now
+            text = resp.read().decode('utf-8', errors='replace')
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as e:
+        # 网络不可用、超时 → 负缓存 + 熔断计数
+        print(f"[EGTB] 云库查询失败: {e}", file=sys.stderr, flush=True)
+        _neg_cache_put(cache_key, now)
         _cloud_fail_count += 1
         if _cloud_fail_count >= CLOUD_FAIL_BREAKER_COUNT:
             _cloud_disabled_until = now + CLOUD_BREAKER_SECONDS
@@ -107,16 +126,24 @@ def probe_cloud(board: list, current_player: int) -> Optional[dict]:
 
     _cloud_fail_count = 0  # 成功通信，重置熔断计数
 
-    if not isinstance(data, dict):
-        _neg_cache[cache_key] = now
+    # 解析首条（最佳）走法的 note 字段；空响应 / "invalid board" /
+    # 无 note → 云库中无此局面，负缓存（通信正常，不计熔断）
+    first = text.strip().split('|', 1)[0]
+    m = re.search(r'\(([WDL])-M-(\d+)\)', first)
+    if m is None:
+        _neg_cache_put(cache_key, now)
         return None
 
-    win = data.get('win', 0)     # 1=红胜, 2=黑胜, 0=和棋/未知
-    dtm = data.get('dtm', 0)     # 距离杀棋步数
-
-    if win == 0 and dtm == 0:
-        _neg_cache[cache_key] = now  # 云库中无此局面 → 负缓存
-        return None
+    outcome, dtm_str = m.group(1), m.group(2)
+    if outcome == 'W':      # 走子方胜
+        win = current_player
+        dtm = int(dtm_str)
+    elif outcome == 'L':    # 走子方负
+        win = 3 - current_player
+        dtm = int(dtm_str)
+    else:                   # 和棋
+        win = 0
+        dtm = 0
 
     # 缓存结果（容量上限：淘汰最旧条目）
     if len(_cache) >= CACHE_MAX_SIZE:
@@ -269,12 +296,14 @@ def _can_win(attackers: list, current_player: int, owner: int,
         if p == 'C':
             return (0.0, 0)     # 单炮（无炮架）→ 和棋
         if p == 'P':
-            # 单卒：过河且未被阻挡 → 可能赢；否则和
+            # 单卒：仅"过河未到底 vs 孤将"可胜；有防守子（士/象）或
+            # 老兵（沉底）均为和棋（经 chessdb.cn 云库实测核对）
             crossed = (r <= 4) if owner == 1 else (r >= 5)
-            if crossed:
+            at_bottom = (r == 0) if owner == 1 else (r == 9)
+            if crossed and not at_bottom and defender_total == 0:
                 score = 5000 if owner == current_player else -5000
                 return (score, 30)
-            return (0.0, 0)     # 未过河卒 → 和棋
+            return (0.0, 0)     # 未过河/老兵/有防守子 → 和棋
 
     # 多子：有車则必胜
     if has_rook:

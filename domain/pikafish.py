@@ -162,7 +162,9 @@ class PikafishEngine:
 
         with self._lock:
             try:
-                fen = board_to_fen(game.board, player, reverse_rows=True)
+                # 标准 FEN（row 0 = 黑方底线），与 Pikafish startpos 约定一致
+                fen = board_to_fen(game.board, player)
+                self._purge_lines()
                 self._send(f'position fen {fen}')
                 self._send(f'go movetime {time_ms}')
 
@@ -221,7 +223,7 @@ class PikafishEngine:
         # 原子快照：深拷贝棋盘，从副本推导 FEN + 合法走法（避免 TOCTOU）
         try:
             board_copy = [row[:] for row in game.board]
-            fen = board_to_fen(board_copy, player, reverse_rows=True)
+            fen = board_to_fen(board_copy, player)
             # 用临时 Game 对象计算合法走法（隔离共享状态）
             from domain.game import ChineseChessGame
             tmp_game = ChineseChessGame()
@@ -238,6 +240,7 @@ class PikafishEngine:
             error = ''
             try:
                 with self._lock:
+                    self._purge_lines()
                     self._send(f'position fen {fen}')
                     self._send(f'go movetime {time_ms}')
                     uci = self._read_bestmove(time_ms)
@@ -313,12 +316,17 @@ class PikafishEngine:
     def _start_engine(self, binary_path: str):
         """启动 UCI 引擎进程并完成握手。"""
         try:
+            self._reader_dead = False
             self._proc = subprocess.Popen(
                 [binary_path],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,  # 避免管道溢出死锁；错误诊断靠退出码
                 text=True,
+                # 显式 UTF-8 + 容错解码：中文 Windows 默认 cp936，
+                # 引擎输出任一不可解码字节都会让 reader 线程静默死亡
+                encoding='utf-8',
+                errors='replace',
                 bufsize=1,
             )
             # 独立 reader 线程：引擎 stdout → 行队列
@@ -378,13 +386,20 @@ class PikafishEngine:
                 if not line:
                     break
                 self._out_q.put(line)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(f"[Pikafish] reader 线程异常退出: {e}",
+                  file=sys.stderr, flush=True)
         finally:
+            # 标记死亡：_read_line 在队列空时立即失败，
+            # 避免此后每次搜索都白等到截止时间（最高 45s/步）
+            self._reader_dead = True
             self._out_q.put(None)  # EOF 哨兵，唤醒所有等待中的读取方
 
     def _read_line(self, timeout: float) -> Optional[str]:
-        """从行队列取一行。超时/EOF 返回 None（绝不永久阻塞）。"""
+        """从行队列取一行。超时/EOF/reader 死亡返回 None（绝不永久阻塞）。"""
+        if self._reader_dead and self._out_q.empty():
+            return None
         try:
             return self._out_q.get(timeout=max(timeout, 0.0))
         except queue.Empty:
@@ -395,6 +410,33 @@ class PikafishEngine:
         if self._proc and self._proc.stdin:
             self._proc.stdin.write(command + '\n')
             self._proc.stdin.flush()
+
+    def _purge_lines(self) -> None:
+        """排空行队列中的残留输出。
+
+        上次搜索超时残留的 bestmove 若留在队列里，会被下一次搜索的
+        _read_bestmove 第一行读到——把上一局的走法当成本局结果返回
+        （合法性校验拦不住"合法但错误"的走法）。每次发 position 前
+        调用（持锁状态下，残留只可能来自上次超时）。
+        """
+        try:
+            while True:
+                self._out_q.get_nowait()
+        except queue.Empty:
+            pass
+
+    def stop(self) -> None:
+        """请求引擎中断当前搜索（UCI stop）。
+
+        不取 _lock——搜索线程在整个搜索期间持锁，取锁会永远等不到。
+        直接向 stdin 写入即可（与 reader 线程读 stdout 互不干扰）。
+        引擎响应 stop 后吐出的 bestmove 由版本门控正常丢弃，
+        本方法只为尽快释放 CPU 与搜索锁。
+        """
+        try:
+            self._send('stop')
+        except Exception:
+            pass
 
     def _read_bestmove(self, time_ms: int = 5000) -> Optional[str]:
         """读取引擎输出直到 bestmove 行。
@@ -459,21 +501,22 @@ class PikafishEngine:
 def _uci_to_tuple(uci_move: str) -> Optional[tuple]:
     """将 Pikafish UCI 走法字符串转为内部元组格式。
 
-    Pikafish UCI 坐标系与内部一致（经验证：d 显示行号 = UCI 行号 = 内部行号）。
-    无需反转。
+    Pikafish UCI 坐标系：rank 0 = 红方底线 = 内部行 9，
+    rank 9 = 黑方底线 = 内部行 0，即 内部行 = 9 - rank
+    （经验证：position startpos + d 命令，红方位于 rank 0 侧）。
 
     UCI 格式: <from_col><from_row><to_col><to_row>
-    例如 Pikafish 'e0e1'（红将E10→E9）→ 内部 (9, 4, 8, 4)
+    例如 Pikafish 'e0e1'（红帅E10→E9）→ 内部 (9, 4, 8, 4)
     col: a-i → 0-8
-    row: 0-9 → 0-9
+    row: 0-9 → 内部 9-0（行翻转）
     """
     if len(uci_move) < 4:
         return None
     try:
         fc = ord(uci_move[0].lower()) - ord('a')
-        fr = int(uci_move[1])
+        fr = 9 - int(uci_move[1])
         tc = ord(uci_move[2].lower()) - ord('a')
-        tr = int(uci_move[3])
+        tr = 9 - int(uci_move[3])
         if 0 <= fc < 9 and 0 <= fr < 10 and 0 <= tc < 9 and 0 <= tr < 10:
             return (fr, fc, tr, tc)
     except (ValueError, IndexError):

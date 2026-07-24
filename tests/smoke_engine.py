@@ -15,7 +15,8 @@ from domain.game import ChineseChessGame
 from domain.search import SearchEngine
 from domain.mcts import MCTSEngine
 from domain import egtb
-from domain.openings import get_opening_move
+from domain.openings import get_opening_move, OPENING_LINES
+from domain.constants import NATURAL_LIMIT_MOVES
 
 FAILED = []
 
@@ -162,20 +163,24 @@ def test_mcts_real_search():
     check('MCTS 不污染调用方棋盘',
           game2.get_board_state_string() == before)
 
-    # LLM 先验引导：给最差列的走法极高先验，搜索仍应选中吃車
+    # LLM 先验引导：给【非吃車】走法极高误导性先验，搜索仍应选中吃車
+    # （先验直接转成虚拟访问数；若把高先验给正确答案本身则恒通过、
+    #   测不出"被 LLM 误导时搜索仍稳健"这一意图）
     game3 = tactical_game()
     eng3 = MCTSEngine(max_simulations=600, time_limit=10.0)
-    move3 = eng3.search(game3, 1, priors={TACTICAL_CAPTURE: 0.9})
-    check('MCTS 带先验仍找到白吃車', move3 == TACTICAL_CAPTURE,
+    move3 = eng3.search(game3, 1, priors={(5, 0, 0, 0): 0.9})
+    check('MCTS 带误导先验仍找到白吃車', move3 == TACTICAL_CAPTURE,
           f'实际 {move3}')
 
 
 def test_egtb_local():
+    # 显式 allow_cloud=False：冒烟测试不得隐式依赖网络
+    # （当前用例均走本地分支；一旦启发式改动漏到云查询，测试会变 flaky）
     # 双方仅将 → 和棋
     board = empty_board()
     board[0][4] = 'k'
     board[9][4] = 'K'
-    res = egtb.probe(board, 1, 2)
+    res = egtb.probe(board, 1, 2, allow_cloud=False)
     check('EGTB 双将=和', res == (0.0, 0), f'实际 {res}')
 
     # 单車 vs 孤将 → 必胜（大分）
@@ -183,7 +188,7 @@ def test_egtb_local():
     board2[0][4] = 'k'
     board2[9][4] = 'K'
     board2[5][5] = 'R'
-    res2 = egtb.probe(board2, 1, 3)
+    res2 = egtb.probe(board2, 1, 3, allow_cloud=False)
     check('EGTB 单車vs孤将=胜', res2 is not None and res2[0] > 50000, f'实际 {res2}')
 
     # 单馬 vs 孤将 → 单马必胜孤将（修复后应为胜分）
@@ -191,7 +196,7 @@ def test_egtb_local():
     board3[0][4] = 'k'
     board3[9][4] = 'K'
     board3[5][5] = 'N'
-    res3 = egtb.probe(board3, 1, 3)
+    res3 = egtb.probe(board3, 1, 3, allow_cloud=False)
     check('EGTB 单馬vs孤将=胜', res3 is not None and res3[0] > 1000, f'实际 {res3}')
 
     # 单車 vs 士象全 → 官和（修复后不得判 80000 胜）
@@ -203,9 +208,65 @@ def test_egtb_local():
     board4[0][6] = 'b'
     board4[9][4] = 'K'
     board4[5][5] = 'R'
-    res4 = egtb.probe(board4, 1, 7)
+    res4 = egtb.probe(board4, 1, 7, allow_cloud=False)
     check('EGTB 单車vs士象全≠必胜',
           res4 is None or res4[0] < 50000, f'实际 {res4}')
+
+    # ── 单卒分支（结论经 chessdb.cn 云库实测核对）──
+    # 过河未到底 vs 孤将 → 胜
+    board5 = empty_board()
+    board5[0][4] = 'k'
+    board5[9][4] = 'K'
+    board5[4][4] = 'P'   # 红卒过河（r<=4）未到底
+    res5 = egtb.probe(board5, 1, 3, allow_cloud=False)
+    check('EGTB 过河卒vs孤将=胜', res5 is not None and res5[0] > 1000,
+          f'实际 {res5}')
+
+    # 过河卒 vs 单士 → 和（有防守子）
+    board6 = empty_board()
+    board6[0][4] = 'k'
+    board6[0][3] = 'a'
+    board6[9][4] = 'K'
+    board6[4][4] = 'P'
+    res6 = egtb.probe(board6, 1, 4, allow_cloud=False)
+    check('EGTB 过河卒vs单士=和', res6 is not None and res6[0] == 0.0,
+          f'实际 {res6}')
+
+    # 底线老兵 vs 孤将 → 和（沉底无杀伤力）
+    board7 = empty_board()
+    board7[0][4] = 'k'
+    board7[9][3] = 'K'   # 双将不同列，避免白脸将
+    board7[0][0] = 'P'   # 红卒沉底（r==0）
+    res7 = egtb.probe(board7, 1, 3, allow_cloud=False)
+    check('EGTB 底线老兵vs孤将=和', res7 is not None and res7[0] == 0.0,
+          f'实际 {res7}')
+
+
+def test_natural_limit():
+    """自然限着：连续 120 步未吃子判和；第 120 步将杀优先（限着失效）。"""
+    board = empty_board()
+    board[0][4] = 'k'
+    board[9][3] = 'K'
+    board[5][0] = 'R'
+    g = make_game_with_board(board, 1)
+    g.moves_since_capture = NATURAL_LIMIT_MOVES - 1
+    r = g.move_piece(5, 0, 5, 1)   # 未吃子的安静走法 → 达到 120 步
+    check('自然限着 120 步判和',
+          r['success'] and r.get('game_over') and g.winner == 0,
+          f"实际 {r.get('message')}")
+
+    # 同一限着计数下，将杀优先于限着（竞赛规则原文）
+    board2 = empty_board()
+    board2[0][4] = 'k'
+    board2[1][8] = 'R'
+    board2[5][0] = 'R'
+    board2[9][3] = 'K'
+    g2 = make_game_with_board(board2, 1)
+    g2.moves_since_capture = NATURAL_LIMIT_MOVES - 1
+    r2 = g2.move_piece(5, 0, 0, 0)  # 双車一步杀
+    check('限着步上将杀优先获胜',
+          r2['success'] and r2.get('game_over') and g2.winner == 1,
+          f"实际 {r2.get('message')}")
 
 
 def test_openings():
@@ -214,6 +275,19 @@ def test_openings():
     legal = game.get_all_legal_moves(1)
     check('开局库首步合法', move in legal or move is None,
           f'实际 {move}')
+
+    # 逐线全程走子：每条开局线的每一步都必须合法落子
+    # （线名/着法标注按标准路数校正后，用此守住坐标数据的合法性）
+    bad = []
+    for name, line in OPENING_LINES.items():
+        g = ChineseChessGame()
+        for mv in line:
+            r = g.move_piece(*mv)
+            if not r['success']:
+                bad.append(f"{name} {mv}: {r.get('message')}")
+                break
+    check(f'开局库 {len(OPENING_LINES)} 条线全程走子合法', not bad,
+          '; '.join(bad[:3]))
 
 
 def test_self_play():
@@ -246,6 +320,7 @@ if __name__ == '__main__':
     test_alpha_beta()
     test_mcts_real_search()
     test_egtb_local()
+    test_natural_limit()
     test_openings()
     test_self_play()
     if FAILED:

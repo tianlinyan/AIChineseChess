@@ -86,17 +86,22 @@ class ModelManager:
                 print(
                     f"[提示] 未设置将导致对应模型的 API 调用失败。",
                     file=sys.stderr)
+                # 同步到 UI 日志：打包后无控制台，仅 stderr 用户不可见
+                if on_error:
+                    on_error(
+                        f"未检测到环境变量: {var_list} — "
+                        f"对应模型的 API 调用将失败（请设置环境变量或创建 .env）")
 
-            # 按 -p1 / -p2 后缀分组
-            self.player1_models = [m for m in self.models if m.id.endswith('-p1')]
-            if not self.player1_models:
-                self.player1_models = [m for m in self.models if not m.id.endswith('-p2')]
+            # 按 -p1 / -p2 后缀分组；无后缀模型双方下拉框均可见
+            common = [m for m in self.models
+                      if not m.id.endswith('-p1') and not m.id.endswith('-p2')]
+            self.player1_models = common + [
+                m for m in self.models if m.id.endswith('-p1')]
+            self.player2_models = common + [
+                m for m in self.models if m.id.endswith('-p2')]
+            # 某侧无可用模型时回退到全量列表（保证下拉框非空）
             if not self.player1_models:
                 self.player1_models = list(self.models)
-
-            self.player2_models = [m for m in self.models if m.id.endswith('-p2')]
-            if not self.player2_models:
-                self.player2_models = [m for m in self.models if not m.id.endswith('-p1')]
             if not self.player2_models:
                 self.player2_models = list(self.models)
         except (FileNotFoundError, json.JSONDecodeError,

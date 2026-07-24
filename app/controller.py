@@ -83,6 +83,10 @@ class GameController:
 
         self._random_action_count: int = 0
 
+        # ── 在飞的后台搜索（reset/pause/shutdown 时主动停止，释放 CPU） ──
+        self._active_mcts: Optional['MCTSEngine'] = None
+        self._mcts_thread: Optional[threading.Thread] = None
+
         # ── Pikafish 引擎（延迟初始化——需等 main 就绪后才能写日志） ──
         self._pikafish: Optional['PikafishEngine'] = None
         self._pikafish_initialized: bool = False
@@ -179,6 +183,10 @@ class GameController:
         self.main.start_btn.setEnabled(False)
         self.main.pause_btn.setEnabled(True)
         self.main.reset_btn.setEnabled(True)
+        # 对局进行中锁定模型选择：换模型不即时生效（易误解），
+        # 且改动下拉框会误启用"开始对弈"（无确认重开会丢整局）
+        self.main.model1_combo.setEnabled(False)
+        self.main.model2_combo.setEnabled(False)
 
         self.main.update_game_status()
         self.main.update_player_status()
@@ -191,6 +199,17 @@ class GameController:
             QTimer.singleShot(1000, lambda v=self.game_version:
                               self.make_ai_move(expected_version=v))
 
+    def _stop_background_engines(self) -> None:
+        """请求停止在飞的后台搜索（Pikafish/MCTS）。
+
+        过期结果本就由版本门控丢弃，这里只为尽快释放 CPU 与搜索锁
+        （否则新对局首次 Pikafish 搜索最坏被旧搜索拖约 45s）。
+        """
+        if self._pikafish is not None:
+            self._pikafish.stop()
+        if self._active_mcts is not None:
+            self._active_mcts.stop()
+
     def reset_game(self) -> None:
         self.game_version += 1
         self.stop_thinking_timer()
@@ -198,6 +217,7 @@ class GameController:
         # 取消运行中的 AI 任务，防止残留 Worker 阻塞新游戏
         self.ai_manager.clear_queue()
         self.ai_manager.set_busy(False)
+        self._stop_background_engines()
 
         self.is_active = False
         self.is_paused = False
@@ -240,6 +260,8 @@ class GameController:
             self.main.pause_btn.setEnabled(False)
             self.main.pause_btn.setText("暂停")
             self.main.reset_btn.setEnabled(False)
+            self.main.model1_combo.setEnabled(True)
+            self.main.model2_combo.setEnabled(True)
 
     def toggle_pause(self) -> None:
         if not self.is_active:
@@ -250,6 +272,7 @@ class GameController:
             self.main.pause_thinking_timer()
             self.ai_manager.clear_queue()
             self.ai_manager.set_busy(False)
+            self._stop_background_engines()
             self.retry_count = 0
         else:
             self.main.pause_btn.setText("暂停")
@@ -631,11 +654,14 @@ class GameController:
                        cancel_version: int = 0) -> None:
         if self.ai_manager._shutting_down:
             return
+        # 过期回调只记日志，绝不能 _finish_ai_move() ——
+        # 会清掉新对局的 busy/active_worker（与 relay 层同一并发纪律，
+        # 见 _on_pikafish_search_done）
         if version != self.game_version:
-            self._finish_ai_move()
+            self.log(f"[诊断] AI 回调版本不匹配({version}!={self.game_version})，丢弃", 'INFO')
             return
         if cancel_version != self.ai_manager.cancel_version:
-            self._finish_ai_move()
+            self.log(f"[诊断] AI 回调取消版本不匹配({cancel_version}!={self.ai_manager.cancel_version})，丢弃", 'INFO')
             return
         if self.is_paused:
             self._finish_ai_move()
@@ -866,24 +892,29 @@ class GameController:
         result = {}
 
         def _run():
-            g = ChineseChessGame()
-            g.board = board_snapshot
-            g.current_player = player
-            g._king_pos = king_pos
-            g.recompute_hash()
-            engine = MCTSEngine(max_simulations=sims, time_limit=time_limit)
             move = None
             try:
+                g = ChineseChessGame()
+                g.board = board_snapshot
+                g.current_player = player
+                g._king_pos = king_pos
+                g.recompute_hash()
+                engine = MCTSEngine(max_simulations=sims, time_limit=time_limit)
+                self._active_mcts = engine
                 move = engine.search(g, player, priors=priors)
+                result['sims'] = engine.simulations
+                result['top'] = engine.get_top_moves(3)
             except Exception as e:
                 # 异常详情交由 _logged_on_done 展示（relay 层的失败日志
                 # 只挂 Pikafish 来源，避免误标）
                 result['error'] = f'MCTS 搜索异常: {e}'
-            result['sims'] = engine.simulations
-            result['top'] = engine.get_top_moves(3)
-            self._pikafish_relay.search_done.emit(
-                (move, player, _logged_on_done,
-                 captured_version, captured_cancel, ''))
+            finally:
+                self._active_mcts = None
+                # 无论是否异常都必须 emit —— 漏发会让 busy 永久卡死、
+                # 对局僵死（只能手动重置）
+                self._pikafish_relay.search_done.emit(
+                    (move, player, _logged_on_done,
+                     captured_version, captured_cancel, ''))
 
         def _logged_on_done(move, p):
             # 主线程：先补 MCTS 结果日志，再转交原始回调
@@ -1078,6 +1109,10 @@ class GameController:
             self.last_black_raw = move_desc
 
         self.retry_count = 0
+        # 非随机走子成功 → 重置随机回退计数（"连续随机上限 3 次"指连续，
+        # 中间有正常走子应重新累计；随机走子自身不重置，防无限循环）
+        if source != '随机':
+            self._random_action_count = 0
 
         piece_name = PIECE_SYMBOLS.get(
             self.game.board[to_row][to_col], '?')
@@ -1123,8 +1158,11 @@ class GameController:
             if captured_cancel != self.ai_manager.cancel_version:
                 self.log(f"[PF诊断] 搜索回调取消版本不匹配({captured_cancel}!={self.ai_manager.cancel_version})，丢弃", 'INFO')
                 return
-            if self.ai_manager._shutting_down or self.is_paused or not self.is_active or self.game.game_over:
-                self.log(f"[PF诊断] 搜索回调状态异常(shutdown={self.ai_manager._shutting_down} paused={self.is_paused} active={self.is_active} over={self.game.game_over})，丢弃", 'INFO')
+            # shutdown 中文本控件可能已销毁，静默返回（其余状态异常记诊断日志）
+            if self.ai_manager._shutting_down:
+                return
+            if self.is_paused or not self.is_active or self.game.game_over:
+                self.log(f"[PF诊断] 搜索回调状态异常(paused={self.is_paused} active={self.is_active} over={self.game.game_over})，丢弃", 'INFO')
                 return
             # Pikafish 失败：把原因写进思考日志（随后调用方会启动 MCTS 回退）
             if move is None and error:
@@ -1327,11 +1365,14 @@ class GameController:
         """仲裁完成回调：评分 + 执行仲裁结果。"""
         if self.ai_manager._shutting_down:
             return
+        # 过期回调只记日志，绝不能 _finish_ai_move() ——
+        # 会清掉新对局的 busy/active_worker（与 relay 层同一并发纪律，
+        # 见 _on_pikafish_search_done）
         if version != self.game_version:
-            self._finish_ai_move()
+            self.log(f"[诊断] 仲裁回调版本不匹配({version}!={self.game_version})，丢弃", 'INFO')
             return
         if cancel_version != self.ai_manager.cancel_version:
-            self._finish_ai_move()
+            self.log(f"[诊断] 仲裁回调取消版本不匹配({cancel_version}!={self.ai_manager.cancel_version})，丢弃", 'INFO')
             return
         if self.is_paused or not self.is_active or self.game.game_over:
             self._finish_ai_move()
@@ -1450,6 +1491,8 @@ class GameController:
             self.main.update_player_status()
             self.main.start_btn.setEnabled(True)
             self.main.pause_btn.setEnabled(False)
+            self.main.model1_combo.setEnabled(True)
+            self.main.model2_combo.setEnabled(True)
 
     # ── 计时器 ──
 
@@ -1513,6 +1556,18 @@ class GameController:
         """清理资源 — 关闭引擎、取消任务、停止计时器。"""
         self.is_active = False
         self.stop_thinking_timer()
+        # 主动停止在飞的后台搜索并短暂等待 MCTS 线程退出：
+        # 关窗后 daemon 线程若仍经 relay 向已销毁的控件 emit，
+        # 有进程级崩溃风险；断开 relay 后迟到 emit 变为安全无操作
+        self._stop_background_engines()
+        mcts_thread = self._mcts_thread
+        if mcts_thread and mcts_thread.is_alive():
+            mcts_thread.join(timeout=2.0)
+        try:
+            self._pikafish_relay.search_done.disconnect(
+                self._on_pikafish_search_done)
+        except TypeError:
+            pass  # 未连接过时 disconnect 抛 TypeError
         self.ai_manager.shutdown()
         if self._pikafish:
             try:

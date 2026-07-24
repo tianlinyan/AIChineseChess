@@ -7,6 +7,7 @@ BOARD_HEIGHT = 10
 # ── AI 配置 ──
 AI_RETRY_LIMIT = 3
 AI_TIMEOUT_SECONDS = 300
+AI_CONNECT_TIMEOUT = 15        # API 连接超时（秒）：与读取超时分离，端点黑洞快速失败
 ARBITRATION_TIMEOUT_SECONDS = 180  # 仲裁超时（秒），比正常 LLM 调用更短
 AI_OUTPUT_TRUNCATE_LENGTH = 1000
 AI_OUTPUT_MIN_TRIM_POSITION = 500
@@ -35,6 +36,9 @@ ENDGAME_PIECE_THRESHOLD = 14     # 残局阶段判定阈值（≤此值切换估
 # ── 开局库配置 ──
 OPENING_BOOK_ENABLED = True      # 默认启用开局库
 OPENING_BOOK_MAX_MOVES = 12      # 开局库最大走子数（之后退出开局库）
+
+# ── 对局规则 ──
+NATURAL_LIMIT_MOVES = 120        # 自然限着：连续未吃子步数上限（达到判和；将杀/困毙优先）
 
 # ── AI 模式配置 ──
 # "hybrid": AI + 搜索混合模式（推荐）— AI分析局面，搜索验证并选最优

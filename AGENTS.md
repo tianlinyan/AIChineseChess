@@ -33,13 +33,13 @@ domain/ ──→ ai/ ──→ app/ ──→ ui/ ──→ main.py
 
 ### `domain/` — 纯游戏逻辑（零框架依赖）
 
-- `game.py` — `ChineseChessGame`：10×9 棋盘。**定向走法生成**（車/炮沿射线步进、馬日字验蹩腿、相田字验塞眼、士兵将定向分支；与旧 90 格暴力版经 `tests/compare_movegen.py` 3000+ 局面对拍等价）。`_is_in_check` 从将位**反向检测**（車炮射线/馬位/兵位，O(~20)）。Zobrist 增量哈希（`move_piece` 与搜索 make/unmake 自动维护；**外部直接替换 board 后必须调 `recompute_hash()`**）。将杀/困毙共用一次走法生成判定。将/帅位置缓存 `_king_pos`（缓存失效时自动全盘扫描回退）。`get_capture_moves` 为静止搜索专用
+- `game.py` — `ChineseChessGame`：10×9 棋盘。**定向走法生成**（車/炮沿射线步进、馬日字验蹩腿、相田字验塞眼、士兵将定向分支；与旧 90 格暴力版经 `tests/compare_movegen.py` 3000+ 局面对拍等价）。`_is_in_check` 从将位**反向检测**（車炮射线/馬位/兵位，O(~20)）。Zobrist 增量哈希（`move_piece` 与搜索 make/unmake 自动维护；**外部直接替换 board 后必须调 `recompute_hash()`**）。将杀/困毙共用一次走法生成判定；自然限着（`NATURAL_LIMIT_MOVES`=120 步未吃子判和，将杀/困毙优先，仅对局层判定、搜索不感知）。将/帅位置缓存 `_king_pos`（缓存失效时自动全盘扫描回退）。`get_capture_moves` 为静止搜索专用
 - `evaluation.py` — 静态评估（红方视角，约 40 个特征：子力 + PST + 机动性 + 兵结构 + 将帅安全 + 战术模式识别如卧槽馬/铁门栓等）。机动性特征仅在调用方提供走法数时计入（搜索叶节点为速度跳过）。`compute_material(board)` 是共享的子力统计函数，controller 提示词、worker 评估输出、UI 显示三处共用
 - `search.py` — `SearchEngine`：Alpha-Beta + PVS（含根节点）+ 静止搜索 + 置换表（OrderedDict 实现的 LRU + Zobrist 键，约 1.2 万节点/秒）。静止搜索被将军时搜全部应将走法（防将杀漏判，额外深度上限 `QS_EVASION_EXTRA_DEPTH`），非将军时只搜 `get_capture_moves` 生成的吃子。迭代加深每层完整重排。NMP 参数 R=2/最小深度 6（默认深度 ≤5 下实际不触发）。**只作为 LLM 的工具**（`search_best_move`）被调用，controller 不直接用
 - `mcts.py` — `MCTSEngine`：UCB1 蒙特卡洛树搜索。**真搜索**：Selection 下降在工作局面副本上真实走子（`SearchEngine._make_move`），Expansion/Simulation 作用于叶局面。**由 controller 使用**，负责战术验证、hybrid 模式引擎先行、各类兜底
 - `pikafish.py` — `PikafishEngine`：Pikafish UCI 协议封装，守护线程异步搜索 + `pyqtSignal` 回主线程。引擎 stdout 由独立 reader 线程读入行队列，按截止时间 `queue.get(timeout=)` 取行（引擎静默挂起也不会永久阻塞）；close/kill 先杀进程再收锁。controller 的首选引擎，优先级 Pikafish → MCTS → 随机走法
-- `egtb.py` — 残局库：≤6 子查 chessdb.cn 云库（`EGTB_CLOUD_MAX_PIECES`），≤10 子用本地启发式（`EGTB_MAX_PIECES`）。正缓存 5 分钟 TTL + **负缓存 60s + 连续失败熔断 120s + 缓存上限 5000**；`probe(..., allow_cloud=False)` 供搜索/MCTS 叶节点使用（**搜索循环内禁止同步联网**，云查询只给 UI 层/根节点）。本地 `_can_win` 结合防守方士象数量（单車vs士象全=和、单馬必胜孤将、双炮必胜孤将）
-- `openings.py` — 19 条标准开局谱，按走子历史前缀匹配加权随机选取
+- `egtb.py` — 残局库：≤10 子用本地启发式（`EGTB_MAX_PIECES`）；≤6 子可查 chessdb.cn 云库（`EGTB_CLOUD_MAX_PIECES`，`chessdb.php?action=queryall` API，解析管道文本 note 的 `(W/D/L-M-NNNN)` 胜负与 DTM）。正缓存 5 分钟 TTL（上限 5000）+ **负缓存 60s（上限 5000）+ 连续失败熔断 120s**；`probe(..., allow_cloud=False)` 供搜索/MCTS 叶节点使用（**搜索循环内禁止同步联网**）。注意：**云查询当前未接入生产路径**（搜索/MCTS/兜底全部 `allow_cloud=False`），`probe_cloud` 已实现并实测可用，留待 UI 层按需接线。本地 `_can_win` 结合防守方士象数量（单車vs士象全=和、单馬必胜孤将、双炮必胜孤将、单卒仅过河未到底可胜孤将）
+- `openings.py` — 17 条标准开局谱，按走子历史前缀匹配加权随机选取（线名/着法标注按标准路数校正：红 N 路=col(9−N)，黑 N 路=col(N−1)）
 - `fen.py` — 共享 FEN 生成（`board_to_fen` / `game_to_fen`），供 pikafish 和 egtb 使用，勿再各自重复实现
 - `prompts.py` — 系统提示词（完整版/精简版均接受 `include_analysis_tools` 参数）、仲裁提示词、合法走法格式化（带 ×吃子/+将军 战术标注，将军>吃子>其他 排序）、工具定义（`DEFAULT_TOOLS` 三个工具；`TOOLS_BASIC` 仅 `move_piece`，用于 llm_only 模式和仲裁）
 - `constants.py` — 全部可调常量与坐标格式化工具函数。**注意：`SEARCH_MAX_DEPTH`（UI 上的"搜索强度" 1~6）不是 Alpha-Beta 深度**，它映射到 MCTS 模拟次数（500~3000，见 controller `_DEPTH_SIMS_MAP`）和 Pikafish 时限（强度×3 秒，封顶 `MCTS_TIME_LIMIT`=15 秒）

@@ -29,5 +29,5 @@ class ModelInfo:
             api_key=data.get('api_key', ''),
             tools_choice=data.get('tools_choice', 'auto'),
             system_prompt=data.get('system_prompt', ''),
-            options=dict(data.get('options', {})),
+            options=dict(data.get('options') or {}),
         )

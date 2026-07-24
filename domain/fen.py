@@ -21,7 +21,9 @@ def board_to_fen(board: list, current_player: int,
     Args:
         board: 10×9 二维列表，row 0 = 黑方底线（棋盘顶部）
         current_player: 1=红方, 2=黑方
-        reverse_rows: True 则将行序反转（Pikafish 需要 row 0 = 红方底线）
+        reverse_rows: True 则将行序反转（row 0 = 红方底线）。
+            注意：Pikafish / chessdb.cn 的标准 FEN 均为 row 0 = 黑方底线，
+            不需要反转；本参数目前无使用方，仅为兼容保留
     """
     rows = []
     for r in range(10):

@@ -149,6 +149,23 @@ ZUGZWANG_PIECE_LIMIT = 8        # 少于该子力数不进行空着裁剪（防�
 # Negamax 特殊分值
 JIANGSHA_SCORE = 99999          # 将杀基础分
 KUNBI_SCORE = 50000             # 困毙基础分
+# |score| 超过此值视为杀/困分：存取置换表必须按 ply 折算
+# （静态评估量级远低于此；EGTB 大分本身即杀棋距离分，折算方向一致）
+MATE_TT_BOUND = KUNBI_SCORE - 10000
+
+
+def _tt_score_to_relative(score: float, ply: int) -> float:
+    """杀/困分存表前按 ply 折算为相对当前节点的值。
+
+    杀分里编码的是"距本次搜索根的距离"；同一局面在不同迭代、不同
+    换位路径下 ply 不同，不折算会让跨迭代共享的杀棋步数失真。
+    probe 命中时按当前 ply 反向还原（见 _alpha_beta 的 TT 查找）。
+    """
+    if score > MATE_TT_BOUND:
+        return score + ply
+    if score < -MATE_TT_BOUND:
+        return score - ply
+    return score
 
 
 class SearchEngine:
@@ -301,6 +318,13 @@ class SearchEngine:
         hash_key = game.position_hash()
         hit, tt_score, tt_move = self._tt.probe(hash_key, depth, alpha, beta)
         if hit:
+            # 杀/困分存表时已按 ply 折算为相对当前节点的值，
+            # 命中须按本次 ply 还原（否则跨迭代/换位的杀棋步数失真）
+            ply = self.max_depth - depth
+            if tt_score > MATE_TT_BOUND:
+                return tt_score - ply
+            if tt_score < -MATE_TT_BOUND:
+                return tt_score + ply
             return tt_score
 
         # ── 空着裁剪 (Null Move Pruning) ──
@@ -386,7 +410,11 @@ class SearchEngine:
                 self._record_history(move, depth)
                 # 存入置换表：beta 截断 → 下界（true score >= score）
                 # 存触发截断的 score（而非 best），确保 best_move 与 score 一致
-                self._tt.store(hash_key, depth, score, TTFlag.LOWER_BOUND, move)
+                # 杀/困分按 ply 折算为相对值（probe 命中时反向还原）
+                self._tt.store(hash_key, depth,
+                               _tt_score_to_relative(
+                                   score, self.max_depth - depth),
+                               TTFlag.LOWER_BOUND, move)
                 return best
 
         # 所有走法搜索完毕
@@ -394,7 +422,9 @@ class SearchEngine:
             flag = TTFlag.EXACT
         else:
             flag = TTFlag.UPPER_BOUND  # 未提升 alpha → 上界（true score <= best）
-        self._tt.store(hash_key, depth, best, flag, best_move)
+        self._tt.store(hash_key, depth,
+                       _tt_score_to_relative(best, self.max_depth - depth),
+                       flag, best_move)
         return best
 
     # ── 静态搜索（Negamax） ──
