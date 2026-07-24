@@ -393,6 +393,12 @@ class GameController:
                         lambda m2, p2: self._execute_engine_move_or_random(
                             m2, p2, '搜索'))
                     return
+                # search_only 模式下 Pikafish 结果即最终走法，在此记日志
+                # （hybrid 模式由 _on_hybrid_engine_done 另行记录）
+                fr, fc, tr, tc = move
+                pn = PIECE_SYMBOLS.get(self.game.board[fr][fc], '?')
+                self.log(f"🔍 Pikafish 推荐: {pn} "
+                         f"{chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1}", 'INFO')
                 self._execute_engine_move_or_random(move, p, '搜索')
 
             self._mcts_search(current_player, on_done=_on_search)
@@ -856,13 +862,9 @@ class GameController:
             captured_cancel = self.ai_manager.cancel_version
 
             def _logged_pf_done(move, p, _od=on_done, _ms=time_ms):
-                # 主线程：先补 Pikafish 结果日志，再转交原始回调
-                if move:
-                    fr, fc, tr, tc = move
-                    pn = PIECE_SYMBOLS.get(self.game.board[fr][fc], '?')
-                    self.log(f"  ✅ Pikafish选择: {pn} "
-                             f"{chr(65+fc)}{fr+1}→{chr(65+tc)}{tr+1} "
-                             f"({_ms}ms)", 'INFO')
+                # 主线程：不在此记日志——各 on_done 回调各自负责
+                # （hybrid 由 _on_hybrid_engine_done 记，search_only
+                #  由 _on_search 记，避免同一条走法打两行）
                 _od(move, p)
 
             self._pikafish.search_async(

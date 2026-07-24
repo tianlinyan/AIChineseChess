@@ -45,9 +45,6 @@ class LogManager:
         # 时间戳 span 是程序自己生成的 HTML，不受影响
         html = f'<span style="color:#888">{timestamp}</span> '
         html += f'<span style="color:{color}">{escape(message)}</span>'
-        # 仅当垂直滚动条本来就在底部时才跟随滚动，避免打断用户回看历史日志
-        scrollbar = self._widget.verticalScrollBar()
-        at_bottom = scrollbar.value() == scrollbar.maximum()
         # 用光标副本在文末插入，不移动视口；insertBlock 保证每条日志独占一个块，
         # maximumBlockCount 才能按条裁剪（<br> 只是块内软换行，不产生新块）
         cursor = self._widget.textCursor()
@@ -55,5 +52,8 @@ class LogManager:
         if cursor.position() > 0:
             cursor.insertBlock()
         cursor.insertHtml(html)
-        if at_bottom:
-            self._widget.moveCursor(QTextCursor.MoveOperation.End)
+        # 始终将光标置于最后，确保最新日志立即可见
+        self._widget.moveCursor(QTextCursor.MoveOperation.End)
+        # 确保滚动条跟随（moveCursor 有时不触发滚动，显式设置）
+        scrollbar = self._widget.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
