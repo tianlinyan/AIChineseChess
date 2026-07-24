@@ -446,6 +446,10 @@ class GameController:
         # 视觉模式判断（截图失败时回退文字棋盘，否则 LLM 将完全
         # 拿不到棋盘信息——提示词声称有图，实际既无图也无文字棋盘）
         use_vision = self.main and self.main.vision_check.isChecked()
+        # DeepSeek API 不支持 image_url 类型，启用视觉会直接 400
+        if use_vision and model.type == 'deepseek':
+            use_vision = False
+            self.log("视觉模式对 DeepSeek 不可用（API 仅支持 text），已自动切换文字棋盘", 'INFO')
         image = None
         if use_vision:
             try:

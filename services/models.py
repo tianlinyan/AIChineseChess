@@ -93,8 +93,11 @@ class ModelManager:
                         f"对应模型的 API 调用将失败（请设置环境变量或创建 .env）")
 
             # 按 -p1 / -p2 后缀分组；无后缀模型双方下拉框均可见
+            # 仲裁裁判不参与对弈，排除出玩家下拉框
             common = [m for m in self.models
-                      if not m.id.endswith('-p1') and not m.id.endswith('-p2')]
+                      if not m.id.endswith('-p1')
+                      and not m.id.endswith('-p2')
+                      and m.id != 'arbitration']
             self.player1_models = common + [
                 m for m in self.models if m.id.endswith('-p1')]
             self.player2_models = common + [

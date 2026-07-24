@@ -452,8 +452,12 @@ class AIWorker:
         return payload
 
     def _build_user_content(self):
-        """构建用户消息内容"""
-        if self.image_base64:
+        """构建用户消息内容。
+
+        DeepSeek API 不接受 image_url 类型（仅 text），会直接 400。
+        安全网：即使 controller 误传了 image_base64，此处也过滤掉。
+        """
+        if self.image_base64 and self.model_info.type != 'deepseek':
             return [
                 {'type': 'text', 'text': self.prompt or "请根据棋盘图像分析局势。"},
                 {'type': 'image_url', 'image_url': {
