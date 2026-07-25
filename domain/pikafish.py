@@ -443,16 +443,13 @@ class PikafishEngine:
             print(f"[Pikafish] reader 线程异常退出: {e}",
                   file=sys.stderr, flush=True)
         finally:
+            # 标记死亡 + 哨兵唤醒：_read_line 在队列空时立即失败，
+            # 避免此后每次搜索都白等到截止时间
             self._reader_dead = True
             try:
-                self._out_q.put(None)  # 哨兵唤醒等待中的 _read_line
+                self._out_q.put(None)  # EOF 哨兵，唤醒所有等待中的读取方
             except Exception:
                 pass
-        finally:
-            # 标记死亡：_read_line 在队列空时立即失败，
-            # 避免此后每次搜索都白等到截止时间（最高 45s/步）
-            self._reader_dead = True
-            self._out_q.put(None)  # EOF 哨兵，唤醒所有等待中的读取方
 
     def _read_line(self, timeout: float) -> Optional[str]:
         """从行队列取一行。超时/EOF/reader 死亡返回 None（绝不永久阻塞）。"""
@@ -517,7 +514,7 @@ class PikafishEngine:
 
         安全机制：
         - 每 0.5s 轮询一次 queue，同时检查进程存活，引擎死亡后最多 0.5s 即可检测
-        - 总时间上限 = 实际搜索时间 + 30s 兜底
+        - 总时间上限 = 实际搜索时间 + 10s 兜底
         - 超时或进程死亡时返回 None（调用方回退 MCTS）
         - 沿途收集 multipv info 行到 self._top_moves（供高置信度短路使用）
         """

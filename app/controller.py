@@ -313,10 +313,17 @@ class GameController:
                 names = get_opening_names(self.game.moves)
                 if names:
                     self.log(f"📚 当前开局: {', '.join(names)}", 'INFO')
+                # 去重：同一走法对应多条开局线时只显示一次（保留最高权重）
+                seen = set()
                 lines = []
-                for (fr, fc, tr, tc), _ in candidates[:5]:
+                for (fr, fc, tr, tc), _ in candidates:
+                    if (fr, fc, tr, tc) in seen:
+                        continue
+                    seen.add((fr, fc, tr, tc))
                     pn = PIECE_SYMBOLS.get(self.game.board[fr][fc], '?')
                     lines.append(f"{pn} {format_move(fr, fc, tr, tc)}")
+                    if len(lines) >= 5:
+                        break
                 self.log(
                     f"📖 {player_name} 开局库参考: {' | '.join(lines)}",
                     'INFO')
