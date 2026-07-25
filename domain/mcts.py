@@ -141,8 +141,8 @@ class MCTSEngine:
 
         # 工作局面副本：Selection/Expansion/Simulation 在其上真实走子，
         # 不污染调用方的 game（棋子在棋盘上的移动见 _select/_expand）
-        work = ChineseChessGame.from_snapshot(
-            game.get_board_copy(), player, game._king_pos)
+        work = game.snapshot()
+        work.current_player = player
 
         # 主循环
         while self._simulations < self.max_simulations:
@@ -268,8 +268,8 @@ class MCTSEngine:
             except Exception:
                 pass
 
-        red_check = game._is_in_check(1)
-        black_check = game._is_in_check(2)
+        red_check = game.is_in_check(1)
+        black_check = game.is_in_check(2)
 
         score = evaluate(
             board,

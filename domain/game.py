@@ -84,6 +84,16 @@ class ChineseChessGame:
         g._recompute_incremental()  # 从快照棋盘重建增量缓存
         return g
 
+    @property
+    def king_pos(self) -> dict:
+        """双方将/帅位置缓存 {1: (row, col), 2: (row, col)}。"""
+        return self._king_pos
+
+    def snapshot(self) -> 'ChineseChessGame':
+        """创建独立棋盘快照（用于后台线程搜索/分析/提示）。"""
+        return ChineseChessGame.from_snapshot(
+            self.get_board_copy(), self.current_player, self._king_pos)
+
     def is_red(self, piece):
         return piece.isupper()
 
@@ -179,7 +189,7 @@ class ChineseChessGame:
         self._position_history.append(self.position_hash())
         opponent = 2 if self.current_player == 1 else 1
         # 显式记录走子方：不依赖索引奇偶（500 条截断后奇偶会整体翻转）
-        self._move_checks.append((self.current_player, self._is_in_check(opponent)))
+        self._move_checks.append((self.current_player, self.is_in_check(opponent)))
         # 保留最近 500 条
         if len(self._position_history) > 500:
             self._position_history = self._position_history[-500:]
@@ -205,7 +215,7 @@ class ChineseChessGame:
             self.game_over = True
             self.winner = self.current_player
             player_name = '红方' if self.current_player == 1 else '黑方'
-            if self._is_in_check(opponent):
+            if self.is_in_check(opponent):
                 msg = f'{player_name}将死对方获胜！'
             else:
                 msg = f'{player_name}困毙对方获胜！'
@@ -388,7 +398,7 @@ class ChineseChessGame:
             saved_pos = self._king_pos.get(player)
             self._king_pos[player] = (tr, tc)
 
-        illegal = self._is_in_check(player) or self._is_king_facing()
+        illegal = self.is_in_check(player) or self._is_king_facing()
 
         # 恢复缓存
         if saved_pos is not None:
@@ -398,7 +408,7 @@ class ChineseChessGame:
         self.board[tr][tc] = target
         return illegal
 
-    def _is_in_check(self, player):
+    def is_in_check(self, player):
         """检测 player 方是否被将军。
 
         从将位反向检测：車/炮四条射线、馬 8 个攻击位（验蹩腿）、

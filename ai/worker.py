@@ -244,15 +244,13 @@ class AIWorker:
         top_n = min(max(args.get('top_n', 3), 1), 5)
 
         try:
-            # 主搜索 — 用临时 Game 对象隔离，不修改 self.game.board
-            board_copy = [row[:] for row in self.game.board]
+            # 主搜索 — 用快照隔离，不修改 self.game.board
             engine = SearchEngine(
                 max_depth=depth,
                 time_limit=min(15.0, 2.0 + depth * 3.0),
             )
-            # 创建临时 Game，避免替换 self.game.board（防止 Pikafish 快照读到修改中棋盘）
-            tmp_game = ChineseChessGame.from_snapshot(
-                board_copy, self.current_player, self.game._king_pos)
+            tmp_game = self.game.snapshot()
+            tmp_game.current_player = self.current_player
             best_move = engine.search(tmp_game, self.current_player)
 
             if not best_move:
@@ -274,7 +272,7 @@ class AIWorker:
                 # 将军奖励：走子后对方被将军额外加分
                 # 使用 tmp_game 隔离，避免修改 self.game.board（防止与主线程/Pikafish 的数据竞争）
                 tmp_game.board = board
-                if tmp_game._is_in_check(opponent):
+                if tmp_game.is_in_check(opponent):
                     s += 50.0 if player == 1 else -50.0
                 SearchEngine._unmake_move(tmp_game, fr, fc, tr, tc, captured)
                 # 归一化：将评分转为"越高=对当前玩家越有利"
@@ -330,14 +328,13 @@ class AIWorker:
     def _run_evaluate(self) -> str:
         """执行静态局面评估"""
         try:
-            # 使用副本隔离，避免工作线程访问 self.game.board 的数据竞争
-            board = [row[:] for row in self.game.board]
-            tmp_game = ChineseChessGame.from_snapshot(
-                board, self.current_player, self.game._king_pos)
+            # 使用快照隔离，避免工作线程访问 self.game.board 的数据竞争
+            tmp_game = self.game.snapshot()
+            tmp_game.current_player = self.current_player
             red_moves = tmp_game.get_all_legal_moves(1)
             black_moves = tmp_game.get_all_legal_moves(2)
-            red_check = tmp_game._is_in_check(1)
-            black_check = tmp_game._is_in_check(2)
+            red_check = tmp_game.is_in_check(1)
+            black_check = tmp_game.is_in_check(2)
 
             total_pieces = sum(1 for r in range(BOARD_HEIGHT)
                               for c in range(BOARD_WIDTH) if board[r][c] != '.')

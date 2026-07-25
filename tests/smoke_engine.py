@@ -91,7 +91,7 @@ def test_movegen():
     # 将位反向检测 vs 暴力法 逐点对比（随机 30 局面）
     from domain.evaluation import evaluate  # noqa: F401  (确认模块可导入)
     ok2, detail2 = _cross_check_is_in_check(rng)
-    check('_is_in_check 反向检测与暴力法一致', ok2, detail2)
+    check('is_in_check 反向检测与暴力法一致', ok2, detail2)
 
 
 def _brute_in_check(game, player):
@@ -124,7 +124,7 @@ def _cross_check_is_in_check(rng):
                 break
             game.move_piece(*rng.choice(legal))
         for player in (1, 2):
-            new = game._is_in_check(player)
+            new = game.is_in_check(player)
             old = _brute_in_check(game, player)
             if new != old:
                 return False, (f'局面 {trial} player={player} '

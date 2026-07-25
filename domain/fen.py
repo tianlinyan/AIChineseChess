@@ -36,8 +36,3 @@ def board_to_fen(board: list, current_player: int) -> str:
         rows.append(row_str)
     side = 'w' if current_player == 1 else 'b'
     return '/'.join(rows) + ' ' + side
-
-
-def game_to_fen(game: 'ChineseChessGame', current_player: int) -> str:
-    """从 ChineseChessGame 对象生成 FEN（EGTB 查询用）。"""
-    return board_to_fen(game.board, current_player)

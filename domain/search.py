@@ -254,7 +254,7 @@ class SearchEngine:
                         break
                     fr, fc, tr, tc = move
                     captured = self._make_move(game, fr, fc, tr, tc)
-                    in_check = game._is_in_check(3 - player)
+                    in_check = game.is_in_check(3 - player)
                     ext = CHECK_EXTENSION_DEPTH if in_check else 0
                     # Negamax：递归返回 3-player 视角，取反得 player 视角
                     if i == 0:
@@ -332,7 +332,7 @@ class SearchEngine:
         # ── 空着裁剪 (Null Move Pruning) ──
         # 如果跳过己方回合（让对手连走两步）仍无法被击败，
         # 说明局面太好，可以直接剪枝。
-        in_check_before_nmp = game._is_in_check(player)
+        in_check_before_nmp = game.is_in_check(player)
         if (not in_check_before_nmp
                 and depth >= NULL_MOVE_MIN_DEPTH
                 and not extended):
@@ -361,7 +361,7 @@ class SearchEngine:
         moves = game.get_all_legal_moves(player)
         if not moves:
             # 中国象棋：无合法走法 = 输棋（将杀或困毙）
-            if game._is_in_check(player):
+            if game.is_in_check(player):
                 # 将杀 — 距离根节点越近（depth 剩余越大）越差
                 return -(JIANGSHA_SCORE - (self.max_depth - depth))
             # 困毙（同样输棋，但评分略轻）
@@ -379,7 +379,7 @@ class SearchEngine:
 
             fr, fc, tr, tc = move
             captured = self._make_move(game, fr, fc, tr, tc)
-            in_check = game._is_in_check(3 - player)
+            in_check = game.is_in_check(3 - player)
             # 将军延伸：仅允许每分支一次，防止连续将军导致无限递归
             ext = CHECK_EXTENSION_DEPTH if (in_check and not extended) else 0
 
@@ -446,7 +446,7 @@ class SearchEngine:
         if self._nodes_searched % 200 == 0 and self._is_time_up():
             return self._fast_eval(game, player)
 
-        in_check = game._is_in_check(player)
+        in_check = game.is_in_check(player)
         stand_pat = self._fast_eval(game, player)
 
         if in_check:
@@ -554,8 +554,8 @@ class SearchEngine:
         endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
 
         # 将军检测（始终检查双方）—— O(~20) per side，已在 _king_pos 缓存加速
-        red_in_check = game._is_in_check(1)
-        black_in_check = game._is_in_check(2)
+        red_in_check = game.is_in_check(1)
+        black_in_check = game.is_in_check(2)
 
         # 从 _material_counts 字典 × 正确阶段估值表 计算物质分
         vals = PIECE_VALUE_ENDGAME if endgame else PIECE_VALUE

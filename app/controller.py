@@ -158,8 +158,7 @@ class GameController:
         first_model = self.model1 if first_player == 1 else self.model2
         self.main.start_thinking_timer(first_player)
         if first_model != HUMAN_MODEL:
-            QTimer.singleShot(1000, lambda v=self.game_version:
-                              self.make_ai_move(expected_version=v))
+            self._defer_ai_move(1000)
 
     def reset_game(self) -> None:
         self.game_version += 1
@@ -233,8 +232,7 @@ class GameController:
                 current_player = self.game.current_player
                 current_model = self.model1 if current_player == 1 else self.model2
                 if current_model != HUMAN_MODEL:
-                    QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                        self.make_ai_move(expected_version=v))
+                    self._defer_ai_move(AI_DELAY_MS)
                 else:
                     self.main.start_thinking_timer(current_player)
 
@@ -283,8 +281,7 @@ class GameController:
                 next_model = self.model1 if next_player == 1 else self.model2
                 if next_model != HUMAN_MODEL:
                     self.main.start_thinking_timer(next_player)
-                    QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                        self.make_ai_move(expected_version=v))
+                    self._defer_ai_move(AI_DELAY_MS)
                 else:
                     self.main.start_thinking_timer(next_player)
         else:
@@ -330,15 +327,11 @@ class GameController:
         self._hint_active = True
 
         def _on_hint_done(move, version, cancel_version):
-            if version != self.game_version:
-                return
-            if cancel_version != self.ai_manager.cancel_version:
+            if not self._check_callback_valid(version, cancel_version, 'hint'):
                 return
             if not self._hint_active:
                 return
             self._hint_active = False
-            if not self.is_active or self.is_paused:
-                return
             if self.game.current_player != current_player:
                 return  # 人类已经落子了
             if move:
@@ -493,9 +486,9 @@ class GameController:
         history = self.game.format_move_history(max_items=PROMPT_HISTORY_MAX_ITEMS)
 
         # 将军状态
-        in_check = self.game._is_in_check(player)
+        in_check = self.game.is_in_check(player)
         opponent = 2 if player == 1 else 1
-        opponent_in_check = self.game._is_in_check(opponent)
+        opponent_in_check = self.game.is_in_check(opponent)
         move_count = len(self.game.moves) // 2 + 1  # 回合数（双方各走一次=一回合）
 
         # 合法走法
@@ -508,7 +501,7 @@ class GameController:
             self.game.winner = opponent
             self.handle_game_over({
                 'game_over': True, 'winner': opponent,
-                'message': f"{'红方' if opponent == 1 else '黑方'}获胜（{'将杀' if self.game._is_in_check(player) else '困毙'}）"
+                'message': f"{'红方' if opponent == 1 else '黑方'}获胜（{'将杀' if self.game.is_in_check(player) else '困毙'}）"
             })
             self._finish_ai_move()
             return
@@ -700,12 +693,7 @@ class GameController:
         if error or not from_coord or not to_coord:
             if self.ai_mode == 'hybrid':
                 self.log(f"{player_name} LLM 调用失败 ({error or '无有效走法'})，直接采用引擎走法", 'WARNING')
-                self._finish_ai_move()
-                if self._hybrid_engine_move:
-                    self._execute_guarded_move(self._hybrid_engine_move,
-                                            current_player, '引擎兜底')
-                else:
-                    self._random_move(current_player)
+                self._fallback_hybrid_engine(current_player)
                 return
             else:
                 # llm_only 模式：原有重试逻辑
@@ -723,20 +711,14 @@ class GameController:
             )
             if self.ai_mode == 'hybrid':
                 self.log(f"{player_name} 坐标解析失败，直接采用引擎走法", 'WARNING')
-                self._finish_ai_move()
-                if self._hybrid_engine_move:
-                    self._execute_guarded_move(self._hybrid_engine_move,
-                                            current_player, '引擎兜底')
-                else:
-                    self._random_move(current_player)
+                self._fallback_hybrid_engine(current_player)
                 return
             else:
                 self.retry_count += 1
                 if self.retry_count <= AI_RETRY_LIMIT:
                     self.ai_manager.set_busy(False)
                     self.ai_manager.clear_active_worker()
-                    QTimer.singleShot(self.retry_count * 2000, lambda v=self.game_version:
-                        self.make_ai_move(expected_version=v))
+                    self._defer_ai_move(self.retry_count * 2000)
                     return
                 else:
                     self._finish_ai_move()
@@ -754,12 +736,7 @@ class GameController:
             if final_move not in legal_moves:
                 self.last_move_error = f"{from_coord}→{to_coord}（原因：走法不合法）"
                 self.log(f"{player_name} 走法 {from_coord}→{to_coord} 非法，直接采用引擎走法", 'WARNING')
-                self._finish_ai_move()
-                if self._hybrid_engine_move and self._hybrid_engine_move != final_move:
-                    self._execute_guarded_move(self._hybrid_engine_move,
-                                            current_player, '引擎兜底')
-                else:
-                    self._random_move(current_player)
+                self._fallback_hybrid_engine(current_player, final_move)
                 return
 
         # ── Hybrid 模式分歧检测：LLM ≠ 引擎 → 启动第三方仲裁 ──
@@ -802,12 +779,7 @@ class GameController:
 
             if self.ai_mode == 'hybrid':
                 self.log(f"{player_name} 走子非法 ({reason})，直接采用引擎走法", 'WARNING')
-                self._finish_ai_move()
-                if self._hybrid_engine_move and self._hybrid_engine_move != final_move:
-                    self._execute_guarded_move(self._hybrid_engine_move,
-                                            current_player, '引擎兜底')
-                else:
-                    self._random_move(current_player)
+                self._fallback_hybrid_engine(current_player, final_move)
                 return
             else:
                 # llm_only：重试
@@ -815,8 +787,7 @@ class GameController:
                 if self.retry_count <= AI_RETRY_LIMIT:
                     self.ai_manager.set_busy(False)
                     self.ai_manager.clear_active_worker()
-                    QTimer.singleShot(self.retry_count * 2000, lambda v=self.game_version:
-                        self.make_ai_move(expected_version=v))
+                    self._defer_ai_move(self.retry_count * 2000)
                     return
                 else:
                     self._finish_ai_move()
@@ -901,25 +872,11 @@ class GameController:
                 self._on_move_success(fr, fc, tr, tc, current_player,
                                       source='随机')
                 # 注意：随机走子成功不重置计数——防止无限[随机]循环
-
-                if self.main:
-                    self.main.board_widget.update()
-                    self.main.update_game_status()
-                    self.main.update_history_list()
-        
-                    self.main.update_player_status()
-
+                self._refresh_ui()
                 if result['game_over']:
                     self.handle_game_over(result)
                     return
-
-                if self.main:
-                    self.main.start_thinking_timer(self.game.current_player)
-                next_player = self.game.current_player
-                next_model = self.model1 if next_player == 1 else self.model2
-                if next_model != HUMAN_MODEL and self.is_active and not self.is_paused:
-                    QTimer.singleShot(AI_DELAY_MS, lambda v=self.game_version:
-                        self.make_ai_move(expected_version=v))
+                self._schedule_next_ai_move()
                 return
             else:
                 self.log(f"随机走子失败: {result.get('message', '未知')}", 'ERROR')
@@ -930,7 +887,7 @@ class GameController:
         self.game.game_over = True
         opponent = 3 - current_player
         self.game.winner = opponent
-        kind = '将杀' if self.game._is_in_check(current_player) else '困毙'
+        kind = '将杀' if self.game.is_in_check(current_player) else '困毙'
         self.handle_game_over({
             'game_over': True, 'winner': opponent,
             'message': f"{'红方' if opponent == 1 else '黑方'}获胜（{kind}）"})
@@ -955,8 +912,7 @@ class GameController:
             self.log(f"重试 ({self.retry_count}/{AI_RETRY_LIMIT}) 延迟 {delay}ms", 'ERROR')
             self.ai_manager.set_busy(False)
             self.ai_manager.clear_active_worker()
-            QTimer.singleShot(delay, lambda v=self.game_version:
-                self.make_ai_move(expected_version=v))
+            self._defer_ai_move(delay)
             return
 
         self.log("超过重试次数，回退搜索", 'ERROR')
@@ -1017,6 +973,11 @@ class GameController:
             self.main.update_history_list()
             self.main.update_player_status()
 
+    def _defer_ai_move(self, delay: int = AI_DELAY_MS) -> None:
+        """延迟调度 AI 走子（自动捕获 game_version 防陈旧回调）。"""
+        QTimer.singleShot(delay,
+            lambda v=self.game_version: self.make_ai_move(expected_version=v))
+
     def _schedule_next_ai_move(self, delay: int = AI_DELAY_MS) -> None:
         """若游戏仍在进行且下一方为 AI，则调度其走子。"""
         if not self.is_active or self.is_paused or self.game.game_over:
@@ -1026,8 +987,7 @@ class GameController:
         next_player = self.game.current_player
         next_model = self.model1 if next_player == 1 else self.model2
         if next_model != HUMAN_MODEL:
-            QTimer.singleShot(delay, lambda v=self.game_version:
-                self.make_ai_move(expected_version=v))
+            self._defer_ai_move(delay)
 
     def _check_callback_valid(self, version: int, cancel_version: int,
                               label: str, needs_cleanup: bool = False) -> bool:
@@ -1057,6 +1017,24 @@ class GameController:
                 self._finish_ai_move()
             return False
         return True
+
+    def _fallback_arbitration(self, player: int) -> None:
+        """仲裁回退：仲裁失败时采用 LLM 走法或随机。"""
+        self._finish_ai_move()
+        if self._arbitration_llm_move:
+            self._execute_guarded_move(self._arbitration_llm_move,
+                                       player, 'LLM(仲裁回退)')
+        else:
+            self._random_move(player)
+
+    def _fallback_hybrid_engine(self, player: int, final_move=None) -> None:
+        """Hybrid 模式引擎兜底：LLM 失败时采用引擎走法或随机。"""
+        self._finish_ai_move()
+        engine_move = self._hybrid_engine_move
+        if engine_move and (final_move is None or engine_move != final_move):
+            self._execute_guarded_move(engine_move, player, '引擎兜底')
+        else:
+            self._random_move(player)
 
     def _execute_guarded_move(self, move: tuple, player: int, source: str,
                               on_failure=None, reset_random: bool = True) -> None:
@@ -1160,16 +1138,16 @@ class GameController:
         if captured_piece != '.':
             basis_parts.append(f"直接吃子：得{PIECE_SYMBOLS.get(captured_piece, captured_piece)}。")
         # 走后是否将军（在棋盘副本上模拟）
-        _tmp = ChineseChessGame.from_snapshot(
-            self.game.get_board_copy(), player, self.game._king_pos)
+        _tmp = self.game.snapshot()
+        _tmp.current_player = player
         if _tmp.move_piece(efr, efc, etr, etc).get('success'):
-            if _tmp._is_in_check(3 - player):
+            if _tmp.is_in_check(3 - player):
                 basis_parts.append("走后将军对方。")
         engine_basis = ''.join(basis_parts)
 
         # 将军状态
-        in_check = self.game._is_in_check(player)
-        opponent_in_check = self.game._is_in_check(opponent)
+        in_check = self.game.is_in_check(player)
+        opponent_in_check = self.game.is_in_check(opponent)
 
         prompt = build_arbitration_prompt(
             player=player,

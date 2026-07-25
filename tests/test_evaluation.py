@@ -69,8 +69,8 @@ def get_cache_values(game):
         'black_material': black_mat,
         'red_pst_score': game._red_pst_score,
         'black_pst_score': game._black_pst_score,
-        'red_in_check': game._is_in_check(1),
-        'black_in_check': game._is_in_check(2),
+        'red_in_check': game.is_in_check(1),
+        'black_in_check': game.is_in_check(2),
         'endgame': endgame,
     }
 

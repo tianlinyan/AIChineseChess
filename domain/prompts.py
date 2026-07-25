@@ -407,7 +407,7 @@ def _find_checking_moves(board: list, legal_moves: list, player: int) -> set:
         target = b[tr][tc]
         b[tr][tc] = piece
         b[fr][fc] = '.'
-        if tmp._is_in_check(opponent):
+        if tmp.is_in_check(opponent):
             checking.add((fr, fc, tr, tc))
         b[fr][fc] = piece
         b[tr][tc] = target

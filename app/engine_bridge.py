@@ -126,17 +126,15 @@ class EngineBridge(QObject):
         """MCTS 快速回退搜索（后台线程，短时限）。"""
         game_version = self._get_game_ver()
         cancel_version = self._get_cancel()
-        # 使用内部方法，time_limit 用 MCTS_FALLBACK_TIME_LIMIT 而非 MCTS_TIME_LIMIT
-        board_snapshot = game.get_board_copy()
-        king_pos = dict(game._king_pos)
         sims = MCTS_FALLBACK_SIMULATIONS
         self._log(f"  🌳 MCTS 回退 ({sims}次模拟)", 'INFO')
         result = {}
+        g = game.snapshot()
+        g.current_player = player
 
         def _run():
             move = None
             try:
-                g = ChineseChessGame.from_snapshot(board_snapshot, player, king_pos)
                 engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_FALLBACK_TIME_LIMIT)
                 self._active_mcts = engine
                 move = engine.search(g, player)
@@ -193,8 +191,8 @@ class EngineBridge(QObject):
         用于人类玩家的参考提示，不干扰主搜索流程。
         on_done(move_or_None, game_version, cancel_version) 在 Qt 主线程被调用。
         """
-        board_snapshot = game.get_board_copy()
-        king_pos = dict(game._king_pos)
+        g = game.snapshot()
+        g.current_player = player
         game_version = self._get_game_ver()
         cancel_version = self._get_cancel()
 
@@ -210,8 +208,7 @@ class EngineBridge(QObject):
                 # 继续往下走 MCTS
             else:
                 self._log("  🐟 Pikafish 提示搜索中（15s）...", 'INFO')
-                self._start_pf_hint(board_snapshot, player, king_pos,
-                                    game_version, cancel_version, on_done)
+                self._start_pf_hint(g, game_version, cancel_version, on_done)
                 return
 
         # ── MCTS 兜底路径 ──
@@ -220,8 +217,6 @@ class EngineBridge(QObject):
         def _run_mcts() -> None:
             move = None
             try:
-                g = ChineseChessGame.from_snapshot(
-                    board_snapshot, player, king_pos)
                 engine = MCTSEngine(max_simulations=800, time_limit=5.0)
                 move = engine.search(g, player)
             except Exception:
@@ -233,12 +228,9 @@ class EngineBridge(QObject):
 
     # ── 提示搜索内部实现 ──
 
-    def _start_pf_hint(self, board_snapshot: list, player: int,
-                       king_pos: dict, game_version: int,
+    def _start_pf_hint(self, g: ChineseChessGame, game_version: int,
                        cancel_version: int, on_done: Callable) -> None:
         """启动 Pikafish 提示搜索，复用 search_async（与 AI 搜索同路径）。"""
-        # 在调用线程（Qt 主线程）创建快照，与 AI 的 search_async 行为一致
-        g = ChineseChessGame.from_snapshot(board_snapshot, player, king_pos)
 
         def _on_result(move, error: str) -> None:
             if error:
@@ -246,7 +238,7 @@ class EngineBridge(QObject):
             # 用 pyqtSignal 中继到主线程
             self.hint_done.emit((move, game_version, cancel_version, on_done))
 
-        self._pikafish.search_async(g, player, time_ms=15000,
+        self._pikafish.search_async(g, g.current_player, time_ms=15000,
                                     callback=_on_result)
 
     def shutdown(self) -> None:
@@ -278,9 +270,9 @@ class EngineBridge(QObject):
                           sims: int, on_done: Callable,
                           game_version: int, cancel_version: int) -> None:
         """后台线程跑 MCTS，结果经 search_done 信号回主线程。"""
-        board_snapshot = game.get_board_copy()
-        king_pos = dict(game._king_pos)
         depth = self._get_depth()
+        g = game.snapshot()
+        g.current_player = player
 
         desc = "均匀先验"
         self._log(f"  🌳 MCTS 启动 ({desc}, {sims}次模拟, 深度={depth})", 'INFO')
@@ -289,8 +281,6 @@ class EngineBridge(QObject):
         def _run():
             move = None
             try:
-                g = ChineseChessGame.from_snapshot(
-                    board_snapshot, player, king_pos)
                 engine = MCTSEngine(max_simulations=sims,
                                    time_limit=MCTS_TIME_LIMIT)
                 self._active_mcts = engine
