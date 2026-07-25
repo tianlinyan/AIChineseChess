@@ -131,12 +131,12 @@ class EngineBridge(QObject):
         result = {}
         g = game.snapshot()
         g.current_player = player
+        engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_FALLBACK_TIME_LIMIT)
+        self._active_mcts = engine
 
         def _run():
             move = None
             try:
-                engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_FALLBACK_TIME_LIMIT)
-                self._active_mcts = engine
                 move = engine.search(g, player)
                 result['sims'] = engine.simulations
             except Exception as e:
@@ -277,13 +277,12 @@ class EngineBridge(QObject):
         desc = "均匀先验"
         self._log(f"  🌳 MCTS 启动 ({desc}, {sims}次模拟, 深度={depth})", 'INFO')
         result = {}
+        engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_TIME_LIMIT)
+        self._active_mcts = engine
 
         def _run():
             move = None
             try:
-                engine = MCTSEngine(max_simulations=sims,
-                                   time_limit=MCTS_TIME_LIMIT)
-                self._active_mcts = engine
                 move = engine.search(g, player)
                 result['sims'] = engine.simulations
                 result['top'] = engine.get_top_moves(3)

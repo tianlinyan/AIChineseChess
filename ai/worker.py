@@ -256,7 +256,7 @@ class AIWorker:
             if not best_move:
                 return json.dumps({'error': '未找到合法走法'}, ensure_ascii=False)
 
-            board = board_copy  # 用副本做评分，不碰 live board
+            board = tmp_game.board  # 快照棋盘，不碰 live board
             player = self.current_player
             opponent = 3 - player
 
@@ -331,6 +331,7 @@ class AIWorker:
             # 使用快照隔离，避免工作线程访问 self.game.board 的数据竞争
             tmp_game = self.game.snapshot()
             tmp_game.current_player = self.current_player
+            board = tmp_game.board
             red_moves = tmp_game.get_all_legal_moves(1)
             black_moves = tmp_game.get_all_legal_moves(2)
             red_check = tmp_game.is_in_check(1)

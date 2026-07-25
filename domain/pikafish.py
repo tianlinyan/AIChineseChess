@@ -430,7 +430,7 @@ class PikafishEngine:
             self._error_msg = f'无法启动 Pikafish: {e}'
 
     def _reader_loop(self):
-        """daemon 线程：持续读取引擎 stdout 到行队列（EOF 时放哨兵）。"""
+        """daemon 线程：持续读取引擎 stdout 到行队列（EOF/异常时标记死亡）。"""
         proc = self._proc
         try:
             while proc and proc.stdout:
@@ -442,6 +442,12 @@ class PikafishEngine:
             import sys
             print(f"[Pikafish] reader 线程异常退出: {e}",
                   file=sys.stderr, flush=True)
+        finally:
+            self._reader_dead = True
+            try:
+                self._out_q.put(None)  # 哨兵唤醒等待中的 _read_line
+            except Exception:
+                pass
         finally:
             # 标记死亡：_read_line 在队列空时立即失败，
             # 避免此后每次搜索都白等到截止时间（最高 45s/步）
@@ -457,11 +463,16 @@ class PikafishEngine:
         except queue.Empty:
             return None
 
-    def _send(self, command: str):
-        """发送命令到引擎。"""
-        if self._proc and self._proc.stdin:
-            self._proc.stdin.write(command + '\n')
-            self._proc.stdin.flush()
+    def _send(self, command: str) -> bool:
+        """发送命令到引擎。返回 True 表示发送成功。"""
+        try:
+            if self._proc and self._proc.stdin:
+                self._proc.stdin.write(command + '\n')
+                self._proc.stdin.flush()
+                return True
+        except (OSError, BrokenPipeError):
+            pass
+        return False
 
     def _purge_lines(self) -> None:
         """排空行队列中的残留输出。
@@ -513,8 +524,8 @@ class PikafishEngine:
         if not self._proc or not self._proc.stdout:
             return None
 
-        # 总时间上限：实际搜索时间 + 30s 兜底
-        deadline = time.time() + (time_ms / 1000.0) + 30.0
+        # 总时间上限：实际搜索时间 + 10s 兜底
+        deadline = time.time() + (time_ms / 1000.0) + 10.0
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:

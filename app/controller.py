@@ -1002,7 +1002,7 @@ class GameController:
         Returns:
             True 表示回调有效可继续处理，False 表示已过期需丢弃。
         """
-        if self.ai_manager._shutting_down:
+        if self.ai_manager.is_shutting_down:
             if needs_cleanup:
                 self._finish_ai_move()
             return False

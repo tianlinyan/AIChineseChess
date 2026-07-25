@@ -152,22 +152,20 @@ class MCTSEngine:
             # 1. Selection — 从根沿 UCB1 下降到叶节点，沿途在 work 上走子
             node, path, captured_list = self._select(self._root, work)
 
-            # 2. Expansion — 叶节点未展开则在当前（真实）局面上展开
-            if not node.is_expanded:
-                self._expand(node, work)
+            try:
+                # 2. Expansion — 叶节点未展开则在当前（真实）局面上展开
+                if not node.is_expanded:
+                    self._expand(node, work)
 
-            # 3. Simulation — 评估到达的叶局面
-            # 展开后仍无子节点 = 终端局面（走子方被将杀/困毙，判负），
-            # 必须直接给 0 分——静态评估的将军罚分仅 ±50，
-            # 一步杀会被误判为均势，导致 MCTS 选不出也防不住杀棋
-            if not node.children:
-                value = 0.0
-            else:
-                value = self._simulate(work, node.player)
-
-            # 撤销路径走子，恢复根局面（回溯前必须先 unmake）
-            for move, captured in zip(reversed(path), reversed(captured_list)):
-                SearchEngine._unmake_move(work, *move, captured)
+                # 3. Simulation — 评估到达的叶局面
+                if not node.children:
+                    value = 0.0
+                else:
+                    value = self._simulate(work, node.player)
+            finally:
+                # 撤销路径走子，恢复根局面（即使 simulate 异常也必须执行）
+                for move, captured in zip(reversed(path), reversed(captured_list)):
+                    SearchEngine._unmake_move(work, *move, captured)
 
             # 4. Backpropagation — 回传结果
             self._backpropagate(node, value, node.player)

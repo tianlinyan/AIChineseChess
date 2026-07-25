@@ -14,8 +14,13 @@ class AIManager:
 
     @property
     def cancel_version(self) -> int:
-        """当前取消版本号 — GameController 用于构建 AIWorker 和过期检查。"""
+        """当前取消版本号。"""
         return self._cancel_version
+
+    @property
+    def is_shutting_down(self) -> bool:
+        """是否正在关闭。"""
+        return self._shutting_down
 
     def clear_queue(self) -> None:
         self._cancel_version += 1
