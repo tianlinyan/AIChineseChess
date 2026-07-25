@@ -50,6 +50,13 @@ class ChineseChessGame:
         self._king_pos = {1: (9, 4), 2: (0, 4)}
         # Zobrist 哈希（move_piece / 搜索 make/unmake 增量维护）
         self._zobrist = self._compute_zobrist()
+        # ── 增量评估缓存（搜索 make/unmake 增量维护，叶子节点直接读取跳过扫描）──
+        self._material_counts: dict = {}   # {piece_char: count}，红大写/黑小写
+        self._red_piece_count: int = 0
+        self._black_piece_count: int = 0
+        self._red_pst_score: float = 0.0   # 红方 PST 总分
+        self._black_pst_score: float = 0.0  # 黑方 PST 总分
+        self._recompute_incremental()       # 从初始棋盘填充
 
     def reset(self):
         self.board = [row[:] for row in self.STANDARD_BOARD]
@@ -64,6 +71,18 @@ class ChineseChessGame:
         self.moves_since_capture = 0  # 自然限着计数（连续未吃子步数，120 步判和）
         self._king_pos = {1: (9, 4), 2: (0, 4)}
         self._zobrist = self._compute_zobrist()
+        self._recompute_incremental()  # 重置增量评估缓存
+
+    @classmethod
+    def from_snapshot(cls, board, player, king_pos):
+        """从棋盘快照创建临时游戏对象（搜索/工具执行用）。"""
+        g = cls()
+        g.board = board
+        g.current_player = player
+        g._king_pos = dict(king_pos)
+        g.recompute_hash()
+        g._recompute_incremental()  # 从快照棋盘重建增量缓存
+        return g
 
     def is_red(self, piece):
         return piece.isupper()
@@ -125,6 +144,29 @@ class ChineseChessGame:
             self._king_pos[1] = (to_row, to_col)
         elif piece == 'k':
             self._king_pos[2] = (to_row, to_col)
+
+        # ── 增量评估缓存维护 ──
+        from domain.evaluation import RED_PST
+        _pu = piece.upper()
+        if _pu in RED_PST:
+            if piece.isupper():
+                self._red_pst_score -= RED_PST[_pu][from_row][from_col]
+                self._red_pst_score += RED_PST[_pu][to_row][to_col]
+            else:
+                self._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - from_row][from_col]
+                self._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - to_row][to_col]
+        if captured != '.':
+            self._material_counts[captured] = self._material_counts.get(captured, 0) - 1
+            if captured.isupper():
+                self._red_piece_count -= 1
+            else:
+                self._black_piece_count -= 1
+            _cu = captured.upper()
+            if _cu in RED_PST:
+                if captured.isupper():
+                    self._red_pst_score -= RED_PST[_cu][to_row][to_col]
+                else:
+                    self._black_pst_score -= RED_PST[_cu][BOARD_HEIGHT - 1 - to_row][to_col]
 
         self.last_move = (from_row, from_col, to_row, to_col, self.current_player)
         self.moves.append((from_row, from_col, to_row, to_col, self.current_player, captured, piece))
@@ -224,33 +266,6 @@ class ChineseChessGame:
             if self.board[r][red_shuai_pos[1]] != '.':
                 return False
         return True
-
-    def _would_cause_king_facing(self, fr, fc, tr, tc):
-        piece = self.board[fr][fc]
-        target = self.board[tr][tc]
-        self.board[tr][tc] = piece
-        self.board[fr][fc] = '.'
-
-        # 如果临时移动了将，更新缓存以保证 _is_king_facing 正确
-        saved_pos = None
-        saved_player = None
-        if piece == 'K':
-            saved_player = 1
-            saved_pos = self._king_pos.get(1)
-            self._king_pos[1] = (tr, tc)
-        elif piece == 'k':
-            saved_player = 2
-            saved_pos = self._king_pos.get(2)
-            self._king_pos[2] = (tr, tc)
-
-        facing = self._is_king_facing()
-
-        if saved_player is not None:
-            self._king_pos[saved_player] = saved_pos
-
-        self.board[fr][fc] = piece
-        self.board[tr][tc] = target
-        return facing
 
     # ── 走子规则 ──
     def _is_legal_move(self, piece, fr, fc, tr, tc):
@@ -503,39 +518,11 @@ class ChineseChessGame:
     def get_capture_moves(self, player):
         """只生成吃子走法（目标格有对方棋子）— 静止搜索专用。
 
-        与 get_all_legal_moves 过滤吃子的结果等价，但不为非吃子走法
-        做 _would_be_illegal 校验，qs 节点省掉约 85% 的生成开销。
+        通过过滤 get_all_legal_moves 的结果实现，与显式 captures_only
+        参数生成的结果完全等价。
         """
-        moves = []
-        board = self.board
-        for r in range(self.size_rows):
-            for c in range(self.size_cols):
-                piece = board[r][c]
-                if piece == '.' or self.get_piece_owner(piece) != player:
-                    continue
-                upper = piece.upper()
-                if upper == 'R':
-                    self._gen_ray_moves(moves, r, c, player,
-                                        cannon=False, captures_only=True)
-                elif upper == 'C':
-                    self._gen_ray_moves(moves, r, c, player,
-                                        cannon=True, captures_only=True)
-                elif upper == 'N':
-                    self._gen_knight_moves(moves, r, c, player,
-                                           captures_only=True)
-                elif upper == 'B':
-                    self._gen_bishop_moves(moves, r, c, player,
-                                           captures_only=True)
-                elif upper == 'A':
-                    self._gen_advisor_moves(moves, r, c, player,
-                                            captures_only=True)
-                elif upper == 'K':
-                    self._gen_king_moves(moves, r, c, player,
-                                         captures_only=True)
-                elif upper == 'P':
-                    self._gen_pawn_moves(moves, r, c, player,
-                                         captures_only=True)
-        return moves
+        return [m for m in self.get_all_legal_moves(player)
+                if self.board[m[2]][m[3]] != '.']
 
     # ── 定向走法生成辅助（captures_only=True 时只保留吃子）──
 
@@ -693,39 +680,57 @@ class ChineseChessGame:
 
     # ── 辅助方法（供搜索和开局库使用） ──
 
-    def get_piece_at(self, row: int, col: int) -> str:
-        """获取指定位置的棋子。返回 '.' 表示空位。"""
-        if self.in_board(row, col):
-            return self.board[row][col]
-        return '.'
-
     def is_endgame(self) -> bool:
         """判断是否进入残局阶段。
 
         启发式标准：总子力 <= ENDGAME_PIECE_THRESHOLD（初始 32 子的一半左右）
         视为残局。残局中卒和将的估值策略需要调整。
         """
-        return self.count_pieces(0) <= ENDGAME_PIECE_THRESHOLD
+        return (self._red_piece_count + self._black_piece_count) <= ENDGAME_PIECE_THRESHOLD
 
     def count_pieces(self, player: int = 0) -> int:
-        """统计棋子数量。
+        """统计棋子数量。O(1) 使用增量缓存。
 
         Args:
             player: 0=双方, 1=仅红方, 2=仅黑方
         """
-        count = 0
-        for r in range(self.size_rows):
-            for c in range(self.size_cols):
-                piece = self.board[r][c]
-                if piece == '.':
+        if player == 0:
+            return self._red_piece_count + self._black_piece_count
+        elif player == 1:
+            return self._red_piece_count
+        elif player == 2:
+            return self._black_piece_count
+        return 0
+
+    def _recompute_incremental(self) -> None:
+        """全量重算增量评估缓存（初始化/棋盘被外部替换/frozensnapshot 时调用）。
+
+        扫描全部 90 格计算 _material_counts、红/黑棋子计数、PST 总分。
+        之后搜索的 _make_move/_unmake_move 增量维护这些字段，
+        叶子节点直接读取而无需全盘扫描。
+        """
+        from domain.evaluation import PIECE_VALUE, RED_PST
+        self._material_counts = {}
+        self._red_piece_count = 0
+        self._black_piece_count = 0
+        self._red_pst_score = 0.0
+        self._black_pst_score = 0.0
+        for r in range(BOARD_HEIGHT):
+            for c in range(BOARD_WIDTH):
+                p = self.board[r][c]
+                if p == '.':
                     continue
-                if player == 0:
-                    count += 1
-                elif player == 1 and self.is_red(piece):
-                    count += 1
-                elif player == 2 and self.is_black(piece):
-                    count += 1
-        return count
+                self._material_counts[p] = self._material_counts.get(p, 0) + 1
+                if p.isupper():
+                    self._red_piece_count += 1
+                else:
+                    self._black_piece_count += 1
+                pu = p.upper()
+                if pu in RED_PST:
+                    if p.isupper():
+                        self._red_pst_score += RED_PST[pu][r][c]
+                    else:
+                        self._black_pst_score += RED_PST[pu][BOARD_HEIGHT - 1 - r][c]
 
     def _compute_zobrist(self) -> int:
         """从当前棋盘全量计算 Zobrist 哈希（初始化/棋盘被外部替换时用）。"""
@@ -746,13 +751,6 @@ class ChineseChessGame:
         只有绕过这两者直接改 board 的调用方需要显式重建。
         """
         self._zobrist = self._compute_zobrist()
-
-    def board_hash(self) -> int:
-        """当前棋盘局面的 Zobrist 哈希（不含走子方，O(1) 增量维护）。
-
-        注意：此哈希不考虑走子方，仅用于识别局面。
-        """
-        return self._zobrist
 
     def position_hash(self) -> int:
         """计算包含走子方的局面哈希（用于置换表去重）。

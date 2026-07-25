@@ -10,20 +10,13 @@ if TYPE_CHECKING:
     from domain.game import ChineseChessGame
 
 
-def board_to_fen(board: list, current_player: int,
-                 reverse_rows: bool = False) -> str:
+def board_to_fen(board: list, current_player: int) -> str:
     """将 10×9 棋盘转为中国象棋 FEN 字符串。
 
     FEN 格式：rows/rows/.../rows <side>
     - 大写=红方，小写=黑方，数字=连续空格数
     - w=红方走, b=黑方走
-
-    Args:
-        board: 10×9 二维列表，row 0 = 黑方底线（棋盘顶部）
-        current_player: 1=红方, 2=黑方
-        reverse_rows: True 则将行序反转（row 0 = 红方底线）。
-            注意：Pikafish / chessdb.cn 的标准 FEN 均为 row 0 = 黑方底线，
-            不需要反转；本参数目前无使用方，仅为兼容保留
+    - row 0 = 黑方底线（棋盘顶部），与 Pikafish / chessdb.cn 标准一致
     """
     rows = []
     for r in range(10):
@@ -41,12 +34,10 @@ def board_to_fen(board: list, current_player: int,
         if empty > 0:
             row_str += str(empty)
         rows.append(row_str)
-    if reverse_rows:
-        rows.reverse()
     side = 'w' if current_player == 1 else 'b'
     return '/'.join(rows) + ' ' + side
 
 
 def game_to_fen(game: 'ChineseChessGame', current_player: int) -> str:
     """从 ChineseChessGame 对象生成 FEN（EGTB 查询用）。"""
-    return board_to_fen(game.board, current_player, reverse_rows=False)
+    return board_to_fen(game.board, current_player)

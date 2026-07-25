@@ -359,6 +359,116 @@ def evaluate(board: list,
     return float(score)
 
 
+def evaluate_fast(board: list,
+                  red_material: float = 0.0,
+                  black_material: float = 0.0,
+                  red_pst_score: float = 0.0,
+                  black_pst_score: float = 0.0,
+                  red_in_check: bool = False,
+                  black_in_check: bool = False,
+                  endgame: bool = False) -> float:
+    """快速评估 — 从红方视角。与 evaluate() 等价但 material/PST 由调用方传入。
+
+    搜索叶节点通过增量缓存提供 material 和 PST 值，本函数跳过这两项
+    的全盘扫描，仅扫描收集棋子位置用于关系特征。
+    """
+    w = WEIGHTS
+    score = 0.0
+
+    # ── A. 物质分（来自增量缓存）──
+    score += w.material * (red_material - black_material)
+
+    # ── B. 位置分（来自增量缓存）──
+    score += w.positional * (red_pst_score - black_pst_score)
+
+    # ── 收集棋子位置（仍需扫描——这是唯一剩下的全盘开销）──
+    red_shuai_pos = None
+    black_shuai_pos = None
+    red_ju, black_ju = [], []
+    red_ma, black_ma = [], []
+    red_cannons, black_cannons = [], []
+    red_bing, black_bing = [], []
+
+    for r in range(BOARD_HEIGHT):
+        for c in range(BOARD_WIDTH):
+            piece = board[r][c]
+            if piece == '.':
+                continue
+            if _is_red(piece):
+                if piece == 'K':
+                    red_shuai_pos = (r, c)
+                elif piece == 'R':
+                    red_ju.append((r, c))
+                elif piece == 'N':
+                    red_ma.append((r, c))
+                elif piece == 'C':
+                    red_cannons.append((r, c))
+                elif piece == 'P':
+                    red_bing.append((r, c))
+            else:
+                if piece == 'k':
+                    black_shuai_pos = (r, c)
+                elif piece == 'r':
+                    black_ju.append((r, c))
+                elif piece == 'n':
+                    black_ma.append((r, c))
+                elif piece == 'c':
+                    black_cannons.append((r, c))
+                elif piece == 'p':
+                    black_bing.append((r, c))
+
+    # ── C. 机动性 — 搜索叶节点传 0，不计入（与 evaluate() 一致）──
+
+    # ── D. 卒结构 ──
+    score += w.bing_structure * _bing_structure(board, red_bing, is_red=True)
+    score -= w.bing_structure * _bing_structure(board, black_bing, is_red=False)
+
+    # ── E. 将安全 ──
+    if red_shuai_pos:
+        score += w.shuai_safety * _shuai_safety(board, red_shuai_pos, is_red=True, endgame=endgame)
+    if black_shuai_pos:
+        score -= w.shuai_safety * _shuai_safety(board, black_shuai_pos, is_red=False, endgame=endgame)
+
+    # 将军状态
+    if red_in_check:
+        score -= w.check_bonus
+    if black_in_check:
+        score += w.check_bonus
+
+    # ── F. 开放线 ──
+    for _r, c in red_ju:
+        score += w.open_column * _open_column_bonus(board, c, is_red=True)
+    for _r, c in black_ju:
+        score -= w.open_column * _open_column_bonus(board, c, is_red=False)
+
+    # ── G. 子力协调 ──
+    score += w.coordination * _piece_coordination(
+        red_ma, red_cannons, red_ju, is_red=True)
+    score -= w.coordination * _piece_coordination(
+        black_ma, black_cannons, black_ju, is_red=False)
+
+    # ── H. 空间控制 ──
+    score += w.center_control * _center_control(board, is_red=True)
+    score -= w.center_control * _center_control(board, is_red=False)
+    score += w.river_control * _river_control(board, is_red=True)
+    score -= w.river_control * _river_control(board, is_red=False)
+
+    # ── I. 残局将活跃 ──
+    if endgame:
+        if red_shuai_pos:
+            score += w.endgame_shuai_active * (9 - red_shuai_pos[0])
+        if black_shuai_pos:
+            score -= w.endgame_shuai_active * black_shuai_pos[0]
+
+    # ── 模式检测 ──
+    score += _detect_dangerous_ma(board, red_ma, black_shuai_pos)
+    score -= _detect_dangerous_ma(board, black_ma, red_shuai_pos)
+    score += _detect_battery(board, red_ju, red_cannons, black_shuai_pos)
+    score -= _detect_battery(board, black_ju, black_cannons, red_shuai_pos)
+
+    return float(score)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 五、特征函数
 # ══════════════════════════════════════════════════════════════════════════════

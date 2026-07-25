@@ -6,7 +6,7 @@ from typing import Optional
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ai.models import ModelInfo
+from domain.models import ModelInfo
 from ai.parser import parse_coordinates_from_text
 from domain.constants import (
     AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT,
@@ -251,11 +251,8 @@ class AIWorker:
                 time_limit=min(15.0, 2.0 + depth * 3.0),
             )
             # 创建临时 Game，避免替换 self.game.board（防止 Pikafish 快照读到修改中棋盘）
-            tmp_game = ChineseChessGame()
-            tmp_game.board = board_copy
-            tmp_game.current_player = self.current_player
-            tmp_game._king_pos = self.game._king_pos.copy()  # 同步缓存，避免回退全盘扫描
-            tmp_game.recompute_hash()  # board 被直接替换，重建 Zobrist 哈希
+            tmp_game = ChineseChessGame.from_snapshot(
+                board_copy, self.current_player, self.game._king_pos)
             best_move = engine.search(tmp_game, self.current_player)
 
             if not best_move:
@@ -335,10 +332,8 @@ class AIWorker:
         try:
             # 使用副本隔离，避免工作线程访问 self.game.board 的数据竞争
             board = [row[:] for row in self.game.board]
-            tmp_game = ChineseChessGame()
-            tmp_game.board = board
-            tmp_game.current_player = self.current_player
-            tmp_game._king_pos = self.game._king_pos.copy()  # 同步缓存
+            tmp_game = ChineseChessGame.from_snapshot(
+                board, self.current_player, self.game._king_pos)
             red_moves = tmp_game.get_all_legal_moves(1)
             black_moves = tmp_game.get_all_legal_moves(2)
             red_check = tmp_game._is_in_check(1)

@@ -1,13 +1,11 @@
 import threading
-from collections import deque
 from typing import Optional
 
 
 class AIManager:
-    """AI 请求管理器 — 队列、线程管理、取消"""
+    """AI 请求管理器 — 线程管理、取消"""
 
     def __init__(self) -> None:
-        self.ai_move_queue: deque = deque()
         self.ai_move_in_progress: bool = False
         self.active_worker = None
         self._active_thread: Optional[threading.Thread] = None
@@ -20,7 +18,6 @@ class AIManager:
         return self._cancel_version
 
     def clear_queue(self) -> None:
-        self.ai_move_queue.clear()
         self._cancel_version += 1
         if self.active_worker:
             self.active_worker.cancel()
@@ -31,13 +28,6 @@ class AIManager:
 
     def set_busy(self, busy: bool) -> None:
         self.ai_move_in_progress = busy
-
-    def add_to_queue(self, player: int, version: int) -> None:
-        if (player, version) not in self.ai_move_queue:
-            self.ai_move_queue.append((player, version))
-
-    def pop_next(self) -> Optional[tuple]:
-        return self.ai_move_queue.popleft() if self.ai_move_queue else None
 
     def set_active_worker(self, worker) -> None:
         self.active_worker = worker
@@ -51,7 +41,6 @@ class AIManager:
 
     def shutdown(self) -> None:
         self._shutting_down = True
-        self.ai_move_queue.clear()
         if self.active_worker:
             self.active_worker.cancel()
         thread = self._active_thread

@@ -129,22 +129,20 @@ class MCTSEngine:
         self._root = MCTSNode(player=player)
 
         # 展开根节点的所有合法子节点
+        # PUCT 公式通过 P * sqrt(N) / (1 + visits) 自然加权先验，
+        # 无需虚拟访问（UCB1 时代的人工偏移在 PUCT 下反而扭曲统计）
         for move in legal_moves:
-            child = MCTSNode(move=move, parent=self._root, player=3 - player)
-            if priors and move in priors:
-                child.prior = priors[move]
-                child.visits = int(PRIOR_STRENGTH * priors[move])  # 先验虚拟访问
-                child.value = child.visits * 0.5  # 中性初始值（不预设优劣）
+            prior = priors.get(move, 1.0) if priors else 1.0
+            child = MCTSNode(move=move, parent=self._root, player=3 - player,
+                           prior=prior)
             self._root.children.append(child)
 
         self._root.is_expanded = True
 
         # 工作局面副本：Selection/Expansion/Simulation 在其上真实走子，
         # 不污染调用方的 game（棋子在棋盘上的移动见 _select/_expand）
-        work = ChineseChessGame()
-        work.board = game.get_board_copy()
-        work.current_player = player
-        work._king_pos = dict(game._king_pos)
+        work = ChineseChessGame.from_snapshot(
+            game.get_board_copy(), player, game._king_pos)
 
         # 主循环
         while self._simulations < self.max_simulations:
@@ -193,12 +191,14 @@ class MCTSEngine:
     # ── 四阶段 ──
 
     def _select(self, node: MCTSNode, game) -> tuple:
-        """Selection: 沿 UCB1 最优路径下降到叶节点。
+        """Selection: 沿 PUCT 最优路径下降到叶节点。
+
+        PUCT 公式（AlphaZero）：
+          U(s,a) = Q(s,a) + c_puct * P(s,a) * sqrt(N_parent) / (1 + N_child)
 
         沿途在 game 上真实执行走法（调用方负责在模拟后按逆序 unmake）。
-        由于子节点的 value 从子节点玩家视角存储，父节点需要选取对
-        自己最有利（即子节点视角下最不利）的子节点。因此对子节点
-        UCB1 中的 exploitation 项取反，exploration 保持正向。
+        子节点 value 从子节点玩家视角存储，父节点选取对己方最有利的
+        子节点（即对子节点取反）。
 
         Returns:
             (叶节点, 路径走法列表, 每步被吃子列表)
@@ -206,22 +206,26 @@ class MCTSEngine:
         path = []
         captured_list = []
         while node.is_expanded and node.children:
-            # 收集未访问子节点，随机选（避免走法排序偏差）
+            # 收集未访问子节点，按 prior + 小随机噪声选（避免走法排序偏差）
             unvisited = [c for c in node.children if c.visits == 0]
             if unvisited:
-                node = random.choice(unvisited)
+                # 有 prior 的优先，但加噪声避免确定性的排序偏差
+                best_u = max(unvisited, key=lambda c: c.prior + random.random() * 0.01)
+                node = best_u
                 path.append(node.move)
                 captured_list.append(SearchEngine._make_move(game, *node.move))
                 break
+            # PUCT 选择
             best_child = None
             best_score = float('-inf')
+            sqrt_parent = math.sqrt(node.visits)
             for child in node.children:
-                # exploitation: 子节点 value 来自对方视角，取反才是己方视角
+                # Q(s,a): 从父节点视角的价值（子节点 value 为对手视角，取反）
                 exploit = -child.avg_value
-                explore = self.exploration * math.sqrt(
-                    math.log(node.visits + 1) / child.visits)
-                prior_term = child.prior / (1 + child.visits) * 0.1
-                score = exploit + explore + prior_term
+                # PUCT 探索项: P * sqrt(N_parent) / (1 + N_child)
+                explore = (self.exploration * child.prior * sqrt_parent
+                          / (1 + child.visits))
+                score = exploit + explore
                 if score > best_score:
                     best_score = score
                     best_child = child

@@ -110,6 +110,8 @@ class PikafishEngine:
         # 永久阻塞（旧实现会连关窗退出都一起卡死）
         self._out_q: 'queue.Queue' = queue.Queue()
         self._reader_thread: Optional[threading.Thread] = None
+        # MultiPV 结果缓存（每次搜索前清零，_read_bestmove 中收集）
+        self._top_moves: list = []  # [(move_tuple, score_cp), ...]
 
         if binary_path is None:
             binary_path = _find_pikafish()
@@ -220,6 +222,8 @@ class PikafishEngine:
             return
 
         self._pending_async += 1
+        # 重置 MultiPV 收集缓存
+        self._top_moves = []
         # 原子快照：深拷贝棋盘，从副本推导 FEN + 合法走法（避免 TOCTOU）
         try:
             board_copy = [row[:] for row in game.board]
@@ -268,12 +272,55 @@ class PikafishEngine:
         t.start()
 
     def get_top_moves(self, n: int = 3) -> List[Tuple[tuple, int, float]]:
-        """返回前 N 个最优走法（接口兼容 MCTSEngine）。
+        """返回前 N 个最优走法及评分（接口兼容 MCTSEngine）。
 
-        当前仅返回空列表——MultiPV 模式未启用。
-        Pikafish 作为单走法推荐引擎使用。
+        需 MultiPV 已启用。返回 [(move, visits=score_cp, avg_value=score_cp), ...]，
+        其中 visits 实际存储 centipawn 评分。
         """
-        return []
+        result = []
+        for move, score_cp in self._top_moves[:n]:
+            # visits 存评分为整数（兼容 MCTSEngine 接口），avg_value 存归一化值
+            result.append((move, int(score_cp), score_cp / 100.0))
+        return result
+
+    def get_top_moves_scores(self) -> list:
+        """返回原始 MultiPV 评分列表 [(move, score_cp), ...]。
+
+        供 controller 做高置信度判断。
+        """
+        return list(self._top_moves)
+
+    def _parse_multipv_line(self, line: str) -> None:
+        """解析 MultiPV info 行，将 (move, score_cp) 追加到 self._top_moves。
+
+        格式：info multipv 1 score cp 120 pv e0e1 ...
+        分数可能为 mate N（将杀距离），此时用 ±99999 替代。
+        """
+        parts = line.split()
+        try:
+            # 定位 multipv 和 score
+            pv_idx = None
+            score_val = 0
+            for i, token in enumerate(parts):
+                if token == 'score':
+                    # score cp X 或 score mate Y
+                    if i + 2 < len(parts):
+                        if parts[i + 1] == 'cp':
+                            score_val = int(parts[i + 2])
+                        elif parts[i + 1] == 'mate':
+                            mate_in = int(parts[i + 2])
+                            score_val = 99999 if mate_in > 0 else -99999
+                if token == 'pv' and i + 1 < len(parts):
+                    # pv 后面的第一个走法是该主变的 UCI 走法
+                    pv_idx = i
+                    break
+            if pv_idx is not None and pv_idx + 1 < len(parts):
+                uci = parts[pv_idx + 1]
+                move = _uci_to_tuple(uci)
+                if move:
+                    self._top_moves.append((move, score_val))
+        except (ValueError, IndexError):
+            pass  # 格式异常，静默跳过
 
     def close(self):
         """关闭引擎进程。
@@ -368,6 +415,11 @@ class PikafishEngine:
                 line = self._read_line(remaining)
                 if line and 'uciok' in line:
                     self._available = True
+                    # 启用 MultiPV 以支持高置信度短路
+                    try:
+                        self._send('setoption name MultiPV value 3')
+                    except Exception:
+                        pass  # 旧版 Pikafish 不支持 MultiPV，静默回退
                     return
             # 超时未收到 uciok → 清理僵尸进程
             self._error_msg = (
@@ -453,10 +505,10 @@ class PikafishEngine:
         """读取引擎输出直到 bestmove 行。
 
         安全机制：
-        - 从 reader 线程的行队列按剩余时间 queue.get(timeout=...) 取行，
-          引擎静默挂起也只会等到截止时间，绝不永久阻塞
+        - 每 0.5s 轮询一次 queue，同时检查进程存活，引擎死亡后最多 0.5s 即可检测
         - 总时间上限 = 实际搜索时间 + 30s 兜底
         - 超时或进程死亡时返回 None（调用方回退 MCTS）
+        - 沿途收集 multipv info 行到 self._top_moves（供高置信度短路使用）
         """
         if not self._proc or not self._proc.stdout:
             return None
@@ -467,21 +519,29 @@ class PikafishEngine:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
-            # 进程已死 → 立即退出
             if self._proc.poll() is not None:
                 break
 
-            line = self._read_line(remaining)
+            # 短超时轮询：每次最多等 0.5s，确保引擎死亡后快速检测
+            line = self._read_line(min(0.5, remaining))
             if line is None:
-                break  # 超时或 EOF
+                # 0.5s 内无数据 → 可能是引擎空闲或死亡
+                if self._reader_dead:
+                    break
+                if self._proc.poll() is not None:
+                    break
+                continue  # 未到 deadline，继续等待
 
-            line = line.strip()
+            line_str = line.strip()
 
-            if line.startswith('bestmove'):
-                parts = line.split()
+            # ── 收集 MultiPV 评分行 ──
+            if line_str.startswith('info') and 'multipv' in line_str:
+                self._parse_multipv_line(line_str)
+
+            if line_str.startswith('bestmove'):
+                parts = line_str.split()
                 if len(parts) >= 2:
                     best = parts[1]
-
                     return best
 
         # 超时或进程死亡 → 发送 stop 并排空残留数据，防止污染下次搜索
@@ -495,9 +555,11 @@ class PikafishEngine:
                     break
                 if self._proc and self._proc.poll() is not None:
                     break
-                line = self._read_line(remaining)
+                line = self._read_line(min(0.5, remaining))
                 if line is None:
-                    break
+                    if self._reader_dead or (self._proc and self._proc.poll() is not None):
+                        break
+                    continue
                 if line.strip().startswith('bestmove'):
                     break
         except Exception:

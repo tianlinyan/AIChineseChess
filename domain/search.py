@@ -31,7 +31,9 @@ from typing import Optional, Callable, NamedTuple
 
 from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, SEARCH_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
 from domain.evaluation import (
-    evaluate, evaluate_move_ordering, PIECE_VALUE,
+    evaluate, evaluate_fast, evaluate_move_ordering,
+    PIECE_VALUE, PIECE_VALUE_ENDGAME,
+    RED_PST,
 )
 from domain.game import ZOBRIST_TABLE
 
@@ -531,55 +533,49 @@ class SearchEngine:
     def _fast_eval(self, game, player: int) -> float:
         """快速评估 — 不生成走法，返回从 player 视角的评分。
 
+        使用增量缓存的 material/PST/count 跳过全盘统计扫描，
+        仅用 evaluate_fast() 做棋盘扫描收集棋子位置用于关系特征。
         evaluate() 始终返回红方视角，此处根据 player 转换。
-        残局库查询也使用 player 参数以保证视角一致。
         """
         board = game.board
+        total_pieces = game._red_piece_count + game._black_piece_count
 
-        # 统计总子力（用于残局判定）
-        red_pieces = 0
-        black_pieces = 0
-        for r in range(BOARD_HEIGHT):
-            for c in range(BOARD_WIDTH):
-                p = board[r][c]
-                if p == '.':
-                    continue
-                if p.isupper():
-                    red_pieces += 1
-                else:
-                    black_pieces += 1
-
-        total_pieces = red_pieces + black_pieces
-
-        # ── 残局库查询（仅本地库：搜索叶节点禁止同步联网，
-        #    否则残局阶段每个叶子都可能等 HTTP 超时，搜索实质瘫痪）──
+        # ── 残局库查询（仅本地库：搜索叶节点禁止同步联网）──
         if total_pieces <= EGTB_MAX_PIECES:
             try:
                 from domain.egtb import probe
                 egtb_result = probe(board, player, total_pieces,
                                     allow_cloud=False)
                 if egtb_result is not None:
-                    # probe 返回的 score 已是 player 视角
                     return egtb_result[0]
             except Exception:
-                pass  # EGTB 不可用/异常时静默跳过，不影响搜索
+                pass
 
-        # 判断是否残局
         endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
 
-        # 将军检测（始终检查双方）
+        # 将军检测（始终检查双方）—— O(~20) per side，已在 _king_pos 缓存加速
         red_in_check = game._is_in_check(1)
         black_in_check = game._is_in_check(2)
 
-        score = evaluate(
+        # 从 _material_counts 字典 × 正确阶段估值表 计算物质分
+        vals = PIECE_VALUE_ENDGAME if endgame else PIECE_VALUE
+        red_material = sum(vals.get(p.upper(), 0) * cnt
+                           for p, cnt in game._material_counts.items()
+                           if p.isupper() and p != 'K')
+        black_material = sum(vals.get(p.upper(), 0) * cnt
+                             for p, cnt in game._material_counts.items()
+                             if p.islower() and p != 'k')
+
+        score = evaluate_fast(
             board,
-            legal_moves_red=0,   # 跳过走法生成
-            legal_moves_black=0,  # 跳过走法生成
+            red_material=red_material,
+            black_material=black_material,
+            red_pst_score=game._red_pst_score,
+            black_pst_score=game._black_pst_score,
             red_in_check=red_in_check,
             black_in_check=black_in_check,
             endgame=endgame,
         )
-        # evaluate() 返回红方视角 → 转为 player 视角
         return score if player == 1 else -score
 
     # ── 走法排序 ──
@@ -663,6 +659,31 @@ class SearchEngine:
                           ^ ZOBRIST_TABLE[piece][zi_to])
         if captured != '.':
             game._zobrist ^= ZOBRIST_TABLE[captured][zi_to]
+
+        # ── 增量评估缓存：PST + _material_counts + piece_count ──
+        _pu = piece.upper()
+        if _pu in RED_PST:
+            # 移动方 PST：减去旧位置，加上新位置
+            if piece.isupper():
+                game._red_pst_score -= RED_PST[_pu][fr][fc]
+                game._red_pst_score += RED_PST[_pu][tr][tc]
+            else:
+                game._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - fr][fc]
+                game._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - tr][tc]
+        if captured != '.':
+            # 被吃子计数/PST
+            game._material_counts[captured] = game._material_counts.get(captured, 0) - 1
+            if captured.isupper():
+                game._red_piece_count -= 1
+            else:
+                game._black_piece_count -= 1
+            _cu = captured.upper()
+            if _cu in RED_PST:
+                if captured.isupper():
+                    game._red_pst_score -= RED_PST[_cu][tr][tc]
+                else:
+                    game._black_pst_score -= RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
+
         return captured
 
     @staticmethod
@@ -683,6 +704,30 @@ class SearchEngine:
                           ^ ZOBRIST_TABLE[piece][zi_to])
         if captured != '.':
             game._zobrist ^= ZOBRIST_TABLE[captured][zi_to]
+
+        # ── 增量评估缓存：逆操作 —— 恢复被吃子，移动子回原位 ──
+        _pu = piece.upper()
+        if _pu in RED_PST:
+            # PST：减去新位置，加回旧位置（与 _make_move 相反）
+            if piece.isupper():
+                game._red_pst_score -= RED_PST[_pu][tr][tc]
+                game._red_pst_score += RED_PST[_pu][fr][fc]
+            else:
+                game._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - tr][tc]
+                game._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - fr][fc]
+        if captured != '.':
+            # 恢复被吃子
+            game._material_counts[captured] = game._material_counts.get(captured, 0) + 1
+            if captured.isupper():
+                game._red_piece_count += 1
+            else:
+                game._black_piece_count += 1
+            _cu = captured.upper()
+            if _cu in RED_PST:
+                if captured.isupper():
+                    game._red_pst_score += RED_PST[_cu][tr][tc]
+                else:
+                    game._black_pst_score += RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
 
     # ── 时间控制 ──
 

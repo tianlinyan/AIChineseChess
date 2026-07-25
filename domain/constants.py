@@ -12,21 +12,20 @@ ARBITRATION_TIMEOUT_SECONDS = 180  # 仲裁超时（秒），比正常 LLM 调�
 AI_OUTPUT_TRUNCATE_LENGTH = 1000
 AI_OUTPUT_MIN_TRIM_POSITION = 500
 AI_RETRY_DELAY_MS = 3000
-LM_STUDIO_DEFAULT_PORT = 1234
-
 # ── 搜索引擎配置 ──
 SEARCH_MAX_DEPTH = 5             # 搜索强度 (1-6)：MCTS模拟次数 500~3000，Pikafish时限 depth×3s（封顶 MCTS_TIME_LIMIT=15s）
 SEARCH_TIME_LIMIT = 20.0         # 搜索时间上限（秒）
-SEARCH_QUIESCENCE_DEPTH = 4      # 静态搜索额外深度
-SEARCH_BLUNDER_CHECK_DEPTH = 2   # LLM 走法验证用浅搜索深度
 
 # ── MCTS 配置 ──
-MCTS_SIMULATIONS = 2000          # 默认模拟次数（真搜索后单次模拟≈0.1~0.5ms，主要耗在叶评估）
 MCTS_TIME_LIMIT = 15.0           # MCTS / Pikafish 时间上限（秒）
 MCTS_EXPLORATION = 1.4           # UCB1 探索参数
 MCTS_PRIOR_STRENGTH = 50         # LLM走法先验强度（虚拟访问次数乘数）
 MCTS_FALLBACK_SIMULATIONS = 500  # 回退搜索模拟次数（后台线程执行，不阻塞 UI）
 MCTS_FALLBACK_TIME_LIMIT = 5.0   # 回退搜索时间上限（秒）
+
+# ── Pikafish 高置信度短路 ──
+PIKAFISH_MULTIPV = 3             # MultiPV 搜索主变数
+PIKAFISH_CONFIDENCE_THRESHOLD = 300  # 高置信分差阈值（厘兵），超过此分差跳过 LLM 直接采信引擎
 
 # ── 残局库配置 ──
 EGTB_MAX_PIECES = 10             # 残局库查询的最大子力数

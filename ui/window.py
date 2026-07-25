@@ -48,7 +48,7 @@ class MainWindow(QMainWindow):
 
         # 推迟到事件循环执行，避免引擎子进程启动/UCI 握手卡住窗口显示；
         # 排在 setup_ui() 之后，事件循环启动时日志面板 widget 早已创建
-        QTimer.singleShot(0, self.game_controller._init_pikafish)
+        QTimer.singleShot(0, self.game_controller._engine.init_pikafish)
 
         self.settings = QSettings('ChineseChessAI', 'ChineseChess')
 
