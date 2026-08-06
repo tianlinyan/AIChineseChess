@@ -324,6 +324,6 @@ if __name__ == '__main__':
     test_openings()
     test_self_play()
     if FAILED:
-        print(f'\n✗ {len(FAILED)} 项失败: {FAILED}')
+        print(f'\nFAILED {len(FAILED)} 项: {FAILED}')
         sys.exit(1)
-    print('\n✓ 全部通过')
+    print('\n全部通过')

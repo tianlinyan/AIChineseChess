@@ -450,7 +450,13 @@ _build_lock = threading.Lock()
 
 
 def _build_prefix_map():
-    """从 OPENING_LINES 构建前缀映射表（线程安全）"""
+    """从 OPENING_LINES 构建前缀映射表（线程安全）
+
+    同一走法出现在多条开局线的同一前缀下时，取最高权重去重。
+    这修复了两处下游问题：
+    1. get_opening_candidates() 返回重复走法（调用方需自行去重）
+    2. get_opening_move() 的 total_weight 被重复走法虚高（偏向高频走法）
+    """
     global _prefix_map, _built
     if _built:
         return
@@ -459,13 +465,21 @@ def _build_prefix_map():
             return
         _prefix_map.clear()
 
-        for line_name, moves in OPENING_LINES.items():
+        # 收集阶段：用 dict 聚合同前缀下的走法权重（取最高）
+        pending: dict[tuple[Move, ...], dict[Move, float]] = {}
+        for moves in OPENING_LINES.values():
             for i, move in enumerate(moves):
                 prefix = tuple(moves[:i])
-                if prefix not in _prefix_map:
-                    _prefix_map[prefix] = []
+                if prefix not in pending:
+                    pending[prefix] = {}
                 remaining = len(moves) - i
-                _prefix_map[prefix].append((move, float(remaining)))
+                if move not in pending[prefix] or remaining > pending[prefix][move]:
+                    pending[prefix][move] = float(remaining)
+
+        # 转换为按权重降序的 [(move, weight), ...] 列表
+        for prefix, move_weights in pending.items():
+            _prefix_map[prefix] = sorted(
+                move_weights.items(), key=lambda x: -x[1])
 
         _built = True
 
@@ -485,7 +499,8 @@ def get_opening_candidates(move_history: list) -> list:
     _build_prefix_map()
     prefix = tuple((m[0], m[1], m[2], m[3]) for m in move_history)
     candidates = _prefix_map.get(prefix, [])
-    return sorted(candidates, key=lambda x: -x[1])
+    # _prefix_map 构建时已按权重降序排列；返回拷贝防止调用方污染缓存
+    return list(candidates)
 
 
 def get_opening_names(move_history: list) -> list:

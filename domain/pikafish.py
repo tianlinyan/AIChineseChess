@@ -254,7 +254,7 @@ class PikafishEngine:
                             error = f'返回非法或无法解析的走法: {uci!r}'
                             move = None
                     else:
-                        error = f'引擎无响应/超时（{time_ms}ms + 30s 兜底）'
+                        error = f'引擎无响应/超时（{time_ms}ms + 10s 兜底）'
             except (OSError, ValueError, BrokenPipeError) as e:
                 error = f'引擎通信异常（进程已终止）: {e}'
                 self._available = False
