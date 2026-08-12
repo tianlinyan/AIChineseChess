@@ -226,7 +226,6 @@ class MainWindow(QMainWindow):
             self.game_controller.red_ai_mode = mode
             search_enabled = mode != 'llm_only'
             self.red_search_depth_spin.setEnabled(search_enabled)
-            # 同步黑方（如果黑方也用相同模式的话，维持各自独立设置）
 
     def on_red_search_depth_changed(self, value: int) -> None:
         self.game_controller.red_search_depth = value

@@ -844,7 +844,7 @@ class GameController:
 
     def _fallback_to_search(self, player: int) -> None:
         """LLM 失败时回退到搜索引擎（替代随机走子）"""
-        # 计数统一由 _random_move 管理（阈值 >3），_fallback_to_search 不单独计数
+        self._current_ai_player = player  # 确保引擎桥接读到正确深度
         if self._random_action_count > 3:
             self.log("连续回退过多 — 停止游戏", 'ERROR')
             self.is_active = False

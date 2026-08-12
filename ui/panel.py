@@ -202,11 +202,11 @@ def setup_left_expanded(parent) -> None:
     red_layout.addWidget(rdlbl, 1, 0)
     parent.red_search_depth_spin = QSpinBox()
     parent.red_search_depth_spin.setRange(1, 8)
-    parent.red_search_depth_spin.setValue(5)
     parent.red_search_depth_spin.setMinimumHeight(26)
     parent.red_search_depth_spin.setStyleSheet(_spinbox_style())
     parent.red_search_depth_spin.setToolTip("红方搜索强度 1~8")
     parent.red_search_depth_spin.valueChanged.connect(parent.on_red_search_depth_changed)
+    parent.red_search_depth_spin.setValue(5)  # connect 之后设值，确保信号送达
     red_layout.addWidget(parent.red_search_depth_spin, 1, 1)
 
     parent.red_opening_book_check = QCheckBox("开局库")
@@ -258,11 +258,11 @@ def setup_left_expanded(parent) -> None:
     black_layout.addWidget(bdlbl, 1, 0)
     parent.black_search_depth_spin = QSpinBox()
     parent.black_search_depth_spin.setRange(1, 8)
-    parent.black_search_depth_spin.setValue(5)
     parent.black_search_depth_spin.setMinimumHeight(26)
     parent.black_search_depth_spin.setStyleSheet(_spinbox_style())
     parent.black_search_depth_spin.setToolTip("黑方搜索强度 1~8")
     parent.black_search_depth_spin.valueChanged.connect(parent.on_black_search_depth_changed)
+    parent.black_search_depth_spin.setValue(5)
     black_layout.addWidget(parent.black_search_depth_spin, 1, 1)
 
     parent.black_opening_book_check = QCheckBox("开局库")
