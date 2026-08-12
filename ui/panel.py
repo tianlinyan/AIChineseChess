@@ -49,14 +49,14 @@ def setup_left_expanded(parent) -> None:
     title_layout.setContentsMargins(0, 2, 0, 0)
     title = QLabel("🔴⚫ AI 中国象棋")
     title.setStyleSheet(
-        "font-size: 16px; font-weight: bold; color: #4a6fa5; "
+        "font-size: 11px; font-weight: bold; color: #4a6fa5; "
         "padding: 6px 0 2px 4px;"
     )
     title_layout.addWidget(title)
     parent.expand_collapse_btn = QPushButton("◀")
     parent.expand_collapse_btn.setFixedSize(22, 22)
     parent.expand_collapse_btn.setStyleSheet(
-        "QPushButton { background: transparent; color: #666; border: none; font-size: 14px; }"
+        "QPushButton { background: transparent; color: #666; border: none; font-size: 11px; }"
         "QPushButton:hover { color: #aaa; }"
     )
     parent.expand_collapse_btn.clicked.connect(parent.toggle_left_panel)
@@ -181,7 +181,7 @@ def setup_left_expanded(parent) -> None:
     parent.start_btn.setMinimumHeight(28)
     parent.start_btn.setStyleSheet(
         "QPushButton { background-color: #4a9e5a; color: white; border: none; "
-        "border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }"
+        "border-radius: 4px; padding: 4px; font-size: 11px; font-weight: bold; }"
         "QPushButton:hover { background-color: #3a8a4a; }"
         "QPushButton:disabled { background-color: #444; color: #777; }"
     )
@@ -219,7 +219,7 @@ def setup_left_expanded(parent) -> None:
 
     parent.game_status_label = QLabel("等待开始")
     parent.game_status_label.setStyleSheet(
-        "color: #e0c070; font-weight: bold; font-size: 12px; padding: 0;"
+        "color: #e0c070; font-weight: bold; font-size: 11px; padding: 0;"
     )
     status_layout.addWidget(parent.game_status_label)
 
@@ -232,7 +232,7 @@ def setup_left_expanded(parent) -> None:
     status_layout.addWidget(parent.total_moves_label)
 
     parent.think_timer_label = QLabel("思考用时: —")
-    parent.think_timer_label.setStyleSheet("color: #888; font-size: 10px;")
+    parent.think_timer_label.setStyleSheet("color: #888; font-size: 11px;")
     status_layout.addWidget(parent.think_timer_label)
 
     # 红黑棋力对比（同行）
@@ -240,11 +240,11 @@ def setup_left_expanded(parent) -> None:
     row1.setSpacing(4)
     parent.red_material_label = QLabel("红: —")
     parent.red_material_label.setStyleSheet(
-        "color: #e06060; font-size: 12px; font-weight: bold;")
+        "color: #e06060; font-size: 11px; font-weight: bold;")
     row1.addWidget(parent.red_material_label)
     parent.black_material_label = QLabel("黑: —")
     parent.black_material_label.setStyleSheet(
-        "color: #6060e0; font-size: 12px; font-weight: bold;")
+        "color: #6060e0; font-size: 11px; font-weight: bold;")
     row1.addWidget(parent.black_material_label)
     status_layout.addLayout(row1)
 
@@ -270,18 +270,18 @@ def setup_left_expanded(parent) -> None:
 
     parent.ai_score_label = QLabel("得分: 0")
     parent.ai_score_label.setStyleSheet(
-        "color: #f0c040; font-size: 16px; font-weight: bold; padding: 2px;"
+        "color: #f0c040; font-size: 11px; font-weight: bold; padding: 2px;"
     )
     parent.ai_score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     score_layout.addWidget(parent.ai_score_label)
 
     parent.ai_arbitration_count_label = QLabel("仲裁次数: 0")
-    parent.ai_arbitration_count_label.setStyleSheet("color: #aaa; font-size: 10px;")
+    parent.ai_arbitration_count_label.setStyleSheet("color: #aaa; font-size: 11px;")
     parent.ai_arbitration_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     score_layout.addWidget(parent.ai_arbitration_count_label)
 
     parent.ai_score_detail = QLabel("一致 +1 | 不一致 0")
-    parent.ai_score_detail.setStyleSheet("color: #888; font-size: 9px;")
+    parent.ai_score_detail.setStyleSheet("color: #888; font-size: 11px;")
     parent.ai_score_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
     score_layout.addWidget(parent.ai_score_detail)
 
