@@ -418,7 +418,7 @@ class SearchEngine:
                 if (is_quiet and depth >= LMR_MIN_DEPTH
                         and i >= LMR_FULL_DEPTH_MOVES and ext == 0):
                     reduction = LMR_BASE_REDUCTION + (i - LMR_FULL_DEPTH_MOVES) // 4
-                    reduced_depth = max(1, depth - 1 + ext - reduction)
+                    reduced_depth = max(0, depth - 1 + ext - reduction)
                     score = -self._alpha_beta(
                         game, reduced_depth, -alpha - 1, -alpha,
                         3 - player, extended=extended or (ext > 0))

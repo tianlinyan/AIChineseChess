@@ -106,8 +106,12 @@ class GameController:
 
     def _get_current_search_depth(self) -> int:
         """引擎桥接回调：返回当前 AI 方的搜索深度。"""
-        return (self.red_search_depth if self._current_ai_player == 1
-                else self.black_search_depth)
+        if self._current_ai_player == 1:
+            return self.red_search_depth
+        if self._current_ai_player == 2:
+            return self.black_search_depth
+        # 未初始化（-1）：防御性回退到红方深度
+        return self.red_search_depth
 
     def _ai_mode_for(self, player: int) -> str:
         return self.red_ai_mode if player == 1 else self.black_ai_mode
@@ -382,6 +386,9 @@ class GameController:
 
         current_player = self.game.current_player
         self._current_ai_player = current_player  # 引擎桥接回调用
+        # 重置上轮引擎走法——防止开局库路径跳过引擎搜索后
+        # 旧走法被本轮仲裁/兜底误用
+        self._hybrid_engine_move = None
         model = self.model1 if current_player == 1 else self.model2
         if model == HUMAN_MODEL:
             return

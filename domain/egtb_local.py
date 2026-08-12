@@ -27,7 +27,7 @@ from typing import Optional, Tuple, Dict, Set, List
 from domain.constants import BOARD_WIDTH, BOARD_HEIGHT
 
 # ── 常量 ──
-DTM_MAGIC = b'DTMC\x01'    # DTM Chinese Chess v1
+DTM_MAGIC = b'DTMC\x02'    # DTM Chinese Chess v2（6字节记录：hash+dtm+loser）
 DTM_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        'data', 'egtb')
 MAX_DTM = 126               # 最大 DTM 存储值
@@ -613,7 +613,7 @@ class DtmTable:
                 h = struct.unpack('<I', f.read(4))[0]
                 dtm = struct.unpack('<B', f.read(1))[0]
                 loser = struct.unpack('<B', f.read(1))[0]
-                self._dtm[h] = (dtm, loser) if loser else dtm
+                self._dtm[h] = (dtm, loser)  # 始终存 tuple
         self._generated = True
         return True
 
