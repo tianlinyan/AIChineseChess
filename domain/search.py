@@ -309,8 +309,10 @@ class SearchEngine:
                     self.progress_callback(depth, self._best_score, self._best_move,
                                           self._nodes_searched)
         finally:
-            # 恢复 game.current_player（即使搜索抛异常也恢复）
+            # 恢复 game.current_player，清理累加器
             game.current_player = saved_current_player
+            if hasattr(game, '_nnue_acc'):
+                game._nnue_acc = None  # 防止外部用过期累加器
 
         return self._best_move
 
@@ -455,10 +457,14 @@ class SearchEngine:
                 return best
 
         # 所有走法搜索完毕
+        if best == float('-inf'):
+            # 超时截断，未搜索任何走法 —— 不存 TT，避免污染
+            return self._fast_eval(game, player)
+
         if best > orig_alpha:
             flag = TTFlag.EXACT
         else:
-            flag = TTFlag.UPPER_BOUND  # 未提升 alpha → 上界（true score <= best）
+            flag = TTFlag.UPPER_BOUND
         self._tt.store(hash_key, depth,
                        _tt_score_to_relative(best, self.max_depth - depth),
                        flag, best_move)

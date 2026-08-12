@@ -193,7 +193,7 @@ def probe(board: list, current_player: int,
     if piece_count <= 4:
         try:
             from domain.egtb_local import probe_local
-            local_dtm = probe_local(board, piece_count)
+            local_dtm = probe_local(board, piece_count, current_player)
             if local_dtm is not None:
                 return local_dtm
         except Exception:

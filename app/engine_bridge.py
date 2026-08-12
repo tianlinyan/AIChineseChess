@@ -192,7 +192,7 @@ class EngineBridge(QObject):
             if not self._check_version(cv, cc, 'PF', needs_cleanup=False):
                 return
             if move is None and error:
-                self._log(f"  ⚠️ Pikafish 搜索失败: {error}，回退到 MCTS", 'WARNING')
+                self._log(f"  ⚠️ Pikafish 搜索失败: {error}", 'WARNING')
             on_done(move, player)
         except Exception as e:
             self._log(f"[PF诊断] 搜索回调异常: {e}", 'ERROR')

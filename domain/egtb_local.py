@@ -494,8 +494,11 @@ class DtmTable:
                 print(f'      已处理 {i+1}/{n_positions}')
 
         # 第3步：检测将死局面（player 被将军 且 无合法应将 = DTM=0）
-        # dtm[i] = 从局面 i 的走子方视角的 DTM
-        dtm = [-1] * n_positions  # -1 = 未知
+        # dtm[i] = (dtm_value, loser_player) — 从 loser 视角的 DTM
+        # dtm_value: 0=loser被将死/困毙, N=loser在N步内被将死
+        # loser_player: 1=红被将死, 2=黑被将死
+        dtm_val = [-1] * n_positions
+        dtm_loser = [0] * n_positions
         queue = []
 
         for i, (h, board) in enumerate(pos_list):
@@ -513,38 +516,33 @@ class DtmTable:
                 # 将死 或 困毙：无合法走法 = 输棋
                 moves = g.get_all_legal_moves(player)
                 if not moves:
-                    dtm[i] = 0  # player 被将死/困毙
+                    dtm_val[i] = 0
+                    dtm_loser[i] = player
                     queue.append(i)
                     break
 
         print(f'    初始将死局面：{len(queue)}')
 
-        # 第4步：BFS 回溯（从将死局面反向传播）
+        # 第4步：BFS 回溯
         iteration = 0
         head = 0
         while head < len(queue):
             cur_idx = queue[head]
             head += 1
-            cur_dtm = dtm[cur_idx]
+            cur_dtm = dtm_val[cur_idx]
+            cur_loser = dtm_loser[cur_idx]
 
             if cur_dtm >= MAX_DTM:
                 continue
 
-            # 找前驱：对手走一步到达当前局面
-            # 当前局面 cur 的走子方是被杀方 L(cur)
-            # 前驱局面 pred 的走子方是胜方 W(=对手)
-            # pred → 走 W 的某步棋 → cur
-            # pred 在 reverse[cur] 中
+            # 前驱局面中 winner (= 3-cur_loser) 走一步到达当前局面
             new_dtm = cur_dtm + 1
 
             for pred_idx in reverse[cur_idx]:
-                if dtm[pred_idx] >= 0:
-                    continue  # 已赋值
-                # 检查：pred 的走子方 W 能否通过一步棋到达 cur
-                # W = pred 局面的走子方
-                # 如果 cur 走子方是 L，那么 pred 走子方是 3-L
-                # 简化：直接赋值（因为 reverse 图已经保证了可达性）
-                dtm[pred_idx] = new_dtm
+                if dtm_val[pred_idx] >= 0:
+                    continue
+                dtm_val[pred_idx] = new_dtm
+                dtm_loser[pred_idx] = cur_loser  # 同一 loser
                 queue.append(pred_idx)
 
             iteration += 1
@@ -552,26 +550,25 @@ class DtmTable:
                 print(f'    迭代 {iteration}: queue_size={len(queue)}, '
                       f'dtm={cur_dtm}')
 
-        # 转换回 self._dtm
+        # 转换回 self._dtm: (dtm, loser) 对
         for i, (h, _) in enumerate(pos_list):
-            if dtm[i] >= 0:
-                self._dtm[h] = dtm[i]
+            if dtm_val[i] >= 0:
+                self._dtm[h] = (dtm_val[i], dtm_loser[i])
 
         self._generated = True
         covered = len(self._dtm)
         print(f'    完成：{covered}/{n_positions} 局面已覆盖')
 
 
-    def probe(self, board: list) -> Optional[int]:
-        """查 DTM 表，返回走子方视角的 DTM 值或 None。
+    def probe(self, board: list, current_player: int) -> Optional[Tuple[int, int]]:
+        """查 DTM 表，返回 (dtm, loser) 对或 None。
 
         Returns:
             None: 局面不在表中
-            int: DTM 值 — 0=被将死, N=可在N步内杀（正数）
+            (dtm, loser): dtm=杀棋距离, loser=被将死方(1=红,2=黑)
         """
         if not self._generated:
             return None
-        # 先查 tuple 键（内存中的生成结果），再查整数哈希（从文件加载的）
         key = _board_key(board)
         if key in self._dtm:
             return self._dtm[key]
@@ -581,8 +578,7 @@ class DtmTable:
     def save(self, filepath: str) -> None:
         """保存为紧凑二进制文件。
 
-        格式：header + 每个局面的 (board_hash:u32, dtm:u8)。
-        用 _board_to_index 做整数哈希存储。
+        格式：header + 每个局面的 (board_hash:u32, dtm:u8, loser:u8)。
         """
         if not self._generated:
             return
@@ -591,20 +587,22 @@ class DtmTable:
             f.write(DTM_MAGIC)
             count = len(self._dtm)
             f.write(struct.pack('<I', count))
-            # 按 dtm 排序后写入
-            for key, dtm in sorted(self._dtm.items(), key=lambda x: x[1]):
-                # 从 tuple key 重建 board 并计算整数哈希
-                board = [list(row) for row in key]
-                h = _board_to_index(board)
+            for key, val in self._dtm.items():
+                if isinstance(val, tuple):
+                    dtm, loser = val
+                else:
+                    dtm, loser = val, 0  # 兼容旧格式
+                # 键可能是 tuple (in-memory) 或 int (from load)
+                if isinstance(key, tuple):
+                    board = [list(row) for row in key]
+                    h = _board_to_index(board)
+                else:
+                    h = key
                 f.write(struct.pack('<I', h))
-                f.write(struct.pack('<B', min(dtm, 255)))
+                f.write(struct.pack('<BB', min(dtm, 255), loser & 0xFF))
 
     def load(self, filepath: str) -> bool:
-        """从紧凑二进制文件加载。
-
-        加载后需要 matching positions dict 来重建 tuple 键映射。
-        此处存储整数哈希 → dtm，probe 时用整数哈希查。
-        """
+        """从紧凑二进制文件加载。"""
         if not os.path.isfile(filepath):
             return False
         with open(filepath, 'rb') as f:
@@ -615,7 +613,8 @@ class DtmTable:
             for _ in range(count):
                 h = struct.unpack('<I', f.read(4))[0]
                 dtm = struct.unpack('<B', f.read(1))[0]
-                self._dtm[h] = dtm  # 存储整数哈希
+                loser = struct.unpack('<B', f.read(1))[0]
+                self._dtm[h] = (dtm, loser) if loser else dtm
         self._generated = True
         return True
 
@@ -625,23 +624,23 @@ _tables: Dict[str, DtmTable] = {}
 _loaded_piece_sets: Set[str] = set()
 
 
-def probe_local(board: list, piece_count: int) -> Optional[Tuple[float, int]]:
+def probe_local(board: list, piece_count: int,
+                current_player: int) -> Optional[Tuple[float, int]]:
     """查询本地 DTM 残局库。
 
     Args:
         board: 10×9 棋盘
         piece_count: 棋盘上的棋子总数
+        current_player: 当前走子方 (1=红, 2=黑)
 
     Returns:
         None: 无匹配的本地表
-        (score, dtm): score 是走子方视角的 centipawn，dtm 是杀棋距离
+        (score, dtm): score 是 current_player 视角的 centipawn，dtm 是杀棋距离
     """
-    if piece_count > 4:  # 仅支持 ≤4 子（可扩展）
+    if piece_count > 4:
         return None
 
-    # 找出棋盘上的棋子
     pieces = []
-    current_player = None  # 需要从外部传入
     for r in range(BOARD_HEIGHT):
         for c in range(BOARD_WIDTH):
             p = board[r][c]
@@ -650,7 +649,6 @@ def probe_local(board: list, piece_count: int) -> Optional[Tuple[float, int]]:
 
     key = _piece_set_key(tuple(pieces))
 
-    # 尝试加载
     if key not in _tables:
         filepath = os.path.join(DTM_DIR, f'{key}.dtm')
         table = DtmTable(tuple(pieces))
@@ -658,14 +656,18 @@ def probe_local(board: list, piece_count: int) -> Optional[Tuple[float, int]]:
             return None
         _tables[key] = table
 
-    dtm = _tables[key].probe(board)
-    if dtm is None:
+    result = _tables[key].probe(board, current_player)
+    if result is None:
         return None
 
-    # 转换为 score：接近将死时分数更高
-    # DTM 值已经是走子方视角
-    score = 99900 - dtm * 100  # 对齐 JIANGSHA_SCORE 的数量级
-    return (float(score), dtm)
+    dtm_val, loser = result
+    # score 从 current_player 视角：
+    # 如果 current_player 是 loser → 负分（被将死）；否则 → 正分（将死对方）
+    if current_player == loser:
+        score = -(99900 - dtm_val * 100)  # 被将死，负分
+    else:
+        score = 99900 - dtm_val * 100      # 将死对方，正分
+    return (float(score), dtm_val)
 
 
 def generate_all_4piece() -> None:

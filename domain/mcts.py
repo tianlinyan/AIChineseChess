@@ -328,8 +328,10 @@ class MCTSEngine:
         for move in legal_moves:
             fr, fc, tr, tc = move
             captured = SearchEngine._make_move(game, fr, fc, tr, tc)
-            score = nnue.evaluate(board)  # 红方视角 centipawn
-            SearchEngine._unmake_move(game, fr, fc, tr, tc, captured)
+            try:
+                score = nnue.evaluate(board)  # 红方视角 centipawn
+            finally:
+                SearchEngine._unmake_move(game, fr, fc, tr, tc, captured)
             # 转为走子方视角
             scores[move] = score if player == 1 else -score
 
