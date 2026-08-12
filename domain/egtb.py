@@ -189,7 +189,17 @@ def probe(board: list, current_player: int,
     if piece_count > EGTB_MAX_PIECES:
         return None
 
-    # 本地基础判定
+    # ── 本地 DTM 回溯分析表（精确）──
+    if piece_count <= 4:
+        try:
+            from domain.egtb_local import probe_local
+            local_dtm = probe_local(board, piece_count)
+            if local_dtm is not None:
+                return local_dtm
+        except Exception:
+            pass
+
+    # 本地基础判定（启发式规则）
     local = _local_egtb(board, current_player)
     if local is not None:
         return local

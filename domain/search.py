@@ -553,8 +553,7 @@ class SearchEngine:
     def _fast_eval(self, game, player: int) -> float:
         """快速评估 — 不生成走法，返回从 player 视角的评分。
 
-        使用增量缓存的 material/PST/count 跳过全盘统计扫描，
-        仅用 evaluate_fast() 做棋盘扫描收集棋子位置用于关系特征。
+        优先级：EGTB（精确）→ NNUE（神经网络）→ 手工评估（回退）。
         evaluate() 始终返回红方视角，此处根据 player 转换。
         """
         board = game.board
@@ -570,6 +569,16 @@ class SearchEngine:
                     return egtb_result[0]
             except Exception:
                 pass
+
+        # ── NNUE 神经网络评估 ──
+        try:
+            from domain.nnue import get_nnue
+            nnue = get_nnue()
+            if nnue is not None:
+                score = nnue.evaluate(board)  # 红方视角 centipawn
+                return score if player == 1 else -score
+        except Exception:
+            pass
 
         endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
 

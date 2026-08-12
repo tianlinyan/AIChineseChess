@@ -128,6 +128,10 @@ class MCTSEngine:
         # 构建根节点
         self._root = MCTSNode(player=player)
 
+        # ── NNUE 引导的先验分布 ──
+        if priors is None:
+            priors = self._compute_nnue_priors(game, legal_moves, player)
+
         # 展开根节点的所有合法子节点
         # PUCT 公式通过 P * sqrt(N) / (1 + visits) 自然加权先验，
         # 无需虚拟访问（UCB1 时代的人工偏移在 PUCT 下反而扭曲统计）
@@ -266,6 +270,18 @@ class MCTSEngine:
             except Exception:
                 pass
 
+        # ── NNUE 神经网络评估 ──
+        try:
+            from domain.nnue import get_nnue
+            nnue = get_nnue()
+            if nnue is not None:
+                score = nnue.evaluate(board)  # 红方视角 centipawn
+                if player == 2:
+                    score = -score
+                return 1.0 / (1.0 + math.exp(-score / 200.0))
+        except Exception:
+            pass
+
         red_check = game.is_in_check(1)
         black_check = game.is_in_check(2)
 
@@ -303,6 +319,47 @@ class MCTSEngine:
             node = node.parent
 
     # ── 辅助 ──
+
+    def _compute_nnue_priors(self, game, legal_moves: list,
+                             player: int) -> Optional[Dict[tuple, float]]:
+        """用 NNUE 快速评估每个候选走法，生成 softmax 先验分布。
+
+        对每个候选走法：临时走子 → NNUE 评估 → 撤销走子 → softmax。
+        无 NNUE 时返回 None（MCTS 使用均匀先验）。
+        """
+        try:
+            from domain.nnue import get_nnue
+            nnue = get_nnue()
+            if nnue is None:
+                return None
+        except Exception:
+            return None
+
+        scores = {}
+        board = game.board
+        for move in legal_moves:
+            fr, fc, tr, tc = move
+            captured = SearchEngine._make_move(game, fr, fc, tr, tc)
+            score = nnue.evaluate(board)  # 红方视角 centipawn
+            SearchEngine._unmake_move(game, fr, fc, tr, tc, captured)
+            # 转为走子方视角
+            scores[move] = score if player == 1 else -score
+
+        if not scores:
+            return None
+
+        # Softmax 转换（temperature=50 centipawn 使分布合理尖锐）
+        max_score = max(scores.values())
+        total = 0.0
+        priors = {}
+        for move, s in scores.items():
+            priors[move] = math.exp((s - max_score) / 50.0)
+            total += priors[move]
+        if total > 0:
+            for move in priors:
+                priors[move] /= total
+
+        return priors
 
     def _is_time_up(self) -> bool:
         if self._stop_flag:
