@@ -241,6 +241,21 @@ def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
                         # 合法局面（不面对面即可）
                         key = _board_key(board)
                         positions[key] = [row[:] for row in board]
+            elif n == 3:
+                # 5 子残局（K + k + 3 其他棋子）── 枚举量 ~8.9M，仅离线预生成
+                for i, sq1 in enumerate(available):
+                    for j, sq2 in enumerate(available[i+1:], i+1):
+                        for sq3 in available[j+1:]:
+                            board = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
+                            board[rk_pos[0]][rk_pos[1]] = 'K'
+                            board[bk_pos[0]][bk_pos[1]] = 'k'
+                            board[sq1[0]][sq1[1]] = others[0]
+                            board[sq2[0]][sq2[1]] = others[1]
+                            board[sq3[0]][sq3[1]] = others[2]
+                            if _is_king_facing(board):
+                                continue
+                            key = _board_key(board)
+                            positions[key] = [row[:] for row in board]
 
     return positions
 
@@ -495,12 +510,12 @@ class DtmTable:
                         elif board[r][c] == 'k':
                             g._king_pos[2] = (r, c)
 
-                if g.is_in_check(player):
-                    moves = g.get_all_legal_moves(player)
-                    if not moves:
-                        dtm[i] = 0  # player 被将死
-                        queue.append(i)
-                        break
+                # 将死 或 困毙：无合法走法 = 输棋
+                moves = g.get_all_legal_moves(player)
+                if not moves:
+                    dtm[i] = 0  # player 被将死/困毙
+                    queue.append(i)
+                    break
 
         print(f'    初始将死局面：{len(queue)}')
 
