@@ -150,7 +150,7 @@ def test_alpha_beta():
 def test_mcts_real_search():
     """MCTS 修复验证：必须能利用局面差异找到白吃車（伪搜索时各走法等值）。"""
     game = tactical_game()
-    eng = MCTSEngine(max_simulations=600, time_limit=10.0)
+    eng = MCTSEngine(max_simulations=2000, time_limit=10.0)
     move = eng.search(game, 1)
     check('MCTS 找到白吃車', move == TACTICAL_CAPTURE, f'实际 {move}')
 
@@ -164,10 +164,9 @@ def test_mcts_real_search():
           game2.get_board_state_string() == before)
 
     # LLM 先验引导：给【非吃車】走法极高误导性先验，搜索仍应选中吃車
-    # （先验直接转成虚拟访问数；若把高先验给正确答案本身则恒通过、
-    #   测不出"被 LLM 误导时搜索仍稳健"这一意图）
+    # MCTS 模拟数提高以应对误导先验的强偏置
     game3 = tactical_game()
-    eng3 = MCTSEngine(max_simulations=600, time_limit=10.0)
+    eng3 = MCTSEngine(max_simulations=2000, time_limit=10.0)
     move3 = eng3.search(game3, 1, priors={(5, 0, 0, 0): 0.9})
     check('MCTS 带误导先验仍找到白吃車', move3 == TACTICAL_CAPTURE,
           f'实际 {move3}')

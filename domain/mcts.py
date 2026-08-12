@@ -128,10 +128,6 @@ class MCTSEngine:
         # 构建根节点
         self._root = MCTSNode(player=player)
 
-        # ── NNUE 引导的先验分布 ──
-        if priors is None:
-            priors = self._compute_nnue_priors(game, legal_moves, player)
-
         # 展开根节点的所有合法子节点
         # PUCT 公式通过 P * sqrt(N) / (1 + visits) 自然加权先验，
         # 无需虚拟访问（UCB1 时代的人工偏移在 PUCT 下反而扭曲统计）
@@ -269,18 +265,6 @@ class MCTSEngine:
                     return 1.0 / (1.0 + math.exp(-score / 1000.0))
             except Exception:
                 pass
-
-        # ── NNUE 神经网络评估 ──
-        try:
-            from domain.nnue import get_nnue
-            nnue = get_nnue()
-            if nnue is not None:
-                score = nnue.evaluate(board)  # 红方视角 centipawn
-                if player == 2:
-                    score = -score
-                return 1.0 / (1.0 + math.exp(-score / 200.0))
-        except Exception:
-            pass
 
         red_check = game.is_in_check(1)
         black_check = game.is_in_check(2)
