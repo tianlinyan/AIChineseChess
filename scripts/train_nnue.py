@@ -58,14 +58,50 @@ def generate_training_data(n_samples: int) -> tuple:
     batch_size = 500
 
     for i in range(n_samples):
-        # 用随机走子 + 偶尔好走子来模拟真实对局
+        # 生成多样化局面（开局 + 随机 + 战术混合）
         g = ChineseChessGame()
         n_moves = np.random.randint(2, 50)
+
+        # 模式选择：20% 纯战术，30% 纯随机，50% 混合
+        mode_r = np.random.random()
+        capture_bias = 0.0  # 吃子走法被选中的概率加权
+
+        if mode_r < 0.2:
+            # 纯战术模式：优先走吃子/将军
+            capture_bias = 0.8
+            n_moves = np.random.randint(4, 30)
+        elif mode_r < 0.5:
+            # 纯随机（原有行为）
+            capture_bias = 0.0
+        else:
+            # 混合：前 8 步随机，后面偏好战术
+            capture_bias = 0.0
+
         for step in range(n_moves):
+            if step >= 8 and mode_r >= 0.5:
+                capture_bias = 0.7  # 后半段偏好吃子
+
             moves = g.get_all_legal_moves(g.current_player)
             if not moves:
                 break
-            mv = moves[np.random.randint(len(moves))]
+
+            # 根据 capture_bias 加权选择走法
+            if capture_bias > 0 and len(moves) > 1:
+                # 分离吃子和非吃子走法
+                captures = []
+                quiets = []
+                for mv in moves:
+                    if g.board[mv[2]][mv[3]] != '.':
+                        captures.append(mv)
+                    else:
+                        quiets.append(mv)
+                if captures and np.random.random() < capture_bias:
+                    mv = captures[np.random.randint(len(captures))]
+                else:
+                    mv = moves[np.random.randint(len(moves))]
+            else:
+                mv = moves[np.random.randint(len(moves))]
+
             result = g.move_piece(*mv)
             if not result['success'] or g.game_over:
                 break
@@ -106,7 +142,22 @@ def generate_training_data(n_samples: int) -> tuple:
 
     X = np.array(features_list, dtype=np.float32)
     y = np.array(scores_list, dtype=np.float32)
-    print(f'  完成：{len(y)} 个有效样本')
+
+    # ── 镜像数据增强（左右翻转，样本翻倍）──
+    n_orig = len(y)
+    X_mirror = np.zeros_like(X)
+    for i in range(n_orig):
+        for piece_type in range(14):
+            base = piece_type * 90
+            for row in range(10):
+                for col in range(9):
+                    src = base + row * 9 + (8 - col)  # 镜像源
+                    dst = base + row * 9 + col         # 目标位置
+                    X_mirror[i, dst] = features_list[i][src]
+
+    X = np.concatenate([X, X_mirror], axis=0)
+    y = np.concatenate([y, y], axis=0)  # 镜像评分不变（对称）
+    print(f'  完成：{len(y)} 个有效样本（含镜像增强 ×2）')
     print(f'  评分范围：[{y.min():.1f}, {y.max():.1f}]')
     return X, y
 

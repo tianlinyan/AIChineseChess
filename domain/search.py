@@ -200,6 +200,14 @@ class SearchEngine:
         self._history_table: dict = {}
         self._tt = TranspositionTable()
 
+        # NNUE 增量评估
+        self._nnue = None
+        try:
+            from domain.nnue import get_nnue
+            self._nnue = get_nnue()
+        except Exception:
+            pass
+
         self._init_killers()
 
     def _init_killers(self):
@@ -234,6 +242,13 @@ class SearchEngine:
         self._init_killers()
         self._history_table = {}
         self._tt.clear()
+
+        # ── NNUE 累加器初始化 ──
+        if self._nnue is not None:
+            try:
+                game._nnue_acc = self._nnue.create_accumulator(game.board)
+            except Exception:
+                game._nnue_acc = None
 
         ordered_moves = None
 
@@ -570,15 +585,10 @@ class SearchEngine:
             except Exception:
                 pass
 
-        # ── NNUE 神经网络评估 ──
-        try:
-            from domain.nnue import get_nnue
-            nnue = get_nnue()
-            if nnue is not None:
-                score = nnue.evaluate(board)  # 红方视角 centipawn
-                return score if player == 1 else -score
-        except Exception:
-            pass
+        # ── NNUE 增量神经网络评估 ──
+        if self._nnue is not None and hasattr(game, '_nnue_acc') and game._nnue_acc is not None:
+            score = self._nnue.evaluate_incremental(game._nnue_acc)
+            return score if player == 1 else -score
 
         endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
 
@@ -666,11 +676,11 @@ class SearchEngine:
     @staticmethod
     def _make_move(game, fr: int, fc: int,
                    tr: int, tc: int) -> str:
-        """在 game 上执行走法并同步 _king_pos 缓存与 Zobrist 哈希，
-        返回被吃棋子。
+        """在 game 上执行走法并同步缓存，返回被吃棋子。
 
         注意：不修改 current_player、不走合法性校验，仅供搜索内部
         （及 MCTS / worker 的临时局面）配合 _unmake_move 成对使用。
+        自动维护 NNUE 累加器（如 game 上有 _nnue_acc）。
         """
         board = game.board
         piece = board[fr][fc]
@@ -712,6 +722,17 @@ class SearchEngine:
                     game._red_pst_score -= RED_PST[_cu][tr][tc]
                 else:
                     game._black_pst_score -= RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
+
+        # ── NNUE 累加器增量更新 ──
+        if hasattr(game, '_nnue_acc') and game._nnue_acc is not None:
+            try:
+                from domain.nnue import get_nnue
+                nnue = get_nnue()
+                if nnue is not None:
+                    nnue.update_accumulator(
+                        game._nnue_acc, board, fr, fc, tr, tc, piece, captured)
+            except Exception:
+                pass
 
         return captured
 
@@ -757,6 +778,17 @@ class SearchEngine:
                     game._red_pst_score += RED_PST[_cu][tr][tc]
                 else:
                     game._black_pst_score += RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
+
+        # ── NNUE 累加器撤销 ──
+        if hasattr(game, '_nnue_acc') and game._nnue_acc is not None:
+            try:
+                from domain.nnue import get_nnue
+                nnue = get_nnue()
+                if nnue is not None:
+                    nnue.unmake_accumulator(
+                        game._nnue_acc, board, fr, fc, tr, tc, piece, captured)
+            except Exception:
+                pass
 
     # ── 时间控制 ──
 
