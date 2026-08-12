@@ -41,7 +41,7 @@ def _group_style(title_color: str = "#7eb8da") -> str:
     return (
         "QGroupBox {"
         "  font-weight: bold; font-size: 12px; color: #c0c0c0;"
-        "  background-color: #1e1e22;"
+        "  background-color: #2a2a2d;"
         "  border: 1px solid #3a3a3a; border-radius: 4px;"
         "  margin-top: 8px; padding: 8px 8px 6px 8px;"
         "}"
@@ -56,14 +56,14 @@ def _combo_style() -> str:
     """下拉框统一样式。"""
     return (
         "QComboBox {"
-        "  background-color: #252528; color: #d0d0d0;"
+        "  background-color: #333338; color: #d0d0d0;"
         "  border: 1px solid #444; border-radius: 3px;"
         "  padding: 2px 6px; font-size: 13px;"
         "}"
         "QComboBox:hover { border-color: #666; }"
         "QComboBox::drop-down { border: none; width: 18px; }"
         "QComboBox QAbstractItemView {"
-        "  background-color: #252528; color: #d0d0d0;"
+        "  background-color: #333338; color: #d0d0d0;"
         "  selection-background-color: #3a5070; border: 1px solid #444;"
         "}"
     )
@@ -73,7 +73,7 @@ def _spinbox_style() -> str:
     """数字输入框统一样式。"""
     return (
         "QSpinBox {"
-        "  background-color: #252528; color: #d0d0d0;"
+        "  background-color: #333338; color: #d0d0d0;"
         "  border: 1px solid #444; border-radius: 3px;"
         "  padding: 2px 4px; font-size: 13px;"
         "}"
@@ -136,7 +136,7 @@ def _btn_default_style() -> str:
 
 def setup_left_expanded(parent) -> None:
     """在 parent (MainWindow) 上构建左侧展开面板的所有控件"""
-    parent.left_expanded.setStyleSheet("background-color: #1a1a1e;")
+    parent.left_expanded.setStyleSheet("background-color: #2d2d2d;")
 
     layout = QVBoxLayout(parent.left_expanded)
     layout.setContentsMargins(8, 0, 8, 6)
