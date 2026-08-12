@@ -39,7 +39,8 @@ class EngineBridge(QObject):
     hint_done = pyqtSignal(tuple)
 
     # 搜索深度 → MCTS 模拟次数映射
-    _DEPTH_SIMS_MAP = {1: 500, 2: 800, 3: 1200, 4: 1600, 5: 2000, 6: 3000}
+    _DEPTH_SIMS_MAP = {1: 500, 2: 800, 3: 1200, 4: 1600,
+                       5: 2000, 6: 3000, 7: 4000, 8: 5000}
 
     def __init__(self,
                  log_cb: Callable,
@@ -238,7 +239,8 @@ class EngineBridge(QObject):
             # 用 pyqtSignal 中继到主线程
             self.hint_done.emit((move, game_version, cancel_version, on_done))
 
-        self._pikafish.search_async(g, g.current_player, time_ms=15000,
+        self._pikafish.search_async(g, g.current_player,
+                                    time_ms=int(MCTS_TIME_LIMIT * 1000),
                                     callback=_on_result)
 
     def shutdown(self) -> None:

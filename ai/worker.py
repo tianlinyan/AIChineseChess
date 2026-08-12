@@ -240,14 +240,14 @@ class AIWorker:
         使用两步策略：①Alpha-Beta 深搜索找最佳走法；
         ②对所有合法走法用快速静态评估（~0.05ms/步）排序，返回 top-N。
         """
-        depth = min(max(args.get('depth', 3), 2), 5)
+        depth = min(max(args.get('depth', 3), 2), 8)
         top_n = min(max(args.get('top_n', 3), 1), 5)
 
         try:
             # 主搜索 — 用快照隔离，不修改 self.game.board
             engine = SearchEngine(
                 max_depth=depth,
-                time_limit=min(15.0, 2.0 + depth * 3.0),
+                time_limit=min(30.0, 2.0 + depth * 3.0),
             )
             tmp_game = self.game.snapshot()
             tmp_game.current_player = self.current_player

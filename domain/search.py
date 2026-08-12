@@ -138,15 +138,20 @@ class TranspositionTable:
 # 搜索配置
 # ══════════════════════════════════════════════════════════════════════════════
 
-DEFAULT_MAX_DEPTH = 5
+DEFAULT_MAX_DEPTH = 8
 DEFAULT_TIME_LIMIT = SEARCH_TIME_LIMIT
 DEFAULT_QUIESCENCE_DEPTH = 4    # 静态搜索最大额外深度
 QS_EVASION_EXTRA_DEPTH = 4      # 被将军时 qs 允许超出深度上限的额外层数（防长将链无限递归）
 CHECK_EXTENSION_DEPTH = 1       # 将军时加深度（仅每分支一次，防止无限递归）
 NULL_MOVE_R = 2                 # 空着裁剪缩减因子
-NULL_MOVE_MIN_DEPTH = 6         # 空着裁剪最小深度（验证深度=depth-1-R≥3；
+NULL_MOVE_MIN_DEPTH = 7         # 空着裁剪最小深度（验证深度=depth-1-R≥3；
                                 # 浅验证误剪风险高，宁可不裁）
 ZUGZWANG_PIECE_LIMIT = 8        # 少于该子力数不进行空着裁剪（防止逼着误判）
+
+# ── LMR (Late Move Reduction) 配置 ──
+LMR_BASE_REDUCTION = 1          # 基础缩减层数
+LMR_FULL_DEPTH_MOVES = 4        # 前 N 个走法不缩减（全深度搜索）
+LMR_MIN_DEPTH = 3               # 剩余深度 < 此值不缩减（浅层不减以免漏杀）
 
 # Negamax 特殊分值
 JIANGSHA_SCORE = 99999          # 将杀基础分
@@ -390,9 +395,24 @@ class SearchEngine:
                     extended=extended or (ext > 0))
             else:
                 # PVS：零窗口搜索试探（alpha, alpha+1）
-                score = -self._alpha_beta(
-                    game, depth - 1 + ext, -alpha - 1, -alpha, 3 - player,
-                    extended=extended or (ext > 0))
+                # LMR：安静走法且序号靠后时用缩减深度试探
+                is_quiet = (captured == '.')
+                if (is_quiet and depth >= LMR_MIN_DEPTH
+                        and i >= LMR_FULL_DEPTH_MOVES and ext == 0):
+                    reduction = LMR_BASE_REDUCTION + (i - LMR_FULL_DEPTH_MOVES) // 4
+                    reduced_depth = max(1, depth - 1 + ext - reduction)
+                    score = -self._alpha_beta(
+                        game, reduced_depth, -alpha - 1, -alpha,
+                        3 - player, extended=extended or (ext > 0))
+                    if score > alpha:
+                        # LMR 结果优于预期 → 重新全深度零窗口搜索
+                        score = -self._alpha_beta(
+                            game, depth - 1 + ext, -alpha - 1, -alpha,
+                            3 - player, extended=extended or (ext > 0))
+                else:
+                    score = -self._alpha_beta(
+                        game, depth - 1 + ext, -alpha - 1, -alpha,
+                        3 - player, extended=extended or (ext > 0))
                 if score > alpha and score < beta:
                     # 走法优于预期 → 重新全窗口搜索
                     score = -self._alpha_beta(

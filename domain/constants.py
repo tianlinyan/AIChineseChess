@@ -6,22 +6,22 @@ BOARD_HEIGHT = 10
 
 # ── AI 配置 ──
 AI_RETRY_LIMIT = 3
-AI_TIMEOUT_SECONDS = 300
+AI_TIMEOUT_SECONDS = 600
 AI_CONNECT_TIMEOUT = 15        # API 连接超时（秒）：与读取超时分离，端点黑洞快速失败
 ARBITRATION_TIMEOUT_SECONDS = 180  # 仲裁超时（秒），比正常 LLM 调用更短
 AI_OUTPUT_TRUNCATE_LENGTH = 1000
 AI_OUTPUT_MIN_TRIM_POSITION = 500
 AI_RETRY_DELAY_MS = 3000
 # ── 搜索引擎配置 ──
-SEARCH_MAX_DEPTH = 5             # 搜索强度 (1-6)：MCTS模拟次数 500~3000，Pikafish时限 depth×3s（封顶 MCTS_TIME_LIMIT=15s）
-SEARCH_TIME_LIMIT = 20.0         # 搜索时间上限（秒）
+SEARCH_MAX_DEPTH = 8             # 搜索强度 (1-8)：MCTS模拟次数 500~5000，Pikafish时限 depth×3s（封顶 MCTS_TIME_LIMIT=30s）
+SEARCH_TIME_LIMIT = 40.0         # 搜索时间上限（秒）
 
 # ── MCTS 配置 ──
-MCTS_TIME_LIMIT = 15.0           # MCTS / Pikafish 时间上限（秒）
+MCTS_TIME_LIMIT = 30.0           # MCTS / Pikafish 时间上限（秒）
 MCTS_EXPLORATION = 1.4           # UCB1 探索参数
 MCTS_PRIOR_STRENGTH = 50         # LLM走法先验强度（虚拟访问次数乘数）
-MCTS_FALLBACK_SIMULATIONS = 500  # 回退搜索模拟次数（后台线程执行，不阻塞 UI）
-MCTS_FALLBACK_TIME_LIMIT = 5.0   # 回退搜索时间上限（秒）
+MCTS_FALLBACK_SIMULATIONS = 800  # 回退搜索模拟次数（后台线程执行，不阻塞 UI）
+MCTS_FALLBACK_TIME_LIMIT = 10.0  # 回退搜索时间上限（秒）
 
 # ── Pikafish 高置信度短路 ──
 PIKAFISH_MULTIPV = 3             # MultiPV 搜索主变数
