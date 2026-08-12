@@ -761,7 +761,7 @@ class GameController:
                 return
 
         # ── Hybrid 模式分歧检测：LLM ≠ 引擎 → 启动第三方仲裁 ──
-        if (self._ai_mode_for(player) == 'hybrid' and self._hybrid_engine_move
+        if (self._ai_mode_for(current_player) == 'hybrid' and self._hybrid_engine_move
                 and final_move != self._hybrid_engine_move):
             # 暂存双方走法，启动 DeepSeek 仲裁
             self._arbitration_llm_move = final_move
@@ -788,7 +788,7 @@ class GameController:
             return  # 暂不执行走子，等待仲裁结果
 
         # ── Hybrid 模式且 LLM 采纳了引擎走法 → 记一致性日志（最常见路径不再静默）──
-        if (self._ai_mode_for(player) == 'hybrid' and self._hybrid_engine_move
+        if (self._ai_mode_for(current_player) == 'hybrid' and self._hybrid_engine_move
                 and final_move == self._hybrid_engine_move):
             self.log("🤝 LLM 与引擎意见一致", 'INFO')
 
