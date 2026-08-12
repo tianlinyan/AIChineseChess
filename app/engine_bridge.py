@@ -73,17 +73,18 @@ class EngineBridge(QObject):
         return self._pikafish
 
     def init_pikafish(self) -> None:
-        """延迟初始化 Pikafish。需在 main 就绪后调用（日志需要 log_manager）。"""
+        """延迟初始化 Pikafish + NNUE。需在 main 就绪后调用。"""
         if self._pikafish_ready:
             return
         self._pikafish_ready = True
 
+        # ── Pikafish ──
         if PikafishEngine is None:
             return
         try:
             self._pikafish = PikafishEngine()
             if self._pikafish.available:
-                self._log("Pikafish 引擎已就绪（NNUE 评估，大师级棋力）", 'INFO')
+                self._log("🐟 Pikafish 引擎已就绪（NNUE 评估，大师级棋力）", 'INFO')
             else:
                 err = self._pikafish.error_msg
                 if err:
@@ -93,6 +94,18 @@ class EngineBridge(QObject):
         except Exception as e:
             self._log(f"[Pikafish] 初始化异常: {e}", 'WARNING')
             self._pikafish = None
+
+        # ── 本地 NNUE 评估网络 ──
+        try:
+            from domain.nnue import get_nnue
+            nnue = get_nnue()
+            if nnue is not None:
+                self._log("🧠 本地 NNUE 评估网络已加载 "
+                          "(Alpha-Beta 搜索加速)", 'INFO')
+            else:
+                self._log("🧠 本地 NNUE 权重未找到，搜索使用手工评估", 'INFO')
+        except Exception as e:
+            self._log(f"[NNUE] 加载异常: {e}", 'WARNING')
 
     def start_search(self, game: ChineseChessGame, player: int,
                      on_done: Callable) -> None:
