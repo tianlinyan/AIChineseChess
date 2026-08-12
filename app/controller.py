@@ -712,7 +712,7 @@ class GameController:
 
         # ── LLM 失败 → 直接采用引擎结果，不仲裁 ──
         if error or not from_coord or not to_coord:
-            if ai_mode == 'hybrid':
+            if self._ai_mode_for(current_player) == 'hybrid':
                 self.log(f"{player_name} LLM 调用失败 ({error or '无有效走法'})，直接采用引擎走法", 'WARNING')
                 self._fallback_hybrid_engine(current_player)
                 return
@@ -730,7 +730,7 @@ class GameController:
                 f"坐标 '{from_coord}'→'{to_coord}' 无法解析。"
                 f"请确保坐标格式正确：列字母 A~I，行数字 1~10。"
             )
-            if ai_mode == 'hybrid':
+            if self._ai_mode_for(current_player) == 'hybrid':
                 self.log(f"{player_name} 坐标解析失败，直接采用引擎走法", 'WARNING')
                 self._fallback_hybrid_engine(current_player)
                 return
@@ -752,7 +752,7 @@ class GameController:
         # ── Hybrid 模式合法性预检：非法走法直接用引擎兜底，
         #    不进入仲裁（否则仲裁一个非法候选，最终可能随机落子，
         #    而验证过的引擎走法明明可用）──
-        if ai_mode == 'hybrid':
+        if self._ai_mode_for(current_player) == 'hybrid':
             legal_moves = self.game.get_all_legal_moves(current_player)
             if final_move not in legal_moves:
                 self.last_move_error = f"{from_coord}→{to_coord}（原因：走法不合法）"
@@ -798,7 +798,7 @@ class GameController:
             reason = result.get('message', '未知原因')
             self.last_move_error = f"{from_coord}→{to_coord}（原因：{reason}）"
 
-            if ai_mode == 'hybrid':
+            if self._ai_mode_for(current_player) == 'hybrid':
                 self.log(f"{player_name} 走子非法 ({reason})，直接采用引擎走法", 'WARNING')
                 self._fallback_hybrid_engine(current_player, final_move)
                 return
