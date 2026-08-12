@@ -209,12 +209,12 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
             Xb = X_train[start:end]
             yb = y_train[start:end]
 
-            # ── 前向传播（训练时用 ReLU，不用 ClippedReLU）──
+            # ── 前向传播（ClippedReLU，与推理一致）──
             h1 = np.dot(Xb, w1) + b1
-            h1_activated = np.maximum(0, h1)  # ReLU
+            h1_activated = np.clip(h1, 0, QA)  # ClippedReLU
 
             h2 = np.dot(h1_activated, w2) + b2
-            h2_activated = np.maximum(0, h2)  # ReLU
+            h2_activated = np.clip(h2, 0, QA)  # ClippedReLU
 
             y_pred = np.dot(h2_activated, w3) + b3
 
@@ -232,15 +232,15 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
             db3 = np.sum(dy)
             dh2 = np.outer(dy, w3)  # (m, H2)
 
-            # 第二隐藏层梯度（通过 ReLU）
-            dh2[h2 <= 0] = 0
+            # 第二隐藏层梯度（通过 ClippedReLU：h<=0 或 h>=QA 时梯度为0）
+            dh2[(h2 <= 0) | (h2 >= QA)] = 0
 
             dw2 = np.dot(h1_activated.T, dh2)
             db2 = np.sum(dh2, axis=0)
             dh1 = np.dot(dh2, w2.T)
 
-            # 第一隐藏层梯度（通过 ReLU）
-            dh1[h1 <= 0] = 0
+            # 第一隐藏层梯度（通过 ClippedReLU）
+            dh1[(h1 <= 0) | (h1 >= QA)] = 0
 
             # 稀疏输入梯度：只对非零输入更新权重
             dw1 = np.dot(Xb.T, dh1)
@@ -255,9 +255,9 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
             w3 -= lr * (dw3 + WEIGHT_DECAY * w3)
             b3 -= lr * db3
 
-        # ── 验证（ReLU）──
-        h1_v = np.maximum(0, np.dot(X_val, w1) + b1)
-        h2_v = np.maximum(0, np.dot(h1_v, w2) + b2)
+        # ── 验证（ClippedReLU）──
+        h1_v = np.clip(np.dot(X_val, w1) + b1, 0, QA)
+        h2_v = np.clip(np.dot(h1_v, w2) + b2, 0, QA)
         y_v = np.dot(h2_v, w3) + b3
         val_loss = np.mean((y_v - y_val) ** 2)
 
@@ -277,9 +277,9 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
     net._w1, net._b1, net._w2, net._b2, net._w3, net._b3 = best_weights
     net._loaded = True
 
-    # 验证集表现（ReLU）
-    h1_f = np.maximum(0, np.dot(X_val, net._w1) + net._b1)
-    h2_f = np.maximum(0, np.dot(h1_f, net._w2) + net._b2)
+    # 验证集表现（ClippedReLU）
+    h1_f = np.clip(np.dot(X_val, net._w1) + net._b1, 0, QA)
+    h2_f = np.clip(np.dot(h1_f, net._w2) + net._b2, 0, QA)
     y_f = np.dot(h2_f, net._w3) + net._b3
     mae = np.mean(np.abs(y_f - y_val))
     corr = np.corrcoef(y_f, y_val)[0, 1]

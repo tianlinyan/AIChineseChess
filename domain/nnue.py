@@ -126,6 +126,9 @@ class NnueNet:
 
     def save_weights(self, path: str) -> None:
         """将网络权重保存为二进制文件（用于训练后导出）。"""
+        if not self._loaded or self._w1 is None:
+            raise RuntimeError('网络未加载，无法保存权重')
+
         def write_vec(arr: np.ndarray, fp):
             quant = np.clip(np.round(arr * QB), -32768, 32767).astype(np.int16)
             fp.write(quant.tobytes())
@@ -300,4 +303,12 @@ def get_nnue() -> Optional[NnueNet]:
     if not _nnue_checked:
         _nnue_net = NnueNet()
         _nnue_checked = True
+    return _nnue_net if _nnue_net.available else None
+
+
+def reload_nnue() -> Optional[NnueNet]:
+    """强制重新加载 NNUE 权重（用于训练后热更新）。"""
+    global _nnue_net, _nnue_checked
+    _nnue_net = NnueNet()
+    _nnue_checked = True
     return _nnue_net if _nnue_net.available else None

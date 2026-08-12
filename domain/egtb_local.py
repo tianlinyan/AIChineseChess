@@ -22,7 +22,6 @@ Usage:
 
 import os
 import struct
-import itertools
 from typing import Optional, Tuple, Dict, Set, List
 
 from domain.constants import BOARD_WIDTH, BOARD_HEIGHT

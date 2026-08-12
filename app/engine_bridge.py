@@ -221,7 +221,7 @@ class EngineBridge(QObject):
                 pf._available = False
                 # 继续往下走 MCTS
             else:
-                self._log("  🐟 Pikafish 提示搜索中（15s）...", 'INFO')
+                self._log(f"  🐟 Pikafish 提示搜索中（{int(MCTS_TIME_LIMIT)}s）...", 'INFO')
                 self._start_pf_hint(g, game_version, cancel_version, on_done)
                 return
 

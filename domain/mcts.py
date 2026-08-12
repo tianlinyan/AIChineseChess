@@ -24,9 +24,8 @@ import math
 import random
 from typing import Optional, Callable, Dict, List, Tuple
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_PRIOR_STRENGTH, MCTS_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
+from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
 from domain.evaluation import evaluate
-from domain.game import ChineseChessGame
 from domain.search import SearchEngine
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -36,7 +35,6 @@ from domain.search import SearchEngine
 DEFAULT_SIMULATIONS = 2000      # 默认模拟次数
 DEFAULT_TIME_LIMIT = MCTS_TIME_LIMIT       # 时间上限（秒），从 constants.py 统一管理
 DEFAULT_EXPLORATION = 1.4       # UCB1 探索参数
-PRIOR_STRENGTH = MCTS_PRIOR_STRENGTH  # from domain/constants.py
 
 
 # ══════════════════════════════════════════════════════════════════════════════

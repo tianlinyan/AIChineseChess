@@ -241,7 +241,8 @@ class SearchEngine:
         self._best_score = 0.0
         self._init_killers()
         self._history_table = {}
-        self._tt.clear()
+        # 重置走法排序表（每步独立），但保留置换表跨步复用
+        # self._tt.clear()  -- 已移除：100万条目跨步复用节省30-50%节点
 
         # ── NNUE 累加器初始化 ──
         if self._nnue is not None:
@@ -521,7 +522,7 @@ class SearchEngine:
                     return beta
                 best = max(best, score)
                 alpha = max(alpha, score)
-            return alpha if best != float('-inf') else stand_pat
+            return best if best != float('-inf') else stand_pat  # fail-soft
 
         if stand_pat >= beta:
             return beta
