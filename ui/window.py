@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
 
         # ── 中间面板（棋盘） ──
         self.middle_panel = QWidget()
+        self.middle_panel.setStyleSheet("background-color: #1a1a1e;")
         self.middle_panel.setMinimumWidth(MIDDLE_PANEL_MIN_WIDTH)
         middle_layout = QVBoxLayout(self.middle_panel)
         middle_layout.setSpacing(0)
@@ -129,6 +130,7 @@ class MainWindow(QMainWindow):
 
         # ── 右侧面板（日志） ──
         self.right_panel = QWidget()
+        self.right_panel.setStyleSheet("background-color: #1a1a1e;")
         right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(5, 0, 5, 15)
 
