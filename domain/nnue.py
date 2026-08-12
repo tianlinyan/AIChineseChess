@@ -68,12 +68,23 @@ class NnueNet:
         self._b3: float = 0.0
 
         self._loaded = False
+        self._weight_path = weight_path
         if os.path.isfile(weight_path):
             try:
                 self._load_weights(weight_path)
                 self._loaded = True
-            except Exception:
-                pass  # 解析失败，保持未加载状态
+                import sys
+                size_kb = os.path.getsize(weight_path) / 1024
+                print(f'[NNUE] 权重已加载: {os.path.basename(weight_path)} '
+                      f'({size_kb:.0f}KB, {HIDDEN1_DIM}→{HIDDEN2_DIM}→1)',
+                      file=sys.stderr, flush=True)
+            except Exception as e:
+                import sys
+                print(f'[NNUE] 权重加载失败: {e}', file=sys.stderr, flush=True)
+        else:
+            import sys
+            print(f'[NNUE] 权重文件未找到 ({weight_path})，回退到手评',
+                  file=sys.stderr, flush=True)
 
     @property
     def available(self) -> bool:
