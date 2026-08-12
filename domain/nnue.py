@@ -28,8 +28,8 @@ from domain.constants import BOARD_WIDTH, BOARD_HEIGHT
 
 # ── 网络架构常量 ──
 INPUT_DIM = 1260          # 90 格 × 14 种棋子类型
-HIDDEN1_DIM = 256         # 第一隐藏层
-HIDDEN2_DIM = 32          # 第二隐藏层
+HIDDEN1_DIM = 512         # 第一隐藏层
+HIDDEN2_DIM = 64          # 第二隐藏层
 QA = 255                   # ClippedReLU 量化上限
 QB = 64                    # 权重/偏置量化缩放因子
 

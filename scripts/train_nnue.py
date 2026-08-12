@@ -25,13 +25,13 @@ from domain.pikafish import PikafishEngine
 from domain.nnue import NnueNet, INPUT_DIM, HIDDEN1_DIM, HIDDEN2_DIM, QA
 
 # ── 训练配置 ──
-QUICK_SAMPLES = 1000         # 快速模式：1000 样本
-FULL_SAMPLES = 50000         # 完整模式：50,000 样本
-BATCH_SIZE = 128
+QUICK_SAMPLES = 5000          # 快速模式：5000 样本
+FULL_SAMPLES = 50000          # 完整模式：50,000 样本
+BATCH_SIZE = 256
 LEARNING_RATE = 0.01
-EPOCHS = 50
-WEIGHT_DECAY = 1e-4
-VALIDATION_SPLIT = 0.1
+EPOCHS = 150
+WEIGHT_DECAY = 1e-6
+VALIDATION_SPLIT = 0.15
 DATA_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                          'data', 'train_data.npz')
 WEIGHT_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
@@ -39,68 +39,71 @@ WEIGHT_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
 
 
 def generate_training_data(n_samples: int) -> tuple:
-    """用 Pikafish 评估随机局面，生成训练数据。
+    """用手工评估函数 + 对弈生成多样化训练数据。
 
-    对每个样本：随机走 8-30 步棋到达一个中局/残局局面，
-    用 Pikafish 搜索 0.5s 获取 NNUE 评估分作为标签。
+    知识蒸馏策略：用现有 evaluate()（手工特征模型）作为教师，
+    在多样化局面上生成训练标签。无需 Pikafish，数据生成即时完成。
+    NN 学习教师模型的知识，同时可能捕获非线性交互。
 
     Returns:
         (features: np.ndarray (N, INPUT_DIM),
-         scores: np.ndarray (N,))  — scores 是红方视角 centipawn/100
+         scores: np.ndarray (N,)) — scores 红方视角 centipawn/100
     """
-    print(f'正在用 Pikafish 生成 {n_samples} 个训练样本...')
-    engine = PikafishEngine()
-    if not engine.available:
-        print('⚠ Pikafish 不可用，无法生成训练数据')
-        print(f'  {engine.error_msg}')
-        return None, None
+    from domain.evaluation import evaluate
 
+    print(f'正在生成 {n_samples} 个训练样本（手工评估教师模型）...')
     features_list = []
     scores_list = []
     game = ChineseChessGame()
+    batch_size = 500
 
-    batch_size = 200
     for i in range(n_samples):
-        # 随机走子到达随机局面
+        # 用随机走子 + 偶尔好走子来模拟真实对局
         g = ChineseChessGame()
-        n_moves = np.random.randint(4, 25)
-        for _ in range(n_moves):
+        n_moves = np.random.randint(2, 50)
+        for step in range(n_moves):
             moves = g.get_all_legal_moves(g.current_player)
             if not moves:
                 break
             mv = moves[np.random.randint(len(moves))]
-            g.move_piece(*mv)
-            if g.game_over:
+            result = g.move_piece(*mv)
+            if not result['success'] or g.game_over:
                 break
 
         if g.game_over:
             continue
 
-        # 用 Pikafish 评估
-        player = g.current_player
-        move = engine.search(g, player, time_ms=500)
-        if move is None:
-            continue
+        # 计算局面信息
+        board = g.board
+        total_pieces = sum(1 for r in range(10) for c in range(9)
+                          if board[r][c] != '.')
+        endgame = total_pieces <= 14
+        red_check = g.is_in_check(1)
+        black_check = g.is_in_check(2)
 
-        # 从 MultiPV 获取评分
-        top_moves = engine.get_top_moves_scores()
-        if top_moves:
-            best_score_cp = top_moves[0][1]  # centipawn，走子方视角
-        else:
-            continue
+        # 教师模型评估：完整的 evaluate() 含走法数（增加信号多样性）
+        try:
+            legal_red = len(g.get_all_legal_moves(1))
+            legal_black = len(g.get_all_legal_moves(2))
+        except Exception:
+            legal_red = legal_black = 0
 
-        # 转换为红方视角
-        red_score = best_score_cp if player == 1 else -best_score_cp
+        score = evaluate(
+            board,
+            legal_moves_red=legal_red,
+            legal_moves_black=legal_black,
+            red_in_check=red_check,
+            black_in_check=black_check,
+            endgame=endgame,
+        )
 
-        # 提取特征
-        features = NnueNet.extract_features(g.board)
+        features = NnueNet.extract_features(board)
         features_list.append(features)
-        scores_list.append(red_score / 100.0)  # 缩放
+        scores_list.append(score / 100.0)  # 缩放到 centipawn/100
 
         if (i + 1) % batch_size == 0:
             print(f'  已生成 {i + 1}/{n_samples} 样本')
 
-    engine.close()
     X = np.array(features_list, dtype=np.float32)
     y = np.array(scores_list, dtype=np.float32)
     print(f'  完成：{len(y)} 个有效样本')
@@ -155,14 +158,14 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
             Xb = X_train[start:end]
             yb = y_train[start:end]
 
-            # ── 前向传播 ──
+            # ── 前向传播（训练时用 ReLU，不用 ClippedReLU）──
             h1 = np.dot(Xb, w1) + b1
-            h1_clipped = np.clip(h1, 0, QA)
+            h1_activated = np.maximum(0, h1)  # ReLU
 
-            h2 = np.dot(h1_clipped, w2) + b2
-            h2_clipped = np.clip(h2, 0, QA)
+            h2 = np.dot(h1_activated, w2) + b2
+            h2_activated = np.maximum(0, h2)  # ReLU
 
-            y_pred = np.dot(h2_clipped, w3) + b3
+            y_pred = np.dot(h2_activated, w3) + b3
 
             # ── MSE 损失 ──
             err = y_pred - yb
@@ -173,22 +176,20 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
             # ── 反向传播 ──
             m = len(Xb)
             # 输出层梯度
-            dy = (2.0 / m) * err
-            dw3 = np.dot(h2_clipped.T, dy)
+            dy = (2.0 / m) * err  # (m,)
+            dw3 = np.dot(h2_activated.T, dy)  # (H2, m) @ (m,) = (H2,)
             db3 = np.sum(dy)
-            dh2 = np.dot(dy, w3.T)
+            dh2 = np.outer(dy, w3)  # (m, H2)
 
-            # 第二隐藏层梯度（通过 ClippedReLU）
+            # 第二隐藏层梯度（通过 ReLU）
             dh2[h2 <= 0] = 0
-            dh2[h2 >= QA] = 0
 
-            dw2 = np.dot(h1_clipped.T, dh2)
+            dw2 = np.dot(h1_activated.T, dh2)
             db2 = np.sum(dh2, axis=0)
             dh1 = np.dot(dh2, w2.T)
 
-            # 第一隐藏层梯度
+            # 第一隐藏层梯度（通过 ReLU）
             dh1[h1 <= 0] = 0
-            dh1[h1 >= QA] = 0
 
             # 稀疏输入梯度：只对非零输入更新权重
             dw1 = np.dot(Xb.T, dh1)
@@ -203,9 +204,9 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
             w3 -= lr * (dw3 + WEIGHT_DECAY * w3)
             b3 -= lr * db3
 
-        # ── 验证 ──
-        h1_v = np.clip(np.dot(X_val, w1) + b1, 0, QA)
-        h2_v = np.clip(np.dot(h1_v, w2) + b2, 0, QA)
+        # ── 验证（ReLU）──
+        h1_v = np.maximum(0, np.dot(X_val, w1) + b1)
+        h2_v = np.maximum(0, np.dot(h1_v, w2) + b2)
         y_v = np.dot(h2_v, w3) + b3
         val_loss = np.mean((y_v - y_val) ** 2)
 
@@ -222,13 +223,12 @@ def train_network(X: np.ndarray, y: np.ndarray) -> NnueNet:
 
     # ── 构建最终网络 ──
     net = NnueNet.__new__(NnueNet)
-    net._w1, net._b1, net._w2, net._b2, net._w3 = best_weights
-    net._b3 = b3
+    net._w1, net._b1, net._w2, net._b2, net._w3, net._b3 = best_weights
     net._loaded = True
 
-    # 验证集上的表现
-    h1_f = np.clip(np.dot(X_val, net._w1) + net._b1, 0, QA)
-    h2_f = np.clip(np.dot(h1_f, net._w2) + net._b2, 0, QA)
+    # 验证集表现（ReLU）
+    h1_f = np.maximum(0, np.dot(X_val, net._w1) + net._b1)
+    h2_f = np.maximum(0, np.dot(h1_f, net._w2) + net._b2)
     y_f = np.dot(h2_f, net._w3) + net._b3
     mae = np.mean(np.abs(y_f - y_val))
     corr = np.corrcoef(y_f, y_val)[0, 1]

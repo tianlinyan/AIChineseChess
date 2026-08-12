@@ -194,7 +194,8 @@ def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
                 board = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
                 board[rk_pos[0]][rk_pos[1]] = 'K'
                 board[bk_pos[0]][bk_pos[1]] = 'k'
-                if not _is_king_facing(board) and not _is_in_check(board, 1) and not _is_in_check(board, 2):
+                # 合法局面（不面对面即可，将军局面也保留给 DTM）
+                if not _is_king_facing(board):
                     h = _board_to_index(board)
                     positions[h] = [row[:] for row in board]
                 continue
@@ -212,10 +213,10 @@ def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
                     g.board = [r[:] for r in board]
                     g._king_pos[1] = rk_pos
                     g._king_pos[2] = bk_pos
-                    # 检查走子方（当前是红方先走）不被将军
-                    if not g.is_in_check(1) and not g.is_in_check(2):
-                        h = _board_to_index(board)
-                        positions[h] = [row[:] for row in board]
+                    # 合法局面：双方将都在 palace，不面对面
+                    # （将军局面也保留 —— DTM 需要它们来检测将死）
+                    h = _board_to_index(board)
+                    positions[h] = [row[:] for row in board]
             elif n == 2:
                 for i, sq1 in enumerate(available):
                     for sq2 in available[i+1:]:
@@ -230,9 +231,9 @@ def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
                         g.board = [r[:] for r in board]
                         g._king_pos[1] = rk_pos
                         g._king_pos[2] = bk_pos
-                        if not g.is_in_check(1) and not g.is_in_check(2):
-                            h = _board_to_index(board)
-                            positions[h] = [row[:] for row in board]
+                        # 合法局面（不面对面即可）
+                        h = _board_to_index(board)
+                        positions[h] = [row[:] for row in board]
 
     return positions
 
