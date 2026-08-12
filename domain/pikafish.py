@@ -140,6 +140,29 @@ class PikafishEngine:
 
     # ── 公开接口（兼容 MCTSEngine） ──
 
+    def evaluate_position(self, game, player: int,
+                          depth: int = 1) -> Optional[int]:
+        """快速评估局面 — go depth N，返回走子方视角 centipawn 评分。"""
+        if not self._available:
+            return None
+
+        with self._lock:
+            try:
+                self._top_moves = []  # 清除缓存，确保读到本次搜索结果
+                fen = board_to_fen(game.board, player)
+                self._purge_lines()
+                self._send(f'position fen {fen}')
+                self._send(f'go depth {depth}')
+
+                best_move_uci = self._read_bestmove(5000)
+                if not best_move_uci:
+                    return None
+                if self._top_moves:
+                    return self._top_moves[0][1]
+            except (OSError, ValueError, BrokenPipeError):
+                pass
+            return None
+
     def search(self,
                game,
                player: int,
@@ -164,7 +187,7 @@ class PikafishEngine:
 
         with self._lock:
             try:
-                # 标准 FEN（row 0 = 黑方底线），与 Pikafish startpos 约定一致
+                self._top_moves = []  # 清除缓存
                 fen = board_to_fen(game.board, player)
                 self._purge_lines()
                 self._send(f'position fen {fen}')
