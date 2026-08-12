@@ -147,7 +147,7 @@ def setup_left_expanded(parent) -> None:
     title_layout.setContentsMargins(0, 6, 0, 2)
     title = QLabel("🔴⚫ AI 中国象棋")
     title.setStyleSheet(
-        "font-size: 15px; font-weight: bold; color: #5a8fc5; "
+        "font-size: 20px; font-weight: bold; color: #5a8fc5; "
         "padding: 4px 0 2px 6px;"
     )
     title_layout.addWidget(title)
