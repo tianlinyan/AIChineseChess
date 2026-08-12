@@ -12,8 +12,8 @@ def _section_label(text: str) -> QLabel:
     """统一的小节标题样式。"""
     label = QLabel(text)
     label.setStyleSheet(
-        "font-size: 13px; font-weight: bold; color: #7eb8da; "
-        "padding: 4px 0 2px 4px;"
+        "font-size: 11px; font-weight: bold; color: #7eb8da; "
+        "padding: 2px 0 0px 4px;"
     )
     return label
 
@@ -29,28 +29,28 @@ def _h_separator() -> QFrame:
 
 
 def _group_style(title_color: str = "#7eb8da") -> str:
-    """统一的 QGroupBox 样式，避免 4 处重复。"""
+    """统一的 QGroupBox 样式。"""
     return (
-        "QGroupBox { font-weight: bold; color: #b0b0b0; border: 1px solid #444; "
-        "margin-top: 10px; padding: 12px 8px 8px 8px; }"
-        "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
-        f"padding: 0 6px; color: {title_color}; }}"
+        "QGroupBox { font-weight: bold; font-size: 11px; color: #b0b0b0; "
+        "border: 1px solid #444; margin-top: 6px; padding: 6px 6px 4px 6px; }"
+        "QGroupBox::title { subcontrol-origin: margin; left: 8px; "
+        f"padding: 0 4px; color: {title_color}; }}"
     )
 
 
 def setup_left_expanded(parent) -> None:
     """在 parent (MainWindow) 上构建左侧展开面板的所有控件"""
     layout = QVBoxLayout(parent.left_expanded)
-    layout.setContentsMargins(8, 0, 8, 8)
-    layout.setSpacing(6)
+    layout.setContentsMargins(6, 0, 6, 4)
+    layout.setSpacing(3)
 
     # ── 标题行 ──
     title_layout = QHBoxLayout()
-    title_layout.setContentsMargins(0, 4, 0, 0)
+    title_layout.setContentsMargins(0, 2, 0, 0)
     title = QLabel("🔴⚫ AI 中国象棋")
     title.setStyleSheet(
-        "font-size: 20px; font-weight: bold; color: #4a6fa5; "
-        "padding: 12px 0 4px 4px;"
+        "font-size: 16px; font-weight: bold; color: #4a6fa5; "
+        "padding: 6px 0 2px 4px;"
     )
     title_layout.addWidget(title)
     parent.expand_collapse_btn = QPushButton("◀")
@@ -68,7 +68,7 @@ def setup_left_expanded(parent) -> None:
     # ── 🔴 红方（先手）──
     layout.addWidget(_section_label("🔴 红方（先手）"))
     parent.model1_combo = QComboBox()
-    parent.model1_combo.setMinimumHeight(28)
+    parent.model1_combo.setMinimumHeight(24)
     parent.model1_combo.currentIndexChanged.connect(parent.on_model1_changed)
     layout.addWidget(parent.model1_combo)
 
@@ -76,23 +76,26 @@ def setup_left_expanded(parent) -> None:
     red_engine = QGroupBox("红方 AI 引擎")
     red_engine.setStyleSheet(_group_style("#e06060"))
     red_layout = QGridLayout(red_engine)
-    red_layout.setVerticalSpacing(8)
-    red_layout.setHorizontalSpacing(6)
+    red_layout.setVerticalSpacing(4)
+    red_layout.setHorizontalSpacing(4)
+    red_layout.setContentsMargins(6, 8, 6, 4)
 
-    red_layout.addWidget(QLabel("AI 模式:"), 0, 0)
+    red_layout.addWidget(QLabel("模式:"), 0, 0)
     parent.red_ai_mode_combo = QComboBox()
-    parent.red_ai_mode_combo.addItem("AI + 搜索（推荐）", "hybrid")
+    parent.red_ai_mode_combo.addItem("AI + 搜索", "hybrid")
     parent.red_ai_mode_combo.addItem("仅搜索", "search_only")
     parent.red_ai_mode_combo.addItem("仅 AI", "llm_only")
     parent.red_ai_mode_combo.setCurrentIndex(0)
+    parent.red_ai_mode_combo.setMinimumHeight(24)
     parent.red_ai_mode_combo.currentIndexChanged.connect(parent.on_red_ai_mode_changed)
     red_layout.addWidget(parent.red_ai_mode_combo, 0, 1)
 
-    red_layout.addWidget(QLabel("搜索深度:"), 1, 0)
+    red_layout.addWidget(QLabel("深度:"), 1, 0)
     parent.red_search_depth_spin = QSpinBox()
     parent.red_search_depth_spin.setRange(1, 8)
     parent.red_search_depth_spin.setValue(5)
-    parent.red_search_depth_spin.setToolTip("红方搜索强度 1~8：控制 MCTS 模拟次数（500~5000）")
+    parent.red_search_depth_spin.setMinimumHeight(24)
+    parent.red_search_depth_spin.setToolTip("红方搜索强度 1~8，越高越准越慢")
     parent.red_search_depth_spin.valueChanged.connect(parent.on_red_search_depth_changed)
     red_layout.addWidget(parent.red_search_depth_spin, 1, 1)
 
@@ -109,7 +112,7 @@ def setup_left_expanded(parent) -> None:
     # ── ⚫ 黑方（后手）──
     layout.addWidget(_section_label("⚫ 黑方（后手）"))
     parent.model2_combo = QComboBox()
-    parent.model2_combo.setMinimumHeight(28)
+    parent.model2_combo.setMinimumHeight(24)
     parent.model2_combo.currentIndexChanged.connect(parent.on_model2_changed)
     layout.addWidget(parent.model2_combo)
 
@@ -117,23 +120,26 @@ def setup_left_expanded(parent) -> None:
     black_engine = QGroupBox("黑方 AI 引擎")
     black_engine.setStyleSheet(_group_style("#6060e0"))
     black_layout = QGridLayout(black_engine)
-    black_layout.setVerticalSpacing(8)
-    black_layout.setHorizontalSpacing(6)
+    black_layout.setVerticalSpacing(4)
+    black_layout.setHorizontalSpacing(4)
+    black_layout.setContentsMargins(6, 8, 6, 4)
 
-    black_layout.addWidget(QLabel("AI 模式:"), 0, 0)
+    black_layout.addWidget(QLabel("模式:"), 0, 0)
     parent.black_ai_mode_combo = QComboBox()
-    parent.black_ai_mode_combo.addItem("AI + 搜索（推荐）", "hybrid")
+    parent.black_ai_mode_combo.addItem("AI + 搜索", "hybrid")
     parent.black_ai_mode_combo.addItem("仅搜索", "search_only")
     parent.black_ai_mode_combo.addItem("仅 AI", "llm_only")
     parent.black_ai_mode_combo.setCurrentIndex(0)
+    parent.black_ai_mode_combo.setMinimumHeight(24)
     parent.black_ai_mode_combo.currentIndexChanged.connect(parent.on_black_ai_mode_changed)
     black_layout.addWidget(parent.black_ai_mode_combo, 0, 1)
 
-    black_layout.addWidget(QLabel("搜索深度:"), 1, 0)
+    black_layout.addWidget(QLabel("深度:"), 1, 0)
     parent.black_search_depth_spin = QSpinBox()
     parent.black_search_depth_spin.setRange(1, 8)
     parent.black_search_depth_spin.setValue(5)
-    parent.black_search_depth_spin.setToolTip("黑方搜索强度 1~8：控制 MCTS 模拟次数（500~5000）")
+    parent.black_search_depth_spin.setMinimumHeight(24)
+    parent.black_search_depth_spin.setToolTip("黑方搜索强度 1~8，越高越准越慢")
     parent.black_search_depth_spin.valueChanged.connect(parent.on_black_search_depth_changed)
     black_layout.addWidget(parent.black_search_depth_spin, 1, 1)
 
@@ -149,9 +155,10 @@ def setup_left_expanded(parent) -> None:
     ctrl_group = QGroupBox("AI 控制")
     ctrl_group.setStyleSheet(_group_style())
     ctrl_layout = QVBoxLayout(ctrl_group)
-    ctrl_layout.setSpacing(6)
+    ctrl_layout.setSpacing(3)
+    ctrl_layout.setContentsMargins(6, 8, 6, 4)
 
-    parent.vision_check = QCheckBox("使用图像输入（视觉模式）")
+    parent.vision_check = QCheckBox("图像输入（视觉模式）")
     parent.vision_check.setChecked(False)
     ctrl_layout.addWidget(parent.vision_check)
 
@@ -159,7 +166,7 @@ def setup_left_expanded(parent) -> None:
     parent.think_check.setChecked(True)
     ctrl_layout.addWidget(parent.think_check)
 
-    parent.disable_think_check = QCheckBox("禁用 think 参数（兼容模式）")
+    parent.disable_think_check = QCheckBox("禁用 think（兼容模式）")
     parent.disable_think_check.setChecked(False)
     parent.disable_think_check.stateChanged.connect(parent.on_disable_think_changed)
     ctrl_layout.addWidget(parent.disable_think_check)
@@ -168,13 +175,13 @@ def setup_left_expanded(parent) -> None:
 
     # ── 控制按钮 ──
     btn_layout = QVBoxLayout()
-    btn_layout.setSpacing(5)
+    btn_layout.setSpacing(3)
 
     parent.start_btn = QPushButton("▶  开始对弈")
-    parent.start_btn.setMinimumHeight(34)
+    parent.start_btn.setMinimumHeight(28)
     parent.start_btn.setStyleSheet(
         "QPushButton { background-color: #4a9e5a; color: white; border: none; "
-        "border-radius: 4px; padding: 6px; font-size: 13px; font-weight: bold; }"
+        "border-radius: 4px; padding: 4px; font-size: 12px; font-weight: bold; }"
         "QPushButton:hover { background-color: #3a8a4a; }"
         "QPushButton:disabled { background-color: #444; color: #777; }"
     )
@@ -182,17 +189,17 @@ def setup_left_expanded(parent) -> None:
     btn_layout.addWidget(parent.start_btn)
 
     parent.pause_btn = QPushButton("⏸  暂停")
-    parent.pause_btn.setMinimumHeight(30)
+    parent.pause_btn.setMinimumHeight(26)
     parent.pause_btn.setEnabled(False)
     parent.pause_btn.clicked.connect(parent._on_pause_clicked)
     btn_layout.addWidget(parent.pause_btn)
 
     parent.reset_btn = QPushButton("⏹  停止游戏")
-    parent.reset_btn.setMinimumHeight(30)
+    parent.reset_btn.setMinimumHeight(26)
     parent.reset_btn.setEnabled(False)
     parent.reset_btn.setStyleSheet(
         "QPushButton { background-color: #a54a4a; color: white; border: none; "
-        "border-radius: 4px; padding: 6px; font-size: 12px; }"
+        "border-radius: 4px; padding: 4px; font-size: 11px; }"
         "QPushButton:hover { background-color: #8a3a3a; }"
         "QPushButton:disabled { background-color: #444; color: #777; }"
     )
@@ -207,45 +214,48 @@ def setup_left_expanded(parent) -> None:
     status_group = QGroupBox("游戏状态")
     status_group.setStyleSheet(_group_style())
     status_layout = QVBoxLayout(status_group)
-    status_layout.setSpacing(4)
+    status_layout.setSpacing(1)
+    status_layout.setContentsMargins(6, 8, 6, 4)
 
     parent.game_status_label = QLabel("等待开始")
     parent.game_status_label.setStyleSheet(
-        "color: #e0c070; font-weight: bold; font-size: 14px; padding: 2px 0;"
+        "color: #e0c070; font-weight: bold; font-size: 12px; padding: 0;"
     )
     status_layout.addWidget(parent.game_status_label)
 
     parent.turn_label = QLabel("当前回合: —")
-    parent.turn_label.setStyleSheet("color: #ccc; font-size: 12px;")
+    parent.turn_label.setStyleSheet("color: #ccc; font-size: 11px;")
     status_layout.addWidget(parent.turn_label)
 
     parent.total_moves_label = QLabel("总步数: 0")
-    parent.total_moves_label.setStyleSheet("color: #aaa; font-size: 12px;")
+    parent.total_moves_label.setStyleSheet("color: #aaa; font-size: 11px;")
     status_layout.addWidget(parent.total_moves_label)
 
     parent.think_timer_label = QLabel("思考用时: —")
-    parent.think_timer_label.setStyleSheet("color: #888; font-size: 11px;")
+    parent.think_timer_label.setStyleSheet("color: #888; font-size: 10px;")
     status_layout.addWidget(parent.think_timer_label)
 
     # 红黑棋力对比（同行）
     row1 = QHBoxLayout()
+    row1.setSpacing(4)
     parent.red_material_label = QLabel("红: —")
     parent.red_material_label.setStyleSheet(
-        "color: #e06060; font-size: 13px; font-weight: bold;")
+        "color: #e06060; font-size: 12px; font-weight: bold;")
     row1.addWidget(parent.red_material_label)
     parent.black_material_label = QLabel("黑: —")
     parent.black_material_label.setStyleSheet(
-        "color: #6060e0; font-size: 13px; font-weight: bold;")
+        "color: #6060e0; font-size: 12px; font-weight: bold;")
     row1.addWidget(parent.black_material_label)
     status_layout.addLayout(row1)
 
     # 红黑余子对比（同行）
     row2 = QHBoxLayout()
+    row2.setSpacing(4)
     parent.red_pieces_label = QLabel("红子: —")
-    parent.red_pieces_label.setStyleSheet("color: #e06060; font-size: 12px;")
+    parent.red_pieces_label.setStyleSheet("color: #e06060; font-size: 11px;")
     row2.addWidget(parent.red_pieces_label)
     parent.black_pieces_label = QLabel("黑子: —")
-    parent.black_pieces_label.setStyleSheet("color: #6060e0; font-size: 12px;")
+    parent.black_pieces_label.setStyleSheet("color: #6060e0; font-size: 11px;")
     row2.addWidget(parent.black_pieces_label)
     status_layout.addLayout(row2)
 
@@ -255,22 +265,23 @@ def setup_left_expanded(parent) -> None:
     score_group = QGroupBox("🏆 AI 计分 (仲裁)")
     score_group.setStyleSheet(_group_style("#f0c040"))
     score_layout = QVBoxLayout(score_group)
-    score_layout.setSpacing(4)
+    score_layout.setSpacing(1)
+    score_layout.setContentsMargins(6, 8, 6, 4)
 
     parent.ai_score_label = QLabel("得分: 0")
     parent.ai_score_label.setStyleSheet(
-        "color: #f0c040; font-size: 18px; font-weight: bold; padding: 4px;"
+        "color: #f0c040; font-size: 16px; font-weight: bold; padding: 2px;"
     )
     parent.ai_score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     score_layout.addWidget(parent.ai_score_label)
 
     parent.ai_arbitration_count_label = QLabel("仲裁次数: 0")
-    parent.ai_arbitration_count_label.setStyleSheet("color: #aaa; font-size: 11px;")
+    parent.ai_arbitration_count_label.setStyleSheet("color: #aaa; font-size: 10px;")
     parent.ai_arbitration_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     score_layout.addWidget(parent.ai_arbitration_count_label)
 
     parent.ai_score_detail = QLabel("一致 +1 | 不一致 0")
-    parent.ai_score_detail.setStyleSheet("color: #888; font-size: 10px;")
+    parent.ai_score_detail.setStyleSheet("color: #888; font-size: 9px;")
     parent.ai_score_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
     score_layout.addWidget(parent.ai_score_detail)
 
