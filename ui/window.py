@@ -216,21 +216,37 @@ class MainWindow(QMainWindow):
         else:
             self.think_check.setEnabled(True)
 
-    # ── AI 引擎控制事件（新增） ──
+    # ── 红方 AI 引擎控制 ──
 
-    def on_ai_mode_changed(self, idx: int) -> None:
-        mode = self.ai_mode_combo.currentData()
+    def on_red_ai_mode_changed(self, idx: int) -> None:
+        mode = self.red_ai_mode_combo.currentData()
         if mode:
-            self.game_controller.ai_mode = mode
-            # 搜索相关控件仅在非 llm_only 模式下启用
+            self.game_controller.red_ai_mode = mode
             search_enabled = mode != 'llm_only'
-            self.search_depth_spin.setEnabled(search_enabled)
+            self.red_search_depth_spin.setEnabled(search_enabled)
+            # 同步黑方（如果黑方也用相同模式的话，维持各自独立设置）
 
-    def on_search_depth_changed(self, value: int) -> None:
-        self.game_controller.search_depth = value
+    def on_red_search_depth_changed(self, value: int) -> None:
+        self.game_controller.red_search_depth = value
 
-    def on_opening_book_changed(self, state: int) -> None:
-        self.game_controller.use_opening_book = (
+    def on_red_opening_book_changed(self, state: int) -> None:
+        self.game_controller.red_use_opening_book = (
+            state == Qt.CheckState.Checked.value)
+
+    # ── 黑方 AI 引擎控制 ──
+
+    def on_black_ai_mode_changed(self, idx: int) -> None:
+        mode = self.black_ai_mode_combo.currentData()
+        if mode:
+            self.game_controller.black_ai_mode = mode
+            search_enabled = mode != 'llm_only'
+            self.black_search_depth_spin.setEnabled(search_enabled)
+
+    def on_black_search_depth_changed(self, value: int) -> None:
+        self.game_controller.black_search_depth = value
+
+    def on_black_opening_book_changed(self, state: int) -> None:
+        self.game_controller.black_use_opening_book = (
             state == Qt.CheckState.Checked.value)
 
     # ── 按钮事件 ──

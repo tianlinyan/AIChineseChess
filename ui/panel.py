@@ -65,52 +65,85 @@ def setup_left_expanded(parent) -> None:
 
     layout.addWidget(_h_separator())
 
-    # ── 对弈模型 ──
+    # ── 🔴 红方（先手）──
     layout.addWidget(_section_label("🔴 红方（先手）"))
     parent.model1_combo = QComboBox()
     parent.model1_combo.setMinimumHeight(28)
     parent.model1_combo.currentIndexChanged.connect(parent.on_model1_changed)
     layout.addWidget(parent.model1_combo)
 
+    # 红方 AI 引擎
+    red_engine = QGroupBox("红方 AI 引擎")
+    red_engine.setStyleSheet(_group_style("#e06060"))
+    red_layout = QGridLayout(red_engine)
+    red_layout.setVerticalSpacing(8)
+    red_layout.setHorizontalSpacing(6)
+
+    red_layout.addWidget(QLabel("AI 模式:"), 0, 0)
+    parent.red_ai_mode_combo = QComboBox()
+    parent.red_ai_mode_combo.addItem("AI + 搜索（推荐）", "hybrid")
+    parent.red_ai_mode_combo.addItem("仅搜索", "search_only")
+    parent.red_ai_mode_combo.addItem("仅 AI", "llm_only")
+    parent.red_ai_mode_combo.setCurrentIndex(0)
+    parent.red_ai_mode_combo.currentIndexChanged.connect(parent.on_red_ai_mode_changed)
+    red_layout.addWidget(parent.red_ai_mode_combo, 0, 1)
+
+    red_layout.addWidget(QLabel("搜索深度:"), 1, 0)
+    parent.red_search_depth_spin = QSpinBox()
+    parent.red_search_depth_spin.setRange(1, 8)
+    parent.red_search_depth_spin.setValue(5)
+    parent.red_search_depth_spin.setToolTip("红方搜索强度 1~8：控制 MCTS 模拟次数（500~5000）")
+    parent.red_search_depth_spin.valueChanged.connect(parent.on_red_search_depth_changed)
+    red_layout.addWidget(parent.red_search_depth_spin, 1, 1)
+
+    parent.red_opening_book_check = QCheckBox("开局库")
+    parent.red_opening_book_check.setChecked(True)
+    parent.red_opening_book_check.setToolTip("红方使用开局库快速出子")
+    parent.red_opening_book_check.stateChanged.connect(parent.on_red_opening_book_changed)
+    red_layout.addWidget(parent.red_opening_book_check, 1, 2)
+
+    layout.addWidget(red_engine)
+
+    layout.addWidget(_h_separator())
+
+    # ── ⚫ 黑方（后手）──
     layout.addWidget(_section_label("⚫ 黑方（后手）"))
     parent.model2_combo = QComboBox()
     parent.model2_combo.setMinimumHeight(28)
     parent.model2_combo.currentIndexChanged.connect(parent.on_model2_changed)
     layout.addWidget(parent.model2_combo)
 
-    layout.addWidget(_h_separator())
+    # 黑方 AI 引擎
+    black_engine = QGroupBox("黑方 AI 引擎")
+    black_engine.setStyleSheet(_group_style("#6060e0"))
+    black_layout = QGridLayout(black_engine)
+    black_layout.setVerticalSpacing(8)
+    black_layout.setHorizontalSpacing(6)
 
-    # ── AI 引擎 ──
-    engine_group = QGroupBox("AI 引擎")
-    engine_group.setStyleSheet(_group_style())
-    engine_layout = QGridLayout(engine_group)
-    engine_layout.setVerticalSpacing(10)
-    engine_layout.setHorizontalSpacing(8)
+    black_layout.addWidget(QLabel("AI 模式:"), 0, 0)
+    parent.black_ai_mode_combo = QComboBox()
+    parent.black_ai_mode_combo.addItem("AI + 搜索（推荐）", "hybrid")
+    parent.black_ai_mode_combo.addItem("仅搜索", "search_only")
+    parent.black_ai_mode_combo.addItem("仅 AI", "llm_only")
+    parent.black_ai_mode_combo.setCurrentIndex(0)
+    parent.black_ai_mode_combo.currentIndexChanged.connect(parent.on_black_ai_mode_changed)
+    black_layout.addWidget(parent.black_ai_mode_combo, 0, 1)
 
-    engine_layout.addWidget(QLabel("AI 模式:"), 0, 0)
-    parent.ai_mode_combo = QComboBox()
-    parent.ai_mode_combo.addItem("AI + 搜索（推荐）", "hybrid")
-    parent.ai_mode_combo.addItem("仅搜索", "search_only")
-    parent.ai_mode_combo.addItem("仅 AI", "llm_only")
-    parent.ai_mode_combo.setCurrentIndex(0)
-    parent.ai_mode_combo.currentIndexChanged.connect(parent.on_ai_mode_changed)
-    engine_layout.addWidget(parent.ai_mode_combo, 0, 1, 1, 2)
+    black_layout.addWidget(QLabel("搜索深度:"), 1, 0)
+    parent.black_search_depth_spin = QSpinBox()
+    parent.black_search_depth_spin.setRange(1, 8)
+    parent.black_search_depth_spin.setValue(5)
+    parent.black_search_depth_spin.setToolTip("黑方搜索强度 1~8：控制 MCTS 模拟次数（500~5000）")
+    parent.black_search_depth_spin.valueChanged.connect(parent.on_black_search_depth_changed)
+    black_layout.addWidget(parent.black_search_depth_spin, 1, 1)
 
-    engine_layout.addWidget(QLabel("搜索深度:"), 1, 0)
-    parent.search_depth_spin = QSpinBox()
-    parent.search_depth_spin.setRange(1, 6)
-    parent.search_depth_spin.setValue(5)
-    parent.search_depth_spin.setToolTip("搜索强度 1~6：控制 MCTS 模拟次数（500~3000），越高越准越慢")
-    parent.search_depth_spin.valueChanged.connect(parent.on_search_depth_changed)
-    engine_layout.addWidget(parent.search_depth_spin, 1, 1)
+    parent.black_opening_book_check = QCheckBox("开局库")
+    parent.black_opening_book_check.setChecked(True)
+    parent.black_opening_book_check.setToolTip("黑方使用开局库快速出子")
+    parent.black_opening_book_check.stateChanged.connect(parent.on_black_opening_book_changed)
+    black_layout.addWidget(parent.black_opening_book_check, 1, 2)
 
-    parent.opening_book_check = QCheckBox("使用开局库")
-    parent.opening_book_check.setChecked(True)
-    parent.opening_book_check.setToolTip("启用开局库可在前 12 步快速出子，节省 token")
-    parent.opening_book_check.stateChanged.connect(parent.on_opening_book_changed)
-    engine_layout.addWidget(parent.opening_book_check, 1, 2)
-
-    layout.addWidget(engine_group)
+    layout.addWidget(black_engine)
 
     # ── AI 控制 ──
     ctrl_group = QGroupBox("AI 控制")

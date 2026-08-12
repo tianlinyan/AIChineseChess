@@ -11,6 +11,7 @@ from domain.constants import (
     OPENING_BOOK_ENABLED, OPENING_BOOK_MAX_MOVES,
     OPENING_DELAY_MS,
     AI_DEFAULT_MODE, ARBITRATION_TIMEOUT_SECONDS,
+    MCTS_TIME_LIMIT,
     PIECE_SYMBOLS, format_duration, format_coord,
     parse_coord, format_move,
     PROMPT_HISTORY_MAX_ITEMS,
@@ -47,10 +48,13 @@ class GameController:
         self.last_move_error: str = ''
         self.game_version: int = 0
 
-        # ── AI 配置（可被 UI 修改） ──
-        self.ai_mode: str = AI_DEFAULT_MODE  # "hybrid" | "search_only" | "llm_only"
-        self.search_depth: int = SEARCH_MAX_DEPTH
-        self.use_opening_book: bool = OPENING_BOOK_ENABLED
+        # ── AI 配置（红黑独立，可被 UI 修改） ──
+        self.red_ai_mode: str = AI_DEFAULT_MODE
+        self.black_ai_mode: str = AI_DEFAULT_MODE
+        self.red_search_depth: int = SEARCH_MAX_DEPTH
+        self.black_search_depth: int = SEARCH_MAX_DEPTH
+        self.red_use_opening_book: bool = OPENING_BOOK_ENABLED
+        self.black_use_opening_book: bool = OPENING_BOOK_ENABLED
 
         self.stats: dict = {
             'start_time': None,
@@ -73,7 +77,7 @@ class GameController:
             log_cb=self.log,
             check_version_cb=self._check_callback_valid,
             finish_move_cb=self._finish_ai_move,
-            get_search_depth=lambda: self.search_depth,
+            get_search_depth=self._get_current_search_depth,
             get_cancel_version=lambda: self.ai_manager.cancel_version,
             get_game_version=lambda: self.game_version,
         )
@@ -96,6 +100,20 @@ class GameController:
 
         # ── 人类玩家参考提示 ──
         self._hint_active: bool = False
+        self._current_ai_player: int = 0  # 当前正在决策的 AI 方
+
+    # ── per-side 便捷访问 ──
+
+    def _get_current_search_depth(self) -> int:
+        """引擎桥接回调：返回当前 AI 方的搜索深度。"""
+        return (self.red_search_depth if self._current_ai_player == 1
+                else self.black_search_depth)
+
+    def _ai_mode_for(self, player: int) -> str:
+        return self.red_ai_mode if player == 1 else self.black_ai_mode
+
+    def _use_opening_book_for(self, player: int) -> bool:
+        return self.red_use_opening_book if player == 1 else self.black_use_opening_book
 
     # ── 游戏控制 ──
 
@@ -294,7 +312,7 @@ class GameController:
 
         两阶段：
         1. 开局阶段（≤OPENING_BOOK_MAX_MOVES 手）：显示开局库候选走法
-        2. 中残局阶段：启动 Pikafish 15s 搜索，结果显示在日志中
+        2. 中残局阶段：启动 Pikafish 搜索（时间=搜索深度×3s，上限 MCTS_TIME_LIMIT），结果显示在日志中
         """
         if not self.is_active or self.is_paused or self.game.game_over:
             return
@@ -306,7 +324,7 @@ class GameController:
         player_name = '红方' if current_player == 1 else '黑方'
 
         # ── 阶段 1：开局库提示 ──
-        if self.use_opening_book and len(self.game.moves) < OPENING_BOOK_MAX_MOVES:
+        if self._use_opening_book_for(current_player) and len(self.game.moves) < OPENING_BOOK_MAX_MOVES:
             candidates = get_opening_candidates(self.game.moves)
             if candidates:
                 # 显示匹配的开局名称
@@ -323,7 +341,7 @@ class GameController:
                 return
 
         # ── 阶段 2：Pikafish 引擎提示 ──
-        self.log(f"🔍 正在为{player_name}生成 Pikafish 参考（15s）...", 'INFO')
+        self.log(f"🔍 正在为{player_name}生成 Pikafish 参考（{int(MCTS_TIME_LIMIT)}s）...", 'INFO')
         self._hint_active = True
 
         def _on_hint_done(move, version, cancel_version):
@@ -363,9 +381,12 @@ class GameController:
             return
 
         current_player = self.game.current_player
+        self._current_ai_player = current_player  # 引擎桥接回调用
         model = self.model1 if current_player == 1 else self.model2
         if model == HUMAN_MODEL:
             return
+
+        ai_mode = self._ai_mode_for(current_player)
 
         # 回合分隔标记（重试/兜底链再入时不重复打印）
         if self.retry_count == 0:
@@ -374,7 +395,7 @@ class GameController:
             self.log(f"━━ 第 {ply} 手 · {player_name}（{model.name}）━━", 'INFO')
 
         # ── 1. 开局库查询 ──
-        if self.use_opening_book and len(self.game.moves) < OPENING_BOOK_MAX_MOVES:
+        if self._use_opening_book_for(current_player) and len(self.game.moves) < OPENING_BOOK_MAX_MOVES:
             # get_opening_move 不在库中时返回 None，无需 is_in_opening_book 预检
             # （旧写法预检本身做一次加权随机再丢弃，纯属浪费）
             book_move = get_opening_move(self.game.moves)
@@ -396,7 +417,7 @@ class GameController:
                     return
 
         # ── 2. 纯搜索模式（Pikafish/MCTS 异步，不阻塞UI）──
-        if self.ai_mode == 'search_only':
+        if ai_mode == 'search_only':
             self.ai_manager.set_busy(True)
 
             def _on_search(move, p):
@@ -423,7 +444,7 @@ class GameController:
             return
 
         # ── 3. Hybrid 模式：引擎优先（Pikafish→MCTS）→ LLM 参考引擎 ──
-        if self.ai_mode == 'hybrid':
+        if ai_mode == 'hybrid':
             self.ai_manager.set_busy(True)
 
             def _on_engine_ready(move, p):
@@ -570,7 +591,7 @@ class GameController:
 
         # 系统提示词 — 强模型用精简版，本地模型用完整版
         # llm_only 模式下不描述不可用的分析工具
-        include_tools = self.ai_mode != 'llm_only'
+        include_tools = self._ai_mode_for(player) != 'llm_only'
         if model.system_prompt:
             system_prompt = model.system_prompt
         elif model.type and model.type.startswith('deepseek'):
@@ -579,7 +600,7 @@ class GameController:
             system_prompt = get_system_prompt(include_analysis_tools=include_tools)
 
         # 工具选择：仅 LLM 模式只用 move_piece；其他模式用全部工具
-        worker_tools = TOOLS_BASIC if self.ai_mode == 'llm_only' else DEFAULT_TOOLS
+        worker_tools = TOOLS_BASIC if self._ai_mode_for(player) == 'llm_only' else DEFAULT_TOOLS
 
         # LLM 启动日志：显示模型名与关键上下文（视觉/引擎参考）
         extras = []
@@ -691,7 +712,7 @@ class GameController:
 
         # ── LLM 失败 → 直接采用引擎结果，不仲裁 ──
         if error or not from_coord or not to_coord:
-            if self.ai_mode == 'hybrid':
+            if ai_mode == 'hybrid':
                 self.log(f"{player_name} LLM 调用失败 ({error or '无有效走法'})，直接采用引擎走法", 'WARNING')
                 self._fallback_hybrid_engine(current_player)
                 return
@@ -709,7 +730,7 @@ class GameController:
                 f"坐标 '{from_coord}'→'{to_coord}' 无法解析。"
                 f"请确保坐标格式正确：列字母 A~I，行数字 1~10。"
             )
-            if self.ai_mode == 'hybrid':
+            if ai_mode == 'hybrid':
                 self.log(f"{player_name} 坐标解析失败，直接采用引擎走法", 'WARNING')
                 self._fallback_hybrid_engine(current_player)
                 return
@@ -731,7 +752,7 @@ class GameController:
         # ── Hybrid 模式合法性预检：非法走法直接用引擎兜底，
         #    不进入仲裁（否则仲裁一个非法候选，最终可能随机落子，
         #    而验证过的引擎走法明明可用）──
-        if self.ai_mode == 'hybrid':
+        if ai_mode == 'hybrid':
             legal_moves = self.game.get_all_legal_moves(current_player)
             if final_move not in legal_moves:
                 self.last_move_error = f"{from_coord}→{to_coord}（原因：走法不合法）"
@@ -740,7 +761,7 @@ class GameController:
                 return
 
         # ── Hybrid 模式分歧检测：LLM ≠ 引擎 → 启动第三方仲裁 ──
-        if (self.ai_mode == 'hybrid' and self._hybrid_engine_move
+        if (self._ai_mode_for(player) == 'hybrid' and self._hybrid_engine_move
                 and final_move != self._hybrid_engine_move):
             # 暂存双方走法，启动 DeepSeek 仲裁
             self._arbitration_llm_move = final_move
@@ -767,7 +788,7 @@ class GameController:
             return  # 暂不执行走子，等待仲裁结果
 
         # ── Hybrid 模式且 LLM 采纳了引擎走法 → 记一致性日志（最常见路径不再静默）──
-        if (self.ai_mode == 'hybrid' and self._hybrid_engine_move
+        if (self._ai_mode_for(player) == 'hybrid' and self._hybrid_engine_move
                 and final_move == self._hybrid_engine_move):
             self.log("🤝 LLM 与引擎意见一致", 'INFO')
 
@@ -777,7 +798,7 @@ class GameController:
             reason = result.get('message', '未知原因')
             self.last_move_error = f"{from_coord}→{to_coord}（原因：{reason}）"
 
-            if self.ai_mode == 'hybrid':
+            if ai_mode == 'hybrid':
                 self.log(f"{player_name} 走子非法 ({reason})，直接采用引擎走法", 'WARNING')
                 self._fallback_hybrid_engine(current_player, final_move)
                 return
