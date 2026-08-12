@@ -75,7 +75,9 @@ def _spinbox_style() -> str:
         "QSpinBox {"
         "  background-color: #252528; color: #d0d0d0;"
         "  border: 1px solid #444; border-radius: 3px;"
-        "  padding: 2px 4px; font-size: 13px;"
+        "  padding-top: 2px; padding-bottom: 2px;"
+        "  padding-left: 4px; padding-right: 22px;"
+        "  font-size: 13px; min-width: 60px;"
         "}"
         "QSpinBox:hover { border-color: #666; }"
     )
