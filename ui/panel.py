@@ -1,7 +1,6 @@
 """左侧面板 UI 构建"""
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QComboBox, QPushButton, QCheckBox,
@@ -27,15 +26,6 @@ def _h_separator() -> QFrame:
     line.setStyleSheet("color: #3a3a3a;")
     line.setFixedHeight(1)
     return line
-
-
-def _spinbox_palette(spin: QSpinBox) -> None:
-    """设置 spinbox 的调色板，使箭头在暗背景上可见。"""
-    pal = spin.palette()
-    pal.setColor(QPalette.ColorRole.ButtonText, QColor('#cccccc'))
-    pal.setColor(QPalette.ColorRole.Text, QColor('#d0d0d0'))
-    pal.setColor(QPalette.ColorRole.Button, QColor('#444444'))
-    spin.setPalette(pal)
 
 
 def _spacer(height: int = 4) -> QFrame:
@@ -88,26 +78,18 @@ def _spinbox_style() -> str:
         "  padding: 2px 4px; font-size: 13px;"
         "}"
         "QSpinBox:hover { border-color: #666; }"
-        "QSpinBox::up-button {"
-        "  background-color: #444; border: none;"
-        "  border-top-right-radius: 3px;"
-        "  border-left: 1px solid #555;"
-        "  width: 20px;"
-        "}"
-        "QSpinBox::down-button {"
-        "  background-color: #444; border: none;"
-        "  border-bottom-right-radius: 3px;"
-        "  border-left: 1px solid #555;"
-        "  width: 20px;"
+        "QSpinBox::up-button, QSpinBox::down-button {"
+        "  background-color: #333; border: none;"
+        "  width: 16px; border-radius: 2px;"
         "}"
         "QSpinBox::up-button:hover, QSpinBox::down-button:hover {"
-        "  background-color: #666;"
+        "  background-color: #555;"
         "}"
         "QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {"
         "  background-color: #4a9e5a;"
         "}"
         "QSpinBox::up-arrow, QSpinBox::down-arrow {"
-        "  width: 10px; height: 10px;"
+        "  width: 8px; height: 8px;"
         "}"
     )
 
@@ -237,8 +219,7 @@ def setup_left_expanded(parent) -> None:
     parent.red_search_depth_spin.setStyleSheet(_spinbox_style())
     parent.red_search_depth_spin.setToolTip("红方搜索强度 1~8")
     parent.red_search_depth_spin.valueChanged.connect(parent.on_red_search_depth_changed)
-    parent.red_search_depth_spin.setValue(5)
-    _spinbox_palette(parent.red_search_depth_spin)
+    parent.red_search_depth_spin.setValue(5)  # connect 之后设值，确保信号送达
     red_layout.addWidget(parent.red_search_depth_spin, 1, 1)
 
     parent.red_opening_book_check = QCheckBox("开局库")
@@ -295,7 +276,6 @@ def setup_left_expanded(parent) -> None:
     parent.black_search_depth_spin.setToolTip("黑方搜索强度 1~8")
     parent.black_search_depth_spin.valueChanged.connect(parent.on_black_search_depth_changed)
     parent.black_search_depth_spin.setValue(5)
-    _spinbox_palette(parent.black_search_depth_spin)
     black_layout.addWidget(parent.black_search_depth_spin, 1, 1)
 
     parent.black_opening_book_check = QCheckBox("开局库")
