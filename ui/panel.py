@@ -78,6 +78,19 @@ def _spinbox_style() -> str:
         "  padding: 2px 4px; font-size: 13px;"
         "}"
         "QSpinBox:hover { border-color: #666; }"
+        "QSpinBox::up-button, QSpinBox::down-button {"
+        "  background-color: #333; border: none;"
+        "  width: 16px; border-radius: 2px;"
+        "}"
+        "QSpinBox::up-button:hover, QSpinBox::down-button:hover {"
+        "  background-color: #555;"
+        "}"
+        "QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {"
+        "  background-color: #4a9e5a;"
+        "}"
+        "QSpinBox::up-arrow, QSpinBox::down-arrow {"
+        "  width: 8px; height: 8px;"
+        "}"
     )
 
 
