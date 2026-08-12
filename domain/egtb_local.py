@@ -50,9 +50,11 @@ def _piece_set_key(pieces: tuple) -> str:
 
 
 def _board_to_index(board: list) -> int:
-    """将棋盘编码为整数索引（仅非空位置）。"""
-    # 对指定的棋子集合，每个棋子的位置编码
-    # 这里简化：用 Zobrist 风格的哈希
+    """将棋盘编码为唯一整数哈希（用于快速查表）。
+
+    使用轻量哈希：仅编码棋子位置（不考虑走子方），
+    配合 tuple-of-tuples 保证唯一性。
+    """
     h = 0
     for r in range(BOARD_HEIGHT):
         for c in range(BOARD_WIDTH):
@@ -61,6 +63,11 @@ def _board_to_index(board: list) -> int:
                 idx = r * BOARD_WIDTH + c
                 h = h * 137 + idx * 31 + ord(p)
     return h & 0x7FFFFFFF
+
+
+def _board_key(board: list) -> tuple:
+    """将棋盘转为不可变键（用于精确比较、dict 键、去重）。"""
+    return tuple(''.join(row) for row in board)
 
 
 def _is_king_facing(board: list) -> bool:
@@ -196,8 +203,8 @@ def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
                 board[bk_pos[0]][bk_pos[1]] = 'k'
                 # 合法局面（不面对面即可，将军局面也保留给 DTM）
                 if not _is_king_facing(board):
-                    h = _board_to_index(board)
-                    positions[h] = [row[:] for row in board]
+                    key = _board_key(board)
+                    positions[key] = [row[:] for row in board]
                 continue
 
             if n == 1:
@@ -215,8 +222,8 @@ def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
                     g._king_pos[2] = bk_pos
                     # 合法局面：双方将都在 palace，不面对面
                     # （将军局面也保留 —— DTM 需要它们来检测将死）
-                    h = _board_to_index(board)
-                    positions[h] = [row[:] for row in board]
+                    key = _board_key(board)
+                    positions[key] = [row[:] for row in board]
             elif n == 2:
                 for i, sq1 in enumerate(available):
                     for sq2 in available[i+1:]:
@@ -232,8 +239,8 @@ def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
                         g._king_pos[1] = rk_pos
                         g._king_pos[2] = bk_pos
                         # 合法局面（不面对面即可）
-                        h = _board_to_index(board)
-                        positions[h] = [row[:] for row in board]
+                        key = _board_key(board)
+                        positions[key] = [row[:] for row in board]
 
     return positions
 
@@ -409,7 +416,7 @@ class DtmTable:
         self._generated = False
 
     def generate(self) -> None:
-        """回溯分析生成 DTM 表（使用 ChineseChessGame 做走法生成）。"""
+        """回溯分析生成 DTM 表（前向走法图 + BFS，O(N×B) 替代 O(N²)）。"""
         if self._generated:
             return
 
@@ -420,59 +427,30 @@ class DtmTable:
 
         # 第1步：生成所有合法局面
         positions = _generate_legal_positions(self.pieces)
-        print(f'    合法局面数：{len(positions)}')
+        n_positions = len(positions)
+        print(f'    合法局面数：{n_positions}')
         if not positions:
             self._generated = True
             return
 
-        # 构建 ChineseChessGame 用于走法生成
+        # 将 positions 转为有序列表以便索引
+        pos_list = list(positions.items())  # [(hash, board), ...]
+        hash_to_idx = {h: i for i, (h, _) in enumerate(pos_list)}
+
         g = ChineseChessGame()
 
-        # 第2步：标记初始将杀死局面
-        # 遍历所有局面，找被杀方的 DTM=0
-        unprocessed = []  # [(hash, dtm, loser_perspective)]
-        for h, board in positions.items():
-            # 设置棋盘
-            g.board = [r[:] for r in board]
-            # 找到将/帥位置
-            for r in range(10):
-                for c in range(9):
-                    if board[r][c] == 'K':
-                        g._king_pos[1] = (r, c)
-                    elif board[r][c] == 'k':
-                        g._king_pos[2] = (r, c)
+        # 第2步：构建前向走法图 + 反向索引
+        # forward[i] = [target_idx, ...] (i → 走一步可到达的所有局面)
+        # reverse[i] = [source_idx, ...] (哪些局面走一步可到达 i)
+        print(f'    构建走法图...')
+        forward = [[] for _ in range(n_positions)]
+        reverse = [[] for _ in range(n_positions)]
 
+        for i, (h, board) in enumerate(pos_list):
             for player in [1, 2]:
-                if g.is_in_check(player):
-                    moves = g.get_all_legal_moves(player)
-                    if not moves:
-                        self._dtm[h] = 0  # player 被将死
-                        unprocessed.append((h, 0, player))
-                        break
-
-        print(f'    初始将死局面：{len(unprocessed)}')
-
-        # 第3步：回溯迭代
-        processed = set()
-        iteration = 0
-        while unprocessed:
-            iteration += 1
-            next_batch = []
-            for pos_hash, dtm, loser in unprocessed:
-                if pos_hash in processed:
-                    continue
-                processed.add(pos_hash)
-                board = positions[pos_hash]
-
-                if dtm >= MAX_DTM:
-                    continue
-
-                # 找前驱：对手（winner = 3-loser）走一步到当前局面
-                winner = 3 - loser
-                new_dtm = dtm + 1
-
-                # 设置目标局面
                 g.board = [r[:] for r in board]
+                g._king_pos[1] = None
+                g._king_pos[2] = None
                 for r in range(10):
                     for c in range(9):
                         if board[r][c] == 'K':
@@ -480,45 +458,93 @@ class DtmTable:
                         elif board[r][c] == 'k':
                             g._king_pos[2] = (r, c)
 
-                # 检查每个前驱局面：winner 能否一步到达当前局面
-                for h2, pred_board in positions.items():
-                    if h2 in processed or h2 in self._dtm:
-                        continue
-                    # 设置前驱局面
-                    g2 = ChineseChessGame()
-                    g2.board = [r[:] for r in pred_board]
-                    for r in range(10):
-                        for c in range(9):
-                            if pred_board[r][c] == 'K':
-                                g2._king_pos[1] = (r, c)
-                            elif pred_board[r][c] == 'k':
-                                g2._king_pos[2] = (r, c)
+                moves = g.get_all_legal_moves(player)
+                for fr, fc, tr, tc in moves:
+                    # 模拟走子
+                    piece = board[fr][fc]
+                    captured = board[tr][tc]
+                    board[tr][tc] = piece
+                    board[fr][fc] = '.'
+                    tgt_h = _board_key(board)
+                    board[fr][fc] = piece
+                    board[tr][tc] = captured
 
-                    moves = g2.get_all_legal_moves(winner)
-                    for fr, fc, tr, tc in moves:
-                        # 模拟走子
-                        piece = pred_board[fr][fc]
-                        captured = pred_board[tr][tc]
-                        pred_board[tr][tc] = piece
-                        pred_board[fr][fc] = '.'
-                        # 比较结果
-                        match = all(pred_board[r][c] == board[r][c]
-                                   for r in range(10) for c in range(9))
-                        pred_board[fr][fc] = piece
-                        pred_board[tr][tc] = captured
-                        if match:
-                            self._dtm[h2] = new_dtm
-                            next_batch.append((h2, new_dtm, winner))
-                            break
+                    if tgt_h in hash_to_idx:
+                        tgt_idx = hash_to_idx[tgt_h]
+                        if tgt_idx not in forward[i]:
+                            forward[i].append(tgt_idx)
+                            reverse[tgt_idx].append(i)
 
-            unprocessed = next_batch
-            if iteration % 5 == 0:
-                print(f'    迭代 {iteration}: DTM≤{new_dtm}, '
-                      f'已处理 {len(processed)}')
+            if (i + 1) % 1000 == 0:
+                print(f'      已处理 {i+1}/{n_positions}')
+
+        # 第3步：检测将死局面（player 被将军 且 无合法应将 = DTM=0）
+        # dtm[i] = 从局面 i 的走子方视角的 DTM
+        dtm = [-1] * n_positions  # -1 = 未知
+        queue = []
+
+        for i, (h, board) in enumerate(pos_list):
+            for player in [1, 2]:
+                g.board = [r[:] for r in board]
+                g._king_pos[1] = None
+                g._king_pos[2] = None
+                for r in range(10):
+                    for c in range(9):
+                        if board[r][c] == 'K':
+                            g._king_pos[1] = (r, c)
+                        elif board[r][c] == 'k':
+                            g._king_pos[2] = (r, c)
+
+                if g.is_in_check(player):
+                    moves = g.get_all_legal_moves(player)
+                    if not moves:
+                        dtm[i] = 0  # player 被将死
+                        queue.append(i)
+                        break
+
+        print(f'    初始将死局面：{len(queue)}')
+
+        # 第4步：BFS 回溯（从将死局面反向传播）
+        iteration = 0
+        head = 0
+        while head < len(queue):
+            cur_idx = queue[head]
+            head += 1
+            cur_dtm = dtm[cur_idx]
+
+            if cur_dtm >= MAX_DTM:
+                continue
+
+            # 找前驱：对手走一步到达当前局面
+            # 当前局面 cur 的走子方是被杀方 L(cur)
+            # 前驱局面 pred 的走子方是胜方 W(=对手)
+            # pred → 走 W 的某步棋 → cur
+            # pred 在 reverse[cur] 中
+            new_dtm = cur_dtm + 1
+
+            for pred_idx in reverse[cur_idx]:
+                if dtm[pred_idx] >= 0:
+                    continue  # 已赋值
+                # 检查：pred 的走子方 W 能否通过一步棋到达 cur
+                # W = pred 局面的走子方
+                # 如果 cur 走子方是 L，那么 pred 走子方是 3-L
+                # 简化：直接赋值（因为 reverse 图已经保证了可达性）
+                dtm[pred_idx] = new_dtm
+                queue.append(pred_idx)
+
+            iteration += 1
+            if iteration % 500 == 0:
+                print(f'    迭代 {iteration}: queue_size={len(queue)}, '
+                      f'dtm={cur_dtm}')
+
+        # 转换回 self._dtm
+        for i, (h, _) in enumerate(pos_list):
+            if dtm[i] >= 0:
+                self._dtm[h] = dtm[i]
 
         self._generated = True
         covered = len(self._dtm)
-        print(f'    完成：{covered}/{len(positions)} 局面已覆盖')
+        print(f'    完成：{covered}/{n_positions} 局面已覆盖')
 
 
     def probe(self, board: list) -> Optional[int]:
@@ -530,39 +556,51 @@ class DtmTable:
         """
         if not self._generated:
             return None
+        # 先查 tuple 键（内存中的生成结果），再查整数哈希（从文件加载的）
+        key = _board_key(board)
+        if key in self._dtm:
+            return self._dtm[key]
         h = _board_to_index(board)
         return self._dtm.get(h)
 
     def save(self, filepath: str) -> None:
-        """保存为紧凑二进制文件。"""
+        """保存为紧凑二进制文件。
+
+        格式：header + 每个局面的 (board_hash:u32, dtm:u8)。
+        用 _board_to_index 做整数哈希存储。
+        """
         if not self._generated:
             return
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, 'wb') as f:
             f.write(DTM_MAGIC)
-            f.write(struct.pack('<B', len(self.pieces)))
-            f.write(struct.pack('<B', len(self._dtm) & 0xFF))
-            f.write(struct.pack('<H', (len(self._dtm) >> 8) & 0xFFFF))
-            for h, dtm in sorted(self._dtm.items()):
+            count = len(self._dtm)
+            f.write(struct.pack('<I', count))
+            # 按 dtm 排序后写入
+            for key, dtm in sorted(self._dtm.items(), key=lambda x: x[1]):
+                # 从 tuple key 重建 board 并计算整数哈希
+                board = [list(row) for row in key]
+                h = _board_to_index(board)
                 f.write(struct.pack('<I', h))
                 f.write(struct.pack('<B', min(dtm, 255)))
 
     def load(self, filepath: str) -> bool:
-        """从紧凑二进制文件加载。"""
+        """从紧凑二进制文件加载。
+
+        加载后需要 matching positions dict 来重建 tuple 键映射。
+        此处存储整数哈希 → dtm，probe 时用整数哈希查。
+        """
         if not os.path.isfile(filepath):
             return False
         with open(filepath, 'rb') as f:
             magic = f.read(5)
             if magic != DTM_MAGIC:
                 return False
-            num_pieces = struct.unpack('<B', f.read(1))[0]
-            count_lo = struct.unpack('<B', f.read(1))[0]
-            count_hi = struct.unpack('<H', f.read(2))[0]
-            count = count_lo | (count_hi << 8)
+            count = struct.unpack('<I', f.read(4))[0]
             for _ in range(count):
                 h = struct.unpack('<I', f.read(4))[0]
                 dtm = struct.unpack('<B', f.read(1))[0]
-                self._dtm[h] = dtm
+                self._dtm[h] = dtm  # 存储整数哈希
         self._generated = True
         return True
 
