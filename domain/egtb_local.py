@@ -1,629 +1,630 @@
-"""本地 DTM（Distance to Mate）残局库 — 回溯分析生成 + 紧凑存储
+"""本地 DTM（Distance to Mate）残局库 — 逆向回推分析（retrograde analysis）
 
-算法：
-1. 枚举给定棋子集合的所有合法局面
-2. 标记将杀死局面（DTM=0）
-3. 反向迭代：对 DTM=N 的局面，找出所有可一步到达此局面的前驱局面
-   - 攻击方的前驱：DTM = N+1（minimax：攻击方选最小 DTM 的走法）
-   - 防守方的前驱：DTM 记录为"可走到当前局面的候选"
-4. 重复直至收敛
+状态 = (棋盘, 走子方)。棋盘由 81 个将帅九宫对 × 其余子的稠密组合索引唯一确定：
+    pos_rank = kp_index × placements_per_pair + placement_rank
+    state_id = pos_rank × 2 + side_bit   （side_bit: 0=规范帧红走，1=黑走）
+rank/unrank 均为闭式组合数公式（O(90) 算术），无哈希、无碰撞。
 
-存储格式（.dtm 文件）：
-- 8 字节头：魔数 + 棋子数量 + 棋子集合签名
-- 数据区：每个位置 1 字节
-  - 0：未知/和棋
-  - 1-127：当前走子方在 N 步内可杀（N = 0 即被将杀）
-  - 129-255：当前走子方将在 N-128 步内被杀（N = 0 即杀对方）
+算法（真逆向回推，攻防双方回合交替的 minimax 语义）：
+1. Pass 1 逐状态枚举走法一次（复用单个 ChineseChessGame）：
+   - 无合法走法 → 将死/困毙，L_0（dtm=0, loser=走子方，与对局层语义一致）
+   - 吃王 → 种子 W_1（引擎走法生成会产出吃王走法，须先行拦截）
+   - 吃子 → 子表解析：和棋→draw_escape；子表方负→cap_win；子表方胜→max_sub_loss
+     （cap_win/max_sub_loss 存储的是含吃子这一手的总 ply）
+   - 非吃子 → 反向边，cnt++
+2. Pass 2 按 ply 桶固定点：
+   - W_n = L_{n-1} 的前驱（首触即最小 DTM）+ 种子桶（按桶序处理保证最小性）
+   - L_n = cnt 归零（同表后继全部为对手 W）且无 draw_escape 且无 cap_win 的状态，
+     dtm = max(trigger_ply+1, max_sub_loss)
+   - 固定点后未赋值 = 和棋（255）
+3. 照面槽位 = 254（probe 返回 None）
+
+存储格式（.dtm 文件 v3）：
+- 头：5B 魔数 b'DTMC\\x03' + 1B 签名长度 + ASCII 签名（如 b'KkR'、b'KkRp'）+ u32 LE num_positions
+- 体：num_positions × 2 条 × (u8 dtm, u8 loser)，先 side_bit=0 后 side_bit=1
+  - dtm 0..253 真实；254=照面/非法；255=和棋（loser 恒 0）
+  - loser: 1=红负 2=黑负（规范帧）
+
+规范帧：红方为攻方（红持 R/N/C/P，黑持 a/b/p 防守子）。查询时黑方为攻方的
+棋盘旋转 180° + 大小写互换映射到规范帧（修复旧版黑方攻子局面查不到表的缺陷）。
 
 Usage:
     from domain.egtb_local import DtmTable, probe_local
-    dtm = probe_local(board, piece_count)  # 返回 (score, dtm) 或 None
+    result = probe_local(board, piece_count, current_player)  # (score, dtm) 或 None
+    生成：python -m domain.egtb_local [--only KkR] [--force]
 """
 
 import os
 import struct
-from typing import Optional, Tuple, Dict, Set, List
+import time
+from array import array
+from typing import Dict, List, Optional, Tuple
 
 from domain.constants import BOARD_WIDTH, BOARD_HEIGHT
 
 # ── 常量 ──
-DTM_MAGIC = b'DTMC\x02'    # DTM Chinese Chess v2（6字节记录：hash+dtm+loser）
+DTM_MAGIC = b'DTMC\x03'        # DTM Chinese Chess v3（稠密索引 + 走子方 + 和棋哨兵）
 DTM_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        'data', 'egtb')
-MAX_DTM = 126               # 最大 DTM 存储值
-DRAW_VALUE = 0              # 和棋 / 未知
+DTM_ILLEGAL = 254              # 照面/非法槽（probe 返回 None）
+DTM_DRAW = 255                 # 和棋（loser 恒 0）
+MAX_REAL_DTM = 250             # 生成后断言：真实 DTM 上限（防截断误标和棋）
 
 # 攻击子力类型（不含将/帥和防守子力士/相）
-ATTACKER_TYPES = 'RNCP'     # 車馬炮兵
-ATTACKER_TYPES_LOWER = 'rncp'
+ATTACKER_TYPES = 'RNCP'
 
-# 棋子值（用于排序）
-_PIECE_ORDER = {'K': 0, 'k': 0, 'R': 1, 'r': 1, 'C': 2, 'c': 2,
-                'N': 3, 'n': 3, 'P': 4, 'p': 4, 'A': 5, 'a': 5,
-                'B': 6, 'b': 6}
+# 规范帧类型序（R<C<N<P<a<b<p），决定签名排序与 rank 公式的 o=0 基准
+_TYPE_ORDER = {'R': 0, 'C': 1, 'N': 2, 'P': 3, 'a': 4, 'b': 5, 'p': 6}
 
-
-def _piece_set_key(pieces: tuple) -> str:
-    """棋子集合 → 文件名键，如 'KRk' → 红帅+红車+黑将"""
-    return ''.join(sorted(pieces, key=lambda p: _PIECE_ORDER.get(p, 99)))
-
-
-def _board_to_index(board: list) -> int:
-    """将棋盘编码为唯一整数哈希（用于快速查表）。
-
-    使用轻量哈希：仅编码棋子位置（不考虑走子方），
-    配合 tuple-of-tuples 保证唯一性。
-    """
-    h = 0
-    for r in range(BOARD_HEIGHT):
-        for c in range(BOARD_WIDTH):
-            p = board[r][c]
-            if p != '.':
-                idx = r * BOARD_WIDTH + c
-                h = h * 137 + idx * 31 + ord(p)
-    return h & 0x7FFFFFFF
+# 14 个 ≤4 子表（顺序 = 依赖顺序：子数升序，吃子解析依赖先行的表）
+# 红方攻子在前（大写），黑方防守子在后（小写）
+TABLE_SETS = [
+    ('K', 'R', 'k'),            # KkR   单車对孤将
+    ('K', 'N', 'k'),            # KkN   单馬对孤将
+    ('K', 'C', 'k'),            # KkC   单炮对孤将（理论全和，RA 证实）
+    ('K', 'P', 'k'),            # KkP   单兵对孤将（仅巧胜局面可胜）
+    ('K', 'R', 'k', 'a'),       # KkRa  車对单士
+    ('K', 'R', 'k', 'b'),       # KkRb  車对单象
+    ('K', 'R', 'k', 'p'),       # KkRp  車对单卒
+    ('K', 'N', 'k', 'a'),       # KkNa  馬对单士
+    ('K', 'N', 'k', 'b'),       # KkNb  馬对单象
+    ('K', 'N', 'k', 'p'),       # KkNp  馬对单卒
+    ('K', 'C', 'k', 'p'),       # KkCp  炮对单卒
+    ('K', 'R', 'R', 'k'),       # KkRR  双車对孤将
+    ('K', 'R', 'N', 'k'),       # KkRN  車馬对孤将
+    ('K', 'R', 'C', 'k'),       # KkRC  車炮对孤将
+]
 
 
-def _board_key(board: list) -> tuple:
-    """将棋盘转为不可变键（用于精确比较、dict 键、去重）。"""
-    return tuple(''.join(row) for row in board)
+# ── 几何工具 ──
+
+def _flat(r: int, c: int) -> int:
+    return r * BOARD_WIDTH + c
 
 
-def _is_king_facing(board: list) -> bool:
-    """检查将帅是否对面。"""
-    # 找到两将
-    red_king = black_king = None
-    for r in range(BOARD_HEIGHT):
-        for c in range(BOARD_WIDTH):
-            if board[r][c] == 'K':
-                red_king = (r, c)
-            elif board[r][c] == 'k':
-                black_king = (r, c)
-    if not red_king or not black_king:
+def _upos(flat_sq: int, rk_flat: int, bk_flat: int) -> int:
+    """U 序号：88 格 = 90 格去掉两王格（行主序扫描）。"""
+    u = flat_sq
+    if flat_sq > rk_flat:
+        u -= 1
+    if flat_sq > bk_flat:
+        u -= 1
+    return u
+
+
+def _usq_flat(u: int, rk_flat: int, bk_flat: int) -> int:
+    """U 序号 → 90 格 flat（_upos 的逆）。"""
+    for f in range(BOARD_HEIGHT * BOARD_WIDTH):
+        if f != rk_flat and f != bk_flat:
+            if u == 0:
+                return f
+            u -= 1
+    raise ValueError(f'无效 U 序号: {u}')
+
+
+def _kp_index(rk: Tuple[int, int], bk: Tuple[int, int]) -> int:
+    """将帅九宫位置 → 0..80；任一将不在宫内返回 -1。"""
+    rr, rc = rk
+    br, bc = bk
+    if not (7 <= rr <= 9 and 3 <= rc <= 5):
+        return -1
+    if not (0 <= br <= 2 and 3 <= bc <= 5):
+        return -1
+    return ((rr - 7) * 3 + (rc - 3)) * 9 + (br * 3 + (bc - 3))
+
+
+def _kings_facing(board: List[List[str]],
+                  rk: Tuple[int, int], bk: Tuple[int, int]) -> bool:
+    """两将同列且中间无子 → 非法局面（飞将）。"""
+    if rk[1] != bk[1]:
         return False
-    if red_king[1] != black_king[1]:
-        return False
-    # 检查中间是否有遮挡
-    min_r, max_r = min(red_king[0], black_king[0]), max(red_king[0], black_king[0])
-    for r in range(min_r + 1, max_r):
-        if board[r][red_king[1]] != '.':
+    lo, hi = (rk[0], bk[0]) if rk[0] < bk[0] else (bk[0], rk[0])
+    for r in range(lo + 1, hi):
+        if board[r][rk[1]] != '.':
             return False
     return True
 
 
-def _is_in_check(board: list, player: int) -> bool:
-    """简化将军检测（仅用于残局生成，不依赖 ChineseChessGame）。"""
-    # 找到己方将
-    king_char = 'K' if player == 1 else 'k'
-    kr = kc = None
-    for r in range(BOARD_HEIGHT):
-        for c in range(BOARD_WIDTH):
-            if board[r][c] == king_char:
-                kr, kc = r, c
-                break
-        if kr is not None:
-            break
-    if kr is None:
-        return False
-
-    opponent_pieces = 'rnbcakp' if player == 1 else 'RNBCAP'
-    # 简化检测：对方車/炮直线攻击，馬日字攻击，卒攻击
-    # 車/炮（含帅对面）
-    for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-        r, c = kr + dr, kc + dc
-        blocked = False
-        while 0 <= r < BOARD_HEIGHT and 0 <= c < BOARD_WIDTH:
-            p = board[r][c]
-            if p == '.':
-                r += dr; c += dc; continue
-            if p in opponent_pieces:
-                if p.upper() == 'R' or (p.upper() == 'K' and not blocked):
-                    return True
-                if p.upper() == 'C' and blocked:
-                    return True
-            blocked = True
-            r += dr; c += dc
-
-    # 馬
-    for dr, dc in [(2,1),(2,-1),(-2,1),(-2,-1),(1,2),(1,-2),(-1,2),(-1,-2)]:
-        r, c = kr + dr, kc + dc
-        if 0 <= r < BOARD_HEIGHT and 0 <= c < BOARD_WIDTH:
-            if board[r][c] in opponent_pieces and board[r][c].upper() == 'N':
-                leg_r = kr + (dr // abs(dr) if dr != 0 else 0) if abs(dr) == 2 else kr
-                leg_c = kc + (dc // abs(dc) if dc != 0 else 0) if abs(dc) == 2 else kc
-                if abs(dr) == 2:
-                    leg_r = kr + (1 if dr > 0 else -1)
-                    leg_c = kc
-                else:
-                    leg_r = kr
-                    leg_c = kc + (1 if dc > 0 else -1)
-                if board[leg_r][leg_c] == '.':
-                    return True
-
-    # 兵/卒
-    if player == 1:  # 红方，黑卒从下方攻击
-        for dc in [-1, 1]:
-            r, c = kr - 1, kc + dc
-            if 0 <= r and 0 <= c < BOARD_WIDTH:
-                if board[r][c] == 'p':
-                    return True
-        r, c = kr - 1, kc
-        if r >= 0 and board[r][c] == 'p':
-            return True
-    else:  # 黑方，红兵从上方攻击
-        for dc in [-1, 1]:
-            r, c = kr + 1, kc + dc
-            if r < BOARD_HEIGHT and 0 <= c < BOARD_WIDTH:
-                if board[r][c] == 'P':
-                    return True
-        r, c = kr + 1, kc
-        if r < BOARD_HEIGHT and board[r][c] == 'P':
-            return True
-
-    return False
-
-
-def _generate_legal_positions(pieces: tuple) -> Dict[int, list]:
-    """生成给定棋子集合的所有合法局面。
-
-    使用 ChineseChessGame.move_piece() 验证合法性。
-    将/帥固定在 palace，其余棋子枚举全盘空位。
-
-    Returns:
-        {position_hash: [board_2d_copy, ...]} 合法局面列表
-    """
-    from domain.game import ChineseChessGame
-
-    positions = {}
-    piece_list = list(pieces)
-
-    # 分离将/帥和其他棋子
-    kings = [p for p in piece_list if p in ('K', 'k')]
-    others = [p for p in piece_list if p not in ('K', 'k')]
-
-    # palace 位置
-    red_palace = [(r, c) for r in range(7, 10) for c in range(3, 6)]
-    black_palace = [(r, c) for r in range(0, 3) for c in range(3, 6)]
-    all_squares = [(r, c) for r in range(BOARD_HEIGHT) for c in range(BOARD_WIDTH)]
-    n = len(others)
-
-    # 枚举 kings 位置
-    for rk_pos in red_palace:
-        for bk_pos in black_palace:
-            if rk_pos == bk_pos:
-                continue
-            occupied = {rk_pos, bk_pos}
-            available = [s for s in all_squares if s not in occupied]
-
-            # 没有其他棋子
-            if n == 0:
-                board = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-                board[rk_pos[0]][rk_pos[1]] = 'K'
-                board[bk_pos[0]][bk_pos[1]] = 'k'
-                # 合法局面（不面对面即可，将军局面也保留给 DTM）
-                if not _is_king_facing(board):
-                    key = _board_key(board)
-                    positions[key] = [row[:] for row in board]
-                continue
-
-            if n == 1:
-                for sq in available:
-                    board = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-                    board[rk_pos[0]][rk_pos[1]] = 'K'
-                    board[bk_pos[0]][bk_pos[1]] = 'k'
-                    board[sq[0]][sq[1]] = others[0]
-                    if _is_king_facing(board):
-                        continue
-                    # 验证：使用 ChineseChessGame
-                    g = ChineseChessGame()
-                    g.board = [r[:] for r in board]
-                    g._king_pos[1] = rk_pos
-                    g._king_pos[2] = bk_pos
-                    # 合法局面：双方将都在 palace，不面对面
-                    # （将军局面也保留 —— DTM 需要它们来检测将死）
-                    key = _board_key(board)
-                    positions[key] = [row[:] for row in board]
-            elif n == 2:
-                for i, sq1 in enumerate(available):
-                    for sq2 in available[i+1:]:
-                        board = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-                        board[rk_pos[0]][rk_pos[1]] = 'K'
-                        board[bk_pos[0]][bk_pos[1]] = 'k'
-                        board[sq1[0]][sq1[1]] = others[0]
-                        board[sq2[0]][sq2[1]] = others[1]
-                        if _is_king_facing(board):
-                            continue
-                        g = ChineseChessGame()
-                        g.board = [r[:] for r in board]
-                        g._king_pos[1] = rk_pos
-                        g._king_pos[2] = bk_pos
-                        # 合法局面（不面对面即可）
-                        key = _board_key(board)
-                        positions[key] = [row[:] for row in board]
-            elif n == 3:
-                # 5 子残局（K + k + 3 其他棋子）── 枚举量 ~8.9M，仅离线预生成
-                for i, sq1 in enumerate(available):
-                    for j, sq2 in enumerate(available[i+1:], i+1):
-                        for sq3 in available[j+1:]:
-                            board = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-                            board[rk_pos[0]][rk_pos[1]] = 'K'
-                            board[bk_pos[0]][bk_pos[1]] = 'k'
-                            board[sq1[0]][sq1[1]] = others[0]
-                            board[sq2[0]][sq2[1]] = others[1]
-                            board[sq3[0]][sq3[1]] = others[2]
-                            if _is_king_facing(board):
-                                continue
-                            key = _board_key(board)
-                            positions[key] = [row[:] for row in board]
-
-    return positions
-
-
-def _get_legal_moves_simple(board: list, player: int) -> List[Tuple[int,int,int,int]]:
-    """简化的合法走法生成器（仅用于残局回溯分析）。
-
-    生成所有合法走法，不依赖 ChineseChessGame。
-    """
-    moves = []
-    my_pieces = 'KABNRCP' if player == 1 else 'kabnrcp'
-
+def _rotate_board(board: List[List[str]]) -> List[List[str]]:
+    """旋转 180° + 大小写互换（黑攻方 → 红攻方规范帧）。"""
+    rot = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
     for r in range(BOARD_HEIGHT):
         for c in range(BOARD_WIDTH):
             p = board[r][c]
-            if p not in my_pieces:
-                continue
+            if p != '.':
+                rot[BOARD_HEIGHT - 1 - r][BOARD_WIDTH - 1 - c] = p.swapcase()
+    return rot
 
-            pu = p.upper()
-            # 将/帥
-            if pu == 'K':
-                for dr, dc in [(1,0),(-1,0),(0,1),(0,-1)]:
-                    nr, nc = r + dr, c + dc
-                    if not (0 <= nr < BOARD_HEIGHT and 0 <= nc < BOARD_WIDTH):
-                        continue
-                    # palace check
-                    if player == 1 and not (7 <= nr <= 9 and 3 <= nc <= 5):
-                        continue
-                    if player == 2 and not (0 <= nr <= 2 and 3 <= nc <= 5):
-                        continue
-                    target = board[nr][nc]
-                    if target in my_pieces:
-                        continue
-                    moves.append((r, c, nr, nc))
-                continue
 
-            # 仕/士
-            if pu == 'A':
-                for dr, dc in [(1,1),(1,-1),(-1,1),(-1,-1)]:
-                    nr, nc = r + dr, c + dc
-                    if not (0 <= nr < BOARD_HEIGHT and 0 <= nc < BOARD_WIDTH):
-                        continue
-                    if player == 1 and not (7 <= nr <= 9 and 3 <= nc <= 5):
-                        continue
-                    if player == 2 and not (0 <= nr <= 2 and 3 <= nc <= 5):
-                        continue
-                    target = board[nr][nc]
-                    if target in my_pieces:
-                        continue
-                    moves.append((r, c, nr, nc))
-                continue
-
-            # 相/象
-            if pu == 'B':
-                for dr, dc in [(2,2),(2,-2),(-2,2),(-2,-2)]:
-                    nr, nc = r + dr, c + dc
-                    if not (0 <= nr < BOARD_HEIGHT and 0 <= nc < BOARD_WIDTH):
-                        continue
-                    # 不能过河
-                    if player == 1 and nr < 5:
-                        continue
-                    if player == 2 and nr > 4:
-                        continue
-                    # 象眼
-                    eye_r = r + (1 if dr > 0 else -1)
-                    eye_c = c + (1 if dc > 0 else -1)
-                    if board[eye_r][eye_c] != '.':
-                        continue
-                    target = board[nr][nc]
-                    if target in my_pieces:
-                        continue
-                    moves.append((r, c, nr, nc))
-                continue
-
-            # 馬
-            if pu == 'N':
-                for dr, dc, lr, lc in [(2,1,1,0),(2,-1,1,0),(-2,1,-1,0),(-2,-1,-1,0),
-                                        (1,2,0,1),(1,-2,0,-1),(-1,2,0,1),(-1,-2,0,-1)]:
-                    nr, nc = r + dr, c + dc
-                    if not (0 <= nr < BOARD_HEIGHT and 0 <= nc < BOARD_WIDTH):
-                        continue
-                    leg_r, leg_c = r + lr, c + lc
-                    if board[leg_r][leg_c] != '.':
-                        continue
-                    target = board[nr][nc]
-                    if target in my_pieces:
-                        continue
-                    moves.append((r, c, nr, nc))
-                continue
-
-            # 車
-            if pu == 'R':
-                for dr, dc in [(1,0),(-1,0),(0,1),(0,-1)]:
-                    nr, nc = r + dr, c + dc
-                    while 0 <= nr < BOARD_HEIGHT and 0 <= nc < BOARD_WIDTH:
-                        target = board[nr][nc]
-                        if target in my_pieces:
-                            break
-                        moves.append((r, c, nr, nc))
-                        if target != '.':
-                            break
-                        nr += dr; nc += dc
-                continue
-
-            # 炮
-            if pu == 'C':
-                for dr, dc in [(1,0),(-1,0),(0,1),(0,-1)]:
-                    nr, nc = r + dr, c + dc
-                    while 0 <= nr < BOARD_HEIGHT and 0 <= nc < BOARD_WIDTH:
-                        target = board[nr][nc]
-                        if target == '.':
-                            moves.append((r, c, nr, nc))
-                            nr += dr; nc += dc
-                            continue
-                        # 找到一个炮架，跳过它继续找吃子目标
-                        nr += dr; nc += dc
-                        while 0 <= nr < BOARD_HEIGHT and 0 <= nc < BOARD_WIDTH:
-                            t2 = board[nr][nc]
-                            if t2 != '.':
-                                if t2 not in my_pieces:
-                                    moves.append((r, c, nr, nc))
-                                break
-                            nr += dr; nc += dc
-                        break
-                continue
-
-            # 兵/卒
-            if pu == 'P':
-                if player == 1:  # 红兵
-                    # 前进
-                    if r > 0:
-                        nr = r - 1
-                        if board[nr][c] not in my_pieces:
-                            moves.append((r, c, nr, c))
-                    # 过河后可以横移
-                    if r <= 4:
-                        for dc in [-1, 1]:
-                            nc = c + dc
-                            if 0 <= nc < BOARD_WIDTH and board[r][nc] not in my_pieces:
-                                moves.append((r, c, r, nc))
-                else:  # 黑卒
-                    if r < 9:
-                        nr = r + 1
-                        if board[nr][c] not in my_pieces:
-                            moves.append((r, c, nr, c))
-                    if r >= 5:
-                        for dc in [-1, 1]:
-                            nc = c + dc
-                            if 0 <= nc < BOARD_WIDTH and board[r][nc] not in my_pieces:
-                                moves.append((r, c, r, nc))
-                continue
-
-    # 过滤走后自己被将军的走法
-    legal = []
-    for fr, fc, tr, tc in moves:
-        piece = board[fr][fc]
-        captured = board[tr][tc]
-        board[tr][tc] = piece
-        board[fr][fc] = '.'
-        if not _is_in_check(board, player) and not _is_king_facing(board):
-            legal.append((fr, fc, tr, tc))
-        board[fr][fc] = piece
-        board[tr][tc] = captured
-    return legal
-
+# ── 残局表 ──
 
 class DtmTable:
-    """单个棋子组合的 DTM 表。"""
+    """单个棋子组合的 DTM 表（稠密组合索引，无哈希碰撞）。"""
 
-    def __init__(self, pieces: tuple):
-        self.pieces = pieces  # 如 ('K', 'R', 'k')
-        self._dtm: Dict[int, int] = {}  # position_hash → dtm
-        self._generated = False
+    def __init__(self, pieces):
+        self.pieces = tuple(pieces)
+        self.extras = sorted([p for p in self.pieces if p not in ('K', 'k')],
+                             key=lambda p: _TYPE_ORDER.get(p, 99))
+        self.sig = 'Kk' + ''.join(self.extras)
+        self.k = len(self.extras)
+        if self.k == 1:
+            self.placements = 88
+            self.identical = False
+        elif self.k == 2 and self.extras[0] == self.extras[1]:
+            self.placements = 88 * 87 // 2
+            self.identical = True
+        elif self.k == 2:
+            self.placements = 88 * 87
+            self.identical = False
+        else:
+            raise ValueError(f'不支持的棋子数: {self.pieces}')
+        self.num_positions = 81 * self.placements
+        self.num_states = self.num_positions * 2
+        self.dtm = bytearray()
+        self.loser = bytearray()
+        self.loaded = False
+        self.sub_tables: Dict[str, 'DtmTable'] = {}
 
-    def generate(self) -> None:
-        """回溯分析生成 DTM 表（前向走法图 + BFS，O(N×B) 替代 O(N²)）。"""
-        if self._generated:
+    @classmethod
+    def from_sig(cls, sig: str) -> 'DtmTable':
+        return cls(['K', 'k'] + list(sig[2:]))
+
+    # ── 索引 ──
+
+    def _placement_rank(self, us: List[int]) -> int:
+        """其余子在 U 中的序号列表（规范类型序）→ 占位秩。"""
+        if self.k == 1:
+            return us[0]
+        u1, u2 = us[0], us[1]
+        i, j = (u1, u2) if u1 < u2 else (u2, u1)
+        base = i + j * (j - 1) // 2
+        if self.identical:
+            return base
+        return base * 2 + (0 if u1 == i else 1)
+
+    def _state_id_from_parts(self, coords: List[Tuple[int, int]],
+                             king_pos: Dict[int, Tuple[int, int]],
+                             side: int) -> int:
+        """增量坐标（coords 与 self.extras 对齐）→ state_id。"""
+        rk = king_pos[1]
+        bk = king_pos[2]
+        kp = _kp_index(rk, bk)
+        rk_flat = _flat(rk[0], rk[1])
+        bk_flat = _flat(bk[0], bk[1])
+        us = [_upos(_flat(r, c), rk_flat, bk_flat) for (r, c) in coords]
+        return (kp * self.placements + self._placement_rank(us)) * 2 + side
+
+    def _unrank_position(self, pos_rank: int):
+        """pos_rank → (红帅位, 黑将位, 其余子位置列表（规范序）)。"""
+        kp_idx, pr = divmod(pos_rank, self.placements)
+        rpi, bpi = divmod(kp_idx, 9)
+        rk = (7 + rpi // 3, 3 + rpi % 3)
+        bk = (bpi // 3, 3 + bpi % 3)
+        rk_flat = _flat(rk[0], rk[1])
+        bk_flat = _flat(bk[0], bk[1])
+
+        def _sq(u):
+            f = _usq_flat(u, rk_flat, bk_flat)
+            return divmod(f, BOARD_WIDTH)
+
+        if self.k == 1:
+            return rk, bk, [_sq(pr)]
+        if self.identical:
+            pair = pr
+        else:
+            pair = pr >> 1
+        # 求最大 j ≥ 1 使 C(j,2) ≤ pair
+        j = 1
+        while j * (j + 1) // 2 <= pair:
+            j += 1
+        i = pair - j * (j - 1) // 2
+        if self.identical:
+            return rk, bk, [_sq(i), _sq(j)]
+        o = pr & 1
+        first_u, second_u = (i, j) if o == 0 else (j, i)
+        return rk, bk, [_sq(first_u), _sq(second_u)]
+
+    # ── 生成 ──
+
+    def generate(self, sub_tables: Optional[Dict[str, 'DtmTable']] = None) -> None:
+        """逆向回推生成 DTM 表。sub_tables: 已生成的子表 {sig: table}（吃子解析用）。"""
+        if self.loaded:
             return
-
         from domain.game import ChineseChessGame
 
-        key = _piece_set_key(self.pieces)
-        print(f'  生成 DTM 表: {key} ({len(self.pieces)}子)...')
-
-        # 第1步：生成所有合法局面
-        positions = _generate_legal_positions(self.pieces)
-        n_positions = len(positions)
-        print(f'    合法局面数：{n_positions}')
-        if not positions:
-            self._generated = True
-            return
-
-        # 将 positions 转为有序列表以便索引
-        pos_list = list(positions.items())  # [(hash, board), ...]
-        hash_to_idx = {h: i for i, (h, _) in enumerate(pos_list)}
+        self.sub_tables = sub_tables or {}
+        N = self.num_positions
+        S = self.num_states
+        dtm = bytearray([DTM_ILLEGAL]) * S
+        loser = bytearray(S)
+        cnt = array('H', [0]) * S          # 同表后继中尚未被判"对手胜"的数量
+        draw_escape = bytearray(S)         # 存在吃子走到子表和棋局面
+        cap_win = array('H', [0]) * S      # 吃子胜线总 ply（0=无）
+        max_sub_loss = array('H', [0]) * S  # 吃子输线最大总 ply
+        legal_pos = bytearray(N)           # 1=非照面合法局面
+        edges = array('I')                 # 前向边（转置后删除）
+        offsets = array('I', [0]) * (S + 1)
+        l_buckets = [array('I') for _ in range(256)]
+        seed_buckets = [array('I') for _ in range(256)]
 
         g = ChineseChessGame()
+        board = [['.'] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
+        king_pos = {1: (9, 4), 2: (0, 4)}
+        g.board = board
+        g._king_pos = king_pos
 
-        # 第2步：构建前向走法图 + 反向索引
-        # forward[i] = [target_idx, ...] (i → 走一步可到达的所有局面)
-        # reverse[i] = [source_idx, ...] (哪些局面走一步可到达 i)
-        print(f'    构建走法图...')
-        forward = [[] for _ in range(n_positions)]
-        reverse = [[] for _ in range(n_positions)]
+        print(f'  生成 DTM 表: {self.sig}（{N} 局面 × 2 方）...')
+        t0 = time.time()
 
-        for i, (h, board) in enumerate(pos_list):
-            for player in [1, 2]:
-                g.board = [r[:] for r in board]
-                g._king_pos[1] = None
-                g._king_pos[2] = None
-                for r in range(10):
-                    for c in range(9):
-                        if board[r][c] == 'K':
-                            g._king_pos[1] = (r, c)
-                        elif board[r][c] == 'k':
-                            g._king_pos[2] = (r, c)
+        for pos_rank in range(N):
+            rk, bk, extra_sqs = self._unrank_position(pos_rank)
+            for r in range(BOARD_HEIGHT):
+                row = board[r]
+                for c in range(BOARD_WIDTH):
+                    row[c] = '.'
+            board[rk[0]][rk[1]] = 'K'
+            board[bk[0]][bk[1]] = 'k'
+            coords = list(extra_sqs)
+            for p, (r, c) in zip(self.extras, extra_sqs):
+                board[r][c] = p
 
-                moves = g.get_all_legal_moves(player)
-                for fr, fc, tr, tc in moves:
-                    # 模拟走子
-                    piece = board[fr][fc]
-                    captured = board[tr][tc]
-                    board[tr][tc] = piece
-                    board[fr][fc] = '.'
-                    tgt_h = _board_key(board)
-                    board[fr][fc] = piece
-                    board[tr][tc] = captured
-
-                    if tgt_h in hash_to_idx:
-                        tgt_idx = hash_to_idx[tgt_h]
-                        if tgt_idx not in forward[i]:
-                            forward[i].append(tgt_idx)
-                            reverse[tgt_idx].append(i)
-
-            if (i + 1) % 1000 == 0:
-                print(f'      已处理 {i+1}/{n_positions}')
-
-        # 第3步：检测将死局面（player 被将军 且 无合法应将 = DTM=0）
-        # dtm[i] = (dtm_value, loser_player) — 从 loser 视角的 DTM
-        # dtm_value: 0=loser被将死/困毙, N=loser在N步内被将死
-        # loser_player: 1=红被将死, 2=黑被将死
-        dtm_val = [-1] * n_positions
-        dtm_loser = [0] * n_positions
-        queue = []
-
-        for i, (h, board) in enumerate(pos_list):
-            for player in [1, 2]:
-                g.board = [r[:] for r in board]
-                g._king_pos[1] = None
-                g._king_pos[2] = None
-                for r in range(10):
-                    for c in range(9):
-                        if board[r][c] == 'K':
-                            g._king_pos[1] = (r, c)
-                        elif board[r][c] == 'k':
-                            g._king_pos[2] = (r, c)
-
-                # 将死 或 困毙：无合法走法 = 输棋
-                moves = g.get_all_legal_moves(player)
-                if not moves:
-                    dtm_val[i] = 0
-                    dtm_loser[i] = player
-                    queue.append(i)
-                    break
-
-        print(f'    初始将死局面：{len(queue)}')
-
-        # 第4步：BFS 回溯
-        iteration = 0
-        head = 0
-        while head < len(queue):
-            cur_idx = queue[head]
-            head += 1
-            cur_dtm = dtm_val[cur_idx]
-            cur_loser = dtm_loser[cur_idx]
-
-            if cur_dtm >= MAX_DTM:
+            sid0 = pos_rank * 2
+            offsets[sid0] = len(edges)
+            if _kings_facing(board, rk, bk):
+                offsets[sid0 + 1] = len(edges)
                 continue
+            legal_pos[pos_rank] = 1
+            king_pos[1] = rk
+            king_pos[2] = bk
 
-            # 前驱局面中 winner (= 3-cur_loser) 走一步到达当前局面
-            new_dtm = cur_dtm + 1
-
-            for pred_idx in reverse[cur_idx]:
-                if dtm_val[pred_idx] >= 0:
+            for side in (0, 1):
+                sid = sid0 + side
+                if side:
+                    offsets[sid] = len(edges)
+                mover = side + 1
+                moves = g.get_all_legal_moves(mover)
+                if not moves:
+                    # 将死 或 困毙：无合法走法 = 输棋（与对局层语义一致）
+                    dtm[sid] = 0
+                    loser[sid] = mover
+                    l_buckets[0].append(sid)
                     continue
-                dtm_val[pred_idx] = new_dtm
-                dtm_loser[pred_idx] = cur_loser  # 同一 loser
-                queue.append(pred_idx)
+                for fr, fc, tr, tc in moves:
+                    target = board[tr][tc]
+                    if target == '.':
+                        # 非吃子 → 同表后继
+                        piece = board[fr][fc]
+                        board[tr][tc] = piece
+                        board[fr][fc] = '.'
+                        if piece == 'K':
+                            king_pos[1] = (tr, tc)
+                        elif piece == 'k':
+                            king_pos[2] = (tr, tc)
+                        else:
+                            for i, (r, c) in enumerate(coords):
+                                if (r, c) == (fr, fc):
+                                    coords[i] = (tr, tc)
+                                    break
+                        edges.append(self._state_id_from_parts(
+                            coords, king_pos, 1 - side))
+                        cnt[sid] += 1
+                        board[fr][fc] = piece
+                        board[tr][tc] = '.'
+                        if piece == 'K':
+                            king_pos[1] = (fr, fc)
+                        elif piece == 'k':
+                            king_pos[2] = (fr, fc)
+                        else:
+                            coords[i] = (fr, fc)
+                    elif target.upper() == 'K':
+                        # 吃王 = 终端胜（W_1 种子），绝不进子表解析
+                        if cap_win[sid] == 0 or cap_win[sid] > 1:
+                            cap_win[sid] = 1
+                    else:
+                        # 吃非王子 → 子表解析
+                        piece = board[fr][fc]
+                        board[tr][tc] = piece
+                        board[fr][fc] = '.'
+                        if piece == 'K':
+                            king_pos[1] = (tr, tc)
+                        elif piece == 'k':
+                            king_pos[2] = (tr, tc)
+                        else:
+                            for i, (r, c) in enumerate(coords):
+                                if (r, c) == (fr, fc):
+                                    coords[i] = (tr, tc)
+                                    break
+                        outcome, plies = self._resolve_substate(board, mover)
+                        board[fr][fc] = piece
+                        board[tr][tc] = target
+                        if piece == 'K':
+                            king_pos[1] = (fr, fc)
+                        elif piece == 'k':
+                            king_pos[2] = (fr, fc)
+                        else:
+                            coords[i] = (fr, fc)
+                        if outcome == 'win':
+                            if plies >= DTM_ILLEGAL:
+                                raise ValueError(f'{self.sig}: 吃子胜线 {plies} 超出范围')
+                            if cap_win[sid] == 0 or plies < cap_win[sid]:
+                                cap_win[sid] = plies
+                        elif outcome == 'lose':
+                            if plies >= DTM_ILLEGAL:
+                                raise ValueError(f'{self.sig}: 吃子输线 {plies} 超出范围')
+                            if plies > max_sub_loss[sid]:
+                                max_sub_loss[sid] = plies
+                        else:
+                            draw_escape[sid] = 1
+                # 结算：种子 / 全吃子状态
+                if cap_win[sid]:
+                    seed_buckets[cap_win[sid]].append(sid)
+                elif cnt[sid] == 0 and not draw_escape[sid] and max_sub_loss[sid] >= 1:
+                    # 全部走法都是吃子且都输 → 直接判 L
+                    d = max_sub_loss[sid]
+                    dtm[sid] = d
+                    loser[sid] = mover
+                    l_buckets[d].append(sid)
 
-            iteration += 1
-            if iteration % 500 == 0:
-                print(f'    迭代 {iteration}: queue_size={len(queue)}, '
-                      f'dtm={cur_dtm}')
+            if (pos_rank + 1) % 50000 == 0:
+                print(f'    pass1 {pos_rank + 1}/{N}（{time.time() - t0:.0f}s）')
 
-        # 转换回 self._dtm: (dtm, loser) 对
-        for i, (h, _) in enumerate(pos_list):
-            if dtm_val[i] >= 0:
-                self._dtm[h] = (dtm_val[i], dtm_loser[i])
+        offsets[S] = len(edges)
+        E = len(edges)
+        print(f'    pass1 完成（{time.time() - t0:.0f}s，边数 {E}），转置反向边...')
 
-        self._generated = True
-        covered = len(self._dtm)
-        print(f'    完成：{covered}/{n_positions} 局面已覆盖')
+        # ── 转置前向边 → 反向边（两遍 E，不二次走法生成）──
+        counts = array('I', [0]) * S
+        for t in edges:
+            counts[t] += 1
+        rev_off = array('I', [0]) * (S + 1)
+        acc = 0
+        for s in range(S):
+            rev_off[s] = acc
+            acc += counts[s]
+        rev_off[S] = acc
+        rev = array('I', [0]) * E
+        cursor = array('I', rev_off[:S])
+        for s in range(S):
+            for e in range(offsets[s], offsets[s + 1]):
+                t = edges[e]
+                rev[cursor[t]] = s
+                cursor[t] += 1
+        del edges, counts, cursor, offsets
 
+        # ── Pass 2：按 ply 桶固定点 ──
+        def cascade(u: int, trigger_ply: int) -> None:
+            """W 状态 u 被赋值（ply=trigger_ply）后，递减其前驱计数并判 L。"""
+            for e in range(rev_off[u], rev_off[u + 1]):
+                v = rev[e]
+                c = cnt[v] - 1
+                cnt[v] = c
+                if (c == 0 and dtm[v] == DTM_ILLEGAL
+                        and not draw_escape[v] and cap_win[v] == 0):
+                    d = trigger_ply + 1
+                    if max_sub_loss[v] > d:
+                        d = max_sub_loss[v]
+                    if d >= DTM_ILLEGAL:
+                        raise ValueError(f'{self.sig}: DTM {d} 超出 253（状态 {v}）')
+                    dtm[v] = d
+                    loser[v] = (v & 1) + 1
+                    l_buckets[d].append(v)
 
-    def probe(self, board: list, current_player: int) -> Optional[Tuple[int, int]]:
-        """查 DTM 表，返回 (dtm, loser) 对或 None。
+        for ply in range(1, DTM_ILLEGAL):
+            # (a) L_{ply-1} 的前驱 → W_ply（首触即最小 DTM）
+            for q in l_buckets[ply - 1]:
+                for e in range(rev_off[q], rev_off[q + 1]):
+                    u = rev[e]
+                    if dtm[u] != DTM_ILLEGAL:
+                        continue
+                    dtm[u] = ply
+                    loser[u] = loser[q]
+                    cascade(u, ply)
+            # (b) 种子（吃王 W_1 / 吃子子表胜）— 与 L 发现同序处理保证最小性
+            for u in seed_buckets[ply]:
+                if dtm[u] != DTM_ILLEGAL:
+                    continue
+                dtm[u] = ply
+                loser[u] = 2 - (u & 1)
+                cascade(u, ply)
+
+        # ── 结算：未赋值 = 和棋；统计 ──
+        red_loses = black_loses = draws = 0
+        max_real = 0
+        for pos_rank in range(N):
+            if not legal_pos[pos_rank]:
+                continue
+            sid0 = pos_rank * 2
+            for side in (0, 1):
+                sid = sid0 + side
+                d = dtm[sid]
+                if d == DTM_ILLEGAL:
+                    dtm[sid] = DTM_DRAW
+                    loser[sid] = 0
+                    draws += 1
+                else:
+                    if loser[sid] == 1:
+                        red_loses += 1
+                    else:
+                        black_loses += 1
+                    if d > max_real:
+                        max_real = d
+        if max_real > MAX_REAL_DTM:
+            raise ValueError(f'{self.sig}: 最大 DTM {max_real} 超出 {MAX_REAL_DTM}')
+
+        self.dtm = dtm
+        self.loser = loser
+        self.loaded = True
+        print(f'  完成 {self.sig}: 红负 {red_loses}，黑负 {black_loses}，和棋 {draws}，'
+              f'最大 DTM {max_real}（{time.time() - t0:.0f}s）')
+
+    def _resolve_substate(self, board: List[List[str]],
+                          mover: int) -> Tuple[str, int]:
+        """吃子后的子表解析。board 已应用吃子走法，mover = 吃子方。
 
         Returns:
-            None: 局面不在表中
-            (dtm, loser): dtm=杀棋距离, loser=被将死方(1=红,2=黑)
+            (outcome, plies)：outcome ∈ {'win','lose','draw'}（吃子方视角），
+            plies 为含吃子这一手的总 ply。
         """
-        if not self._generated:
+        red_att = black_att = 0
+        for r in range(BOARD_HEIGHT):
+            for c in range(BOARD_WIDTH):
+                p = board[r][c]
+                if p == '.':
+                    continue
+                if p.isupper():
+                    if p in ATTACKER_TYPES:
+                        red_att += 1
+                elif p in 'rncp':
+                    black_att += 1
+        if red_att > 0:
+            canon_board = board
+            canon_mover = 3 - mover       # 规范帧中非吃子方（下一手方）
+        elif black_att > 0:
+            canon_board = _rotate_board(board)
+            canon_mover = mover
+        else:
+            # 双方无攻击子力 → 平凡和棋（不可能成杀/困毙）
+            return ('draw', 0)
+
+        extras = []
+        for r in range(BOARD_HEIGHT):
+            for c in range(BOARD_WIDTH):
+                p = canon_board[r][c]
+                if p not in ('.', 'K', 'k'):
+                    extras.append(p)
+        sig = 'Kk' + ''.join(sorted(extras, key=lambda p: _TYPE_ORDER.get(p, 99)))
+        table = self.sub_tables.get(sig)
+        if table is None:
+            return ('draw', 0)           # 防御性：视为和棋
+        res = table.probe(canon_board, canon_mover)
+        if res is None or res[0] == DTM_DRAW:
+            return ('draw', 0)
+        d, sub_loser = res
+        if sub_loser == canon_mover:
+            # 非吃子方负 → 吃子方胜
+            return ('win', d + 1)
+        return ('lose', d + 1)
+
+    # ── 查询 / 存取 ──
+
+    def probe(self, board: List[List[str]],
+              current_player: int) -> Optional[Tuple[int, int]]:
+        """查表。board 必须是规范帧（红方为攻方）。返回 (dtm, loser) 或 None。"""
+        if not self.loaded:
             return None
-        key = _board_key(board)
-        if key in self._dtm:
-            return self._dtm[key]
-        h = _board_to_index(board)
-        return self._dtm.get(h)
+        rk = bk = None
+        extra_pos: Dict[str, List[Tuple[int, int]]] = {}
+        for r in range(BOARD_HEIGHT):
+            for c in range(BOARD_WIDTH):
+                p = board[r][c]
+                if p == 'K':
+                    rk = (r, c)
+                elif p == 'k':
+                    bk = (r, c)
+                elif p != '.':
+                    extra_pos.setdefault(p, []).append((r, c))
+        if rk is None or bk is None or sum(len(v) for v in extra_pos.values()) != self.k:
+            return None
+        kp = _kp_index(rk, bk)
+        if kp < 0:
+            return None
+        rk_flat = _flat(rk[0], rk[1])
+        bk_flat = _flat(bk[0], bk[1])
+        us = []
+        for p in self.extras:
+            lst = extra_pos.get(p)
+            if not lst:
+                return None
+            us.append(_upos(_flat(*lst[0]), rk_flat, bk_flat))
+            del lst[0]
+        sid = (kp * self.placements + self._placement_rank(us)) * 2 \
+            + (0 if current_player == 1 else 1)
+        d = self.dtm[sid]
+        if d == DTM_ILLEGAL:
+            return None
+        return (d, self.loser[sid])
 
     def save(self, filepath: str) -> None:
-        """保存为紧凑二进制文件。
-
-        格式：header + 每个局面的 (board_hash:u32, dtm:u8, loser:u8)。
-        """
-        if not self._generated:
-            return
+        """保存 v3 格式（tmp + 原子替换，防半截文件）。"""
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, 'wb') as f:
+        tmp = filepath + '.tmp'
+        sig_b = self.sig.encode('ascii')
+        with open(tmp, 'wb') as f:
             f.write(DTM_MAGIC)
-            count = len(self._dtm)
-            f.write(struct.pack('<I', count))
-            for key, val in self._dtm.items():
-                if isinstance(val, tuple):
-                    dtm, loser = val
-                else:
-                    dtm, loser = val, 0  # 兼容旧格式
-                # 键可能是 tuple (in-memory) 或 int (from load)
-                if isinstance(key, tuple):
-                    board = [list(row) for row in key]
-                    h = _board_to_index(board)
-                else:
-                    h = key
-                f.write(struct.pack('<I', h))
-                f.write(struct.pack('<BB', min(dtm, 255), loser & 0xFF))
+            f.write(bytes([len(sig_b)]))
+            f.write(sig_b)
+            f.write(struct.pack('<I', self.num_positions))
+            f.write(bytes(self.dtm))
+            f.write(bytes(self.loser))
+        os.replace(tmp, filepath)
 
     def load(self, filepath: str) -> bool:
-        """从紧凑二进制文件加载。"""
+        """加载 v3 格式（校验魔数 + 签名 + 局面数 + 体长）。"""
         if not os.path.isfile(filepath):
             return False
-        with open(filepath, 'rb') as f:
-            magic = f.read(5)
-            if magic != DTM_MAGIC:
+        try:
+            with open(filepath, 'rb') as f:
+                if f.read(5) != DTM_MAGIC:
+                    return False
+                sl = f.read(1)
+                if not sl:
+                    return False
+                if f.read(sl[0]).decode('ascii') != self.sig:
+                    return False
+                if struct.unpack('<I', f.read(4))[0] != self.num_positions:
+                    return False
+                data = f.read()
+            if len(data) != self.num_positions * 4:
                 return False
-            count = struct.unpack('<I', f.read(4))[0]
-            for _ in range(count):
-                h = struct.unpack('<I', f.read(4))[0]
-                dtm = struct.unpack('<B', f.read(1))[0]
-                loser = struct.unpack('<B', f.read(1))[0]
-                self._dtm[h] = (dtm, loser)  # 始终存 tuple
-        self._generated = True
+        except (OSError, struct.error, UnicodeDecodeError):
+            return False
+        self.dtm = bytearray(data[:self.num_positions * 2])
+        self.loser = bytearray(data[self.num_positions * 2:])
+        self.loaded = True
         return True
+
+
+# ── 规范化与查询 ──
+
+def _canonicalize(board: List[List[str]],
+                  current_player: int) -> Optional[Tuple[List[List[str]], int, bool, str]]:
+    """规范化：返回 (canon_board, canon_mover, rotated, sig) 或 None（双方无攻击子力）。"""
+    red_att = black_att = 0
+    for r in range(BOARD_HEIGHT):
+        for c in range(BOARD_WIDTH):
+            p = board[r][c]
+            if p == '.':
+                continue
+            if p.isupper():
+                if p in ATTACKER_TYPES:
+                    red_att += 1
+            elif p in 'rncp':
+                black_att += 1
+    if red_att > 0:
+        rotated = False
+        canon_board = board
+        canon_mover = current_player
+    elif black_att > 0:
+        rotated = True
+        canon_board = _rotate_board(board)
+        canon_mover = 3 - current_player
+    else:
+        return None
+    extras = []
+    for r in range(BOARD_HEIGHT):
+        for c in range(BOARD_WIDTH):
+            p = canon_board[r][c]
+            if p not in ('.', 'K', 'k'):
+                extras.append(p)
+    sig = 'Kk' + ''.join(sorted(extras, key=lambda p: _TYPE_ORDER.get(p, 99)))
+    return canon_board, canon_mover, rotated, sig
 
 
 # ── 全局缓存 ──
 _tables: Dict[str, DtmTable] = {}
-_loaded_piece_sets: Set[str] = set()
 
 
-def probe_local(board: list, piece_count: int,
+def probe_local(board: List[List[str]], piece_count: int,
                 current_player: int) -> Optional[Tuple[float, int]]:
     """查询本地 DTM 残局库。
 
@@ -634,75 +635,105 @@ def probe_local(board: list, piece_count: int,
 
     Returns:
         None: 无匹配的本地表
-        (score, dtm): score 是 current_player 视角的 centipawn，dtm 是杀棋距离
+        (score, dtm): score 是 current_player 视角的 centipawn（和棋返回 (0.0, 0)），
+        dtm 是杀棋距离（ply）
     """
     if piece_count > 4:
         return None
 
-    pieces = []
-    for r in range(BOARD_HEIGHT):
-        for c in range(BOARD_WIDTH):
-            p = board[r][c]
-            if p != '.':
-                pieces.append(p)
-
-    key = _piece_set_key(tuple(pieces))
-
-    if key not in _tables:
-        filepath = os.path.join(DTM_DIR, f'{key}.dtm')
-        table = DtmTable(tuple(pieces))
-        if not table.load(filepath):
-            return None
-        _tables[key] = table
-
-    result = _tables[key].probe(board, current_player)
-    if result is None:
+    canon = _canonicalize(board, current_player)
+    if canon is None:
         return None
+    canon_board, canon_mover, rotated, sig = canon
 
-    dtm_val, loser = result
-    # score 从 current_player 视角：
-    # 如果 current_player 是 loser → 负分（被将死）；否则 → 正分（将死对方）
+    table = _tables.get(sig)
+    if table is None:
+        filepath = os.path.join(DTM_DIR, f'{sig}.dtm')
+        t = DtmTable.from_sig(sig)
+        if not t.load(filepath):
+            return None
+        _tables[sig] = t
+        table = t
+
+    res = table.probe(canon_board, canon_mover)
+    if res is None:
+        return None
+    d, loser_canon = res
+    if d == DTM_DRAW:
+        return (0.0, 0)
+    loser = 3 - loser_canon if rotated else loser_canon
+    score = 99900 - d * 100
     if current_player == loser:
-        score = -(99900 - dtm_val * 100)  # 被将死，负分
-    else:
-        score = 99900 - dtm_val * 100      # 将死对方，正分
-    return (float(score), dtm_val)
+        score = -score
+    return (float(score), d)
 
 
-def generate_all_4piece() -> None:
-    """生成所有 4 子及以下残局的 DTM 表。"""
+def _file_matches(filepath: str, sig: str, num_positions: int) -> bool:
+    """文件是否完整匹配（魔数 + 签名 + 局面数 + 体长）。"""
+    if not os.path.isfile(filepath):
+        return False
+    try:
+        with open(filepath, 'rb') as f:
+            if f.read(5) != DTM_MAGIC:
+                return False
+            sl = f.read(1)
+            if not sl:
+                return False
+            if f.read(sl[0]).decode('ascii') != sig:
+                return False
+            if struct.unpack('<I', f.read(4))[0] != num_positions:
+                return False
+            return len(f.read()) == num_positions * 4
+    except (OSError, struct.error, UnicodeDecodeError):
+        return False
+
+
+def generate_all_4piece(force: bool = False, only: Optional[str] = None) -> None:
+    """生成全部 ≤4 子残局 DTM 表（依赖序；已有完整文件则跳过）。
+
+    Args:
+        force: 忽略已有文件全部重新生成
+        only: 只生成指定表（如 'KkR'）；依赖表仍从磁盘加载
+    """
     os.makedirs(DTM_DIR, exist_ok=True)
-
-    # 定义所有 4 子及以下的残局类型
-    # 格式：(红方攻击子, 黑方攻击子)，将/帥各一自动包含
-    # 3 子：单攻击子对孤将
-    three_piece = [
-        ('R', ''),  # 单車
-        ('N', ''),  # 单馬
-        ('C', ''),  # 单炮
-        ('P', ''),  # 单兵
-    ]
-    # 4 子：单车对士、单车对象等
-    four_piece = [
-        ('R', 'A'), ('R', 'B'),  # 车对单士/单象
-        ('R', 'AA'), ('R', 'AB'), ('R', 'BB'),  # 车对双士/士象/双象
-        ('N', 'A'), ('N', 'B'),  # 马对单士/单象
-        ('R', 'P'), ('N', 'P'), ('C', 'P'),  # 对单卒
-        ('RR', ''), ('RN', ''), ('RC', ''),  # 双攻击子
-    ]
-
-    for red_attackers, black_attackers in three_piece + four_piece:
-        pieces = ['K'] + list(red_attackers) + ['k'] + list(black_attackers)
-        key = _piece_set_key(tuple(pieces))
-        filepath = os.path.join(DTM_DIR, f'{key}.dtm')
-        if os.path.isfile(filepath):
-            print(f'跳过（已存在）: {key}')
+    errors = []
+    for pieces in TABLE_SETS:
+        t = DtmTable(pieces)
+        filepath = os.path.join(DTM_DIR, f'{t.sig}.dtm')
+        if only is not None and t.sig != only:
+            # 依赖表：只需装载（若磁盘有完整文件）
+            if _file_matches(filepath, t.sig, t.num_positions):
+                t.load(filepath)
+                _tables[t.sig] = t
             continue
-        table = DtmTable(tuple(pieces))
-        try:
-            table.generate()
-            if table._dtm:
-                table.save(filepath)
-                print(f'  保存: {filepath} ({len(table._dtm)} 条目)')
-        except Exception as e:
-            print(f'  错误: {e}')
+        if not force and _file_matches(filepath, t.sig, t.num_positions):
+            if not t.load(filepath):
+                errors.append((t.sig, '加载失败'))
+                continue
+            print(f'跳过（已存在且完整）: {t.sig}')
+        else:
+            try:
+                t.generate(_tables)
+                t.save(filepath)
+                print(f'  保存: {filepath}')
+            except Exception as e:
+                errors.append((t.sig, repr(e)))
+                print(f'  错误 {t.sig}: {e}')
+                continue
+        _tables[t.sig] = t
+    if errors:
+        print(f'\n完成，{len(errors)} 个错误:')
+        for sig, e in errors:
+            print(f'  {sig}: {e}')
+    else:
+        print('全部完成')
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='生成本地 DTM 残局表（逆向回推）')
+    parser.add_argument('--only', help='只生成指定表（如 KkR）')
+    parser.add_argument('--force', action='store_true', help='忽略已有文件，全部重新生成')
+    args = parser.parse_args()
+    generate_all_4piece(force=args.force, only=args.only)

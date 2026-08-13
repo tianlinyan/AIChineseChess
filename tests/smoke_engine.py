@@ -181,17 +181,17 @@ def test_egtb_local():
     res = egtb.probe(board, 1, 2, allow_cloud=False)
     check('EGTB 双将=和', res == (0.0, 0), f'实际 {res}')
 
-    # 单車 vs 孤将 → 必胜（大分）
+    # 单車 vs 孤将 → 必胜（大分）（車在 4 路隔开双将，合法局面）
     board2 = empty_board()
     board2[0][4] = 'k'
     board2[9][4] = 'K'
-    board2[5][5] = 'R'
+    board2[5][4] = 'R'
     res2 = egtb.probe(board2, 1, 3, allow_cloud=False)
     check('EGTB 单車vs孤将=胜', res2 is not None and res2[0] > 50000, f'实际 {res2}')
 
-    # 单馬 vs 孤将 → 单马必胜孤将（修复后应为胜分）
+    # 单馬 vs 孤将 → 单马必胜孤将（黑将移出 4 路避免照面）
     board3 = empty_board()
-    board3[0][4] = 'k'
+    board3[0][3] = 'k'
     board3[9][4] = 'K'
     board3[5][5] = 'N'
     res3 = egtb.probe(board3, 1, 3, allow_cloud=False)
@@ -211,9 +211,9 @@ def test_egtb_local():
           res4 is None or res4[0] < 50000, f'实际 {res4}')
 
     # ── 单卒分支（结论经 chessdb.cn 云库实测核对）──
-    # 过河未到底 vs 孤将 → 胜
+    # 过河未到底 vs 孤将 → 胜（黑将移出 4 路避免照面）
     board5 = empty_board()
-    board5[0][4] = 'k'
+    board5[0][3] = 'k'
     board5[9][4] = 'K'
     board5[4][4] = 'P'   # 红卒过河（r<=4）未到底
     res5 = egtb.probe(board5, 1, 3, allow_cloud=False)
