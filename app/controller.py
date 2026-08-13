@@ -105,12 +105,16 @@ class GameController:
     # ── per-side 便捷访问 ──
 
     def _get_current_search_depth(self) -> int:
-        """引擎桥接回调：返回当前 AI 方的搜索深度。"""
+        """引擎桥接回调：返回当前 AI 方的搜索深度。
+
+        所有搜索路径（make_ai_move / _fallback_to_search / 提示搜索）都会
+        先设置 _current_ai_player；0 仅在尚未设置时出现，防御性回退到红方。
+        """
         if self._current_ai_player == 1:
             return self.red_search_depth
         if self._current_ai_player == 2:
             return self.black_search_depth
-        # 未初始化（-1）：防御性回退到红方深度
+        # 未初始化（0）：防御性回退到红方深度
         return self.red_search_depth
 
     def _ai_mode_for(self, player: int) -> str:
@@ -365,6 +369,8 @@ class GameController:
                     'INFO')
             else:
                 self.log(f"💡 {player_name} 引擎暂无建议，请自行走子", 'INFO')
+
+        self._current_ai_player = current_player  # 引擎桥接回调用（提示搜索也可能先于任何 AI 走子）
 
         self._engine.start_hint_search(
             self.game, current_player, _on_hint_done)
