@@ -184,6 +184,7 @@ def probe(board: list, current_player: int,
     Returns:
         None — 残局库中无此局面
         (score, dtm) — 评估分数（current_player 视角）和距离杀棋步数
+          （score==0.0 即和棋；本地 DTM 表和棋返回 dtm=DTM_DRAW(255)）
     """
     # 只有子力 ≤ EGTB_MAX_PIECES 才查询
     if piece_count > EGTB_MAX_PIECES:
