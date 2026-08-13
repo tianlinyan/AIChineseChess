@@ -68,6 +68,10 @@ class AIWorker:
 
         # 收集所有工具调用产生的文本
         self._all_texts: list = []
+        # search_best_move 每步最多一次（系统提示词约定，此处强制）
+        self._search_used = False
+        # evaluate_position 每步最多两次（防弱模型刷满轮次导致无走法）
+        self._evaluate_count = 0
 
     def run(self) -> None:
         self._session = requests.Session()
@@ -228,8 +232,18 @@ class AIWorker:
                              ensure_ascii=False)
 
         if name == 'search_best_move':
+            if self._search_used:
+                return json.dumps(
+                    {'error': '本回合已调用过 search_best_move（每步最多一次），请基于已有信息选择走法'},
+                    ensure_ascii=False)
+            self._search_used = True
             return self._run_search(args)
         elif name == 'evaluate_position':
+            if self._evaluate_count >= 2:
+                return json.dumps(
+                    {'error': '本回合已调用过 2 次 evaluate_position（每步最多 2 次），请基于已有信息选择走法'},
+                    ensure_ascii=False)
+            self._evaluate_count += 1
             return self._run_evaluate()
         else:
             return json.dumps({'error': f'未知工具: {name}'}, ensure_ascii=False)
@@ -275,18 +289,19 @@ class AIWorker:
                 if tmp_game.is_in_check(opponent):
                     s += 50.0 if player == 1 else -50.0
                 SearchEngine._unmake_move(tmp_game, fr, fc, tr, tc, captured)
-                # 归一化：将评分转为"越高=对当前玩家越有利"
-                if player == 2:
-                    s = -s
-                # MVV-LVA 吃子加分（当前玩家视角）
-                # 必须在归一化之后加：先加再取反会让黑方吃子加分变减分
+                # 评分统一红方视角（正值=红优，负值=黑优），与 evaluate_position
+                # 工具的口径一致——避免黑方走棋时两工具同号含义相反
+                # MVV-LVA 吃子加分（红方视角）：红吃子加分，黑吃子减分
                 if captured != '.':
-                    s += PIECE_VALUE.get(captured.upper(), 0) * 10 - PIECE_VALUE.get(piece.upper(), 0)
+                    bonus = (PIECE_VALUE.get(captured.upper(), 0) * 10
+                             - PIECE_VALUE.get(piece.upper(), 0))
+                    s += bonus if player == 1 else -bonus
                 scored.append((fr, fc, tr, tc, s))
 
-            # 归一化后高分=好棋 → 始终降序排列（最佳走法排最前）
-            scored.sort(key=lambda x: x[4], reverse=True)
+            # 红方视角排序：红方走棋高分在前，黑方走棋低分在前
+            scored.sort(key=lambda x: x[4], reverse=(player == 1))
             top_moves = scored[:top_n]
+            # best_score 本身就是红方视角（search.py 公开接口约定），不再转换
             best_score = engine.best_score
 
             # 格式化
@@ -304,8 +319,10 @@ class AIWorker:
             lines.append(f"★ 搜索首选: {bpn} {chr(65+bfc)}{bfr+1}→{chr(65+btc)}{btr+1}{bcap}")
             lines.append("")
 
-            lines.append(f"候选走法 Top-{len(top_moves)}（静态评估排序）：")
-            for i, (fr, fc, tr, tc, s) in enumerate(top_moves, 1):
+            # 候选按战术优先级排序（吃大子>将军>局面评估），只印排名不印分数：
+            # 排序键由 MVV-LVA×10 加分与评估分混合构成，量纲不同，数值会误导 LLM 比较
+            lines.append(f"候选走法 Top-{len(top_moves)}（战术优先级排序：吃大子、将军优先，其后按局面评估）：")
+            for i, (fr, fc, tr, tc, _s) in enumerate(top_moves, 1):
                 piece = board[fr][fc]
                 piece_name = PIECE_SYMBOLS.get(piece, piece)
                 from_c = f"{chr(65+fc)}{fr+1}"
@@ -316,7 +333,7 @@ class AIWorker:
                     cap_name = PIECE_SYMBOLS.get(captured, captured)
                     cap_info = f" 吃{cap_name}"
                 marker = ' ← 搜索首选' if (fr, fc, tr, tc) == best_move else ''
-                lines.append(f"  {i}. [{s:+.0f}] {piece_name} {from_c}→{to_c}{cap_info}{marker}")
+                lines.append(f"  {i}. {piece_name} {from_c}→{to_c}{cap_info}{marker}")
 
             lines.append("")
             lines.append("请综合考虑搜索建议和你的战略判断，选择最优走法。最终调用 move_piece 提交。")

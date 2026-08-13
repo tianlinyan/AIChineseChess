@@ -814,6 +814,31 @@ class ChineseChessGame:
 
         return 0  # 三局面重复，和棋
 
+    def find_repetition_moves(self, moves: list) -> set:
+        """返回走后会触发重复判决（和棋 / 长将判负）的走法集合。
+
+        用于提示词合法走法列表的 ⚠️ 标注：LLM 走了这类着法后游戏
+        会立即以和棋/判负结束（move_piece 返回 success，无重试反馈），
+        必须在落子前让模型看见地雷。
+
+        实现：在携带真实重复历史的快照上逐一模拟。snapshot() 不复制
+        _position_history/_move_checks（搜索等快照用途不需要、也不应
+        触发重复判决），此处显式复制。from_snapshot 全量重建的 Zobrist
+        与增量维护路径一致（同一 XOR 公式），重复判决判定有效。
+        自然限着计数从 0 起，不会在快照上误判限着和棋。
+        """
+        repeats = set()
+        for mv in moves:
+            tmp = ChineseChessGame.from_snapshot(
+                self.get_board_copy(), self.current_player, self._king_pos)
+            tmp._position_history = list(self._position_history)
+            tmp._move_checks = list(self._move_checks)
+            result = tmp.move_piece(*mv)
+            msg = result.get('message', '')
+            if result.get('success') and ('重复' in msg or '长将' in msg):
+                repeats.add(mv)
+        return repeats
+
     def get_move_key(self) -> tuple:
         """返回当前走子序列的关键字（用于开局库精确匹配）。
 

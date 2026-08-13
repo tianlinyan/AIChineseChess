@@ -3,7 +3,6 @@
 ## Run the app
 
 ```bash
-pip install -r requirements.txt
 python main.py
 ```
 
@@ -16,7 +15,7 @@ python tests/test_evaluation.py   # 评估函数正确性/对称性/增量等价
 python tests/test_incremental.py  # 增量缓存一致性
 ```
 
-改动后按 `.claude/skills/verify/SKILL.md` 的矩阵选择验证：`domain/`（走法/搜索/评估）→ 冒烟 + 对拍；`domain/openings.py` → 追加开局线逐线合法性；`domain/pikafish.py` → 冒烟 + 引擎启停；`app/ ui/ main.py` → GUI 启动；`ai/` → 冒烟。
+改动后按 `.claude/skills/verify/SKILL.md` 的矩阵选择验证。
 
 ## Architecture
 
@@ -68,7 +67,7 @@ LLM 分析 + 引擎参考 → 一致→落子 / 分歧→DeepSeek 仲裁
 - **Opening book**: 46 条标准开局线（`domain/openings.py`），前缀加权随机选择。
 - **EGTB integration**: 本地启发式≤10 子；chessdb.cn cloud 查询≤6 子已实现但未接入生产——所有生产调用者使用 `allow_cloud=False`。
 - **MCTS fallback**: 后台线程 MCTS 使用缩减限制。Hybrid 模式 LLM 失败直接用引擎结果或随机，不回落搜索。
-- **Prompts**: 紧凑结构化提示词。合法走法带战术标注（×吃子、+将军）；子力平衡每回合透视注入；走子历史截断至最近 24 手。仲裁使用"安全门优先，收益排序"两步式评分。
+- **Prompts**: 紧凑结构化提示词。合法走法带战术标注（×吃子、+将军、⚠️重复和棋风险）；子力平衡每回合透视注入；走子历史截断至最近 24 手。`evaluate_position` 与 `search_best_move` 评分统一为红方视角（正值=红优）。仲裁使用"安全门优先，收益排序"两步式评分，候选附对称客观事实包（吃子/将军/将杀/评估/重复）。
 
 ## Piece Name Convention
 

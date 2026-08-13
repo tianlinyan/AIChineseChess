@@ -23,7 +23,7 @@ from domain.prompts import (
     TOOLS_BASIC, DEFAULT_TOOLS,
 )
 from domain.game import ChineseChessGame
-from domain.evaluation import compute_material
+from domain.evaluation import compute_material, evaluate
 from domain.openings import get_opening_move, get_opening_candidates, get_opening_names
 from ai.manager import AIManager
 from ai.worker import AIWorker
@@ -86,7 +86,6 @@ class GameController:
 
         # ── Hybrid 模式：引擎搜索结果暂存（LLM 失败时兜底用）──
         self._hybrid_engine_move: Optional[tuple] = None
-        self._last_engine_name: str = '引擎'
 
         # ── AI 计分（仲裁模式）──
         self.ai_score: int = 0  # LLM 与仲裁一致 +1，不一致 +0（不倒扣）
@@ -96,7 +95,6 @@ class GameController:
         self._arbitration_llm_move: Optional[tuple] = None
         self._arbitration_llm_text: str = ''
         self._arbitration_engine_move: Optional[tuple] = None
-        self._arbitration_engine_name: str = ''
 
         # ── 人类玩家参考提示 ──
         self._hint_active: bool = False
@@ -219,7 +217,6 @@ class GameController:
         self._arbitration_llm_move = None
         self._arbitration_llm_text = ''
         self._arbitration_engine_move = None
-        self._arbitration_engine_name = ''
         if self.main:
             self.main.update_ai_score()
 
@@ -540,8 +537,11 @@ class GameController:
             self._finish_ai_move()
             return
 
-        # 格式化合法走法列表（带 ×吃子 / +将军 战术标注）
-        legal_moves_str = format_legal_moves(legal_moves, self.game.board, player)
+        # 格式化合法走法列表（×吃子 / +将军 / ⚠️重复标注）
+        repetition_moves = self.game.find_repetition_moves(legal_moves)
+        legal_moves_str = format_legal_moves(
+            legal_moves, self.game.board, player,
+            repetition_moves=repetition_moves)
 
         # 子力对比（视角相对：帮助 LLM 落实"优势简化、劣势复杂"策略）
         red_mat, black_mat, _, _ = compute_material(self.game.board)
@@ -553,7 +553,7 @@ class GameController:
             mat_trend = f"你落后 {-mat_diff:g}，避免无补偿兑子"
         else:
             mat_trend = "子力均势"
-        material_str = f"子力对比：你 {mine:g} : {theirs:g} 对手 —— {mat_trend}"
+        material_str = f"子力对比（单位=兵）：你 {mine:g} : {theirs:g} 对手 —— {mat_trend}"
 
         # 上一步走子描述
         last_move_str = ''
@@ -579,7 +579,6 @@ class GameController:
             opponent_in_check=opponent_in_check,
             move_count=move_count,
             last_move_str=last_move_str,
-            legal_move_count=legal_move_count,
             legal_moves_str=legal_moves_str,
             last_move_error=self.last_move_error,
             retry_count=self.retry_count,
@@ -653,10 +652,6 @@ class GameController:
 
         player_name = '红方' if player == 1 else '黑方'
 
-        # 保存引擎名称与描述（仲裁时需要）
-        self._last_engine_name = engine_name
-        self._last_engine_desc = engine_desc
-
         # 格式化引擎参考走法 + 日志输出
         engine_hint = ''
         if engine_move:
@@ -679,6 +674,8 @@ class GameController:
                         f"{engine_name} 是顶级战术引擎，战术计算远超语言模型。"
                         f"**默认采信其推荐**；仅当你有具体的战略理由时才坚持己见，"
                         f"并解释为何优于推荐。"
+                        f"推荐已由引擎深度分析，**无需再调用 evaluate_position / "
+                        f"search_best_move 验证**；若怀疑有漏算可调用一次核对。"
                         f"（search_best_move 是本地浅层搜索，强度远低于 {engine_name}，"
                         f"只用于验证具体战术点。）"
                     )
@@ -780,10 +777,7 @@ class GameController:
             self._arbitration_llm_move = final_move
             self._arbitration_llm_text = full_text
             self._arbitration_engine_move = self._hybrid_engine_move
-            # 保存引擎名称（从 _hybrid_engine_move 的来源推断）
             efr, efc, etr, etc = self._hybrid_engine_move
-            self._arbitration_engine_name = getattr(
-                self, '_last_engine_name', '引擎')
 
             # 格式化日志
             epiece = self.game.board[efr][efc] if self.game.board[efr][efc] != '.' else '?'
@@ -1097,6 +1091,34 @@ class GameController:
 
     # ── 第三方仲裁（DeepSeek） ──
 
+    def _build_candidate_facts(self, move: tuple, repetition_moves: set) -> str:
+        """为仲裁候选生成客观事实包（吃子/将军/将杀/评估/重复），不标识来源。
+
+        两个候选由同一代码生成同等密度的事实，供仲裁只按客观优劣裁决，
+        消除"LLM 候选带完整推理、引擎候选依据为空"的信息不对称。
+        评分沿用 evaluate_position 口径：红方视角，正值=红优。
+        """
+        fr, fc, tr, tc = move
+        facts = []
+        captured = self.game.board[tr][tc]
+        if captured != '.':
+            facts.append(f"直接吃子：得{PIECE_SYMBOLS.get(captured, captured)}。")
+        if move in repetition_moves:
+            facts.append("走后局面第三次重复 — 将判和棋/长将判负。")
+            return ''.join(facts)
+        mover = self.game.current_player
+        tmp = self.game.snapshot()
+        tmp.current_player = mover
+        result = tmp.move_piece(fr, fc, tr, tc)
+        if result.get('success'):
+            msg = result.get('message', '')
+            if '将死' in msg:
+                facts.append("走后将死对方，直接获胜。")
+            elif tmp.is_in_check(3 - mover):
+                facts.append("走后将军对方。")
+            facts.append(f"走后局面评估：{evaluate(tmp.board):+.0f}（红方视角，正值=红优）。")
+        return ''.join(facts) if facts else "（未提供分析）"
+
     def _start_arbitration(self, player: int) -> None:
         """启动 DeepSeek 第三方仲裁。
 
@@ -1149,7 +1171,14 @@ class GameController:
             })
             return
 
-        legal_moves_str = format_legal_moves(legal_moves, self.game.board, player)
+        repetition_moves = self.game.find_repetition_moves(legal_moves)
+        legal_moves_str = format_legal_moves(
+            legal_moves, self.game.board, player,
+            repetition_moves=repetition_moves)
+
+        # 子力对比（红黑对称的客观事实，供"形势匹配"维度裁决）
+        red_mat, black_mat, _, _ = compute_material(self.game.board)
+        material_str = f"子力对比（单位=兵）：红 {red_mat:g} : {black_mat:g}"
 
         # LLM 走法描述
         lfr, lfc, ltr, ltc = self._arbitration_llm_move
@@ -1163,21 +1192,13 @@ class GameController:
         epn = PIECE_SYMBOLS.get(epiece, '?')
         engine_move_str = f"{epn} {format_move(efr, efc, etr, etc)}"
 
-        # 引擎候选依据（与 LLM 推理对等的信息密度，消除"修辞多的候选占优"偏差；
-        # 不提引擎名字，避免仲裁方按来源锚定）
-        basis_parts = [
-            f"深度搜索引擎{getattr(self, '_last_engine_desc', '') or '经深度搜索'}后推荐此走法。"
-        ]
-        captured_piece = self.game.board[etr][etc]
-        if captured_piece != '.':
-            basis_parts.append(f"直接吃子：得{PIECE_SYMBOLS.get(captured_piece, captured_piece)}。")
-        # 走后是否将军（在棋盘副本上模拟）
-        _tmp = self.game.snapshot()
-        _tmp.current_player = player
-        if _tmp.move_piece(efr, efc, etr, etc).get('success'):
-            if _tmp.is_in_check(3 - player):
-                basis_parts.append("走后将军对方。")
-        engine_basis = ''.join(basis_parts)
+        # 候选依据：为两个候选对称生成客观事实（吃子/将军/将杀/评估/重复），
+        # 不出现"引擎/搜索"等来源标识——与仲裁提示词"不要揣测候选来源"一致，
+        # 同时消除"LLM 候选带完整推理、引擎候选依据为空"的信息不对称
+        engine_basis = self._build_candidate_facts(
+            (efr, efc, etr, etc), repetition_moves)
+        llm_basis = self._build_candidate_facts(
+            (lfr, lfc, ltr, ltc), repetition_moves)
 
         # 将军状态
         in_check = self.game.is_in_check(player)
@@ -1189,13 +1210,16 @@ class GameController:
             history=history,
             legal_moves_str=legal_moves_str,
             llm_move_str=llm_move_str,
-            llm_reasoning=self._arbitration_llm_text,
+            # 客观事实 + 模型原文推理：事实与引擎候选同源对称，
+            # 推理保留战略判断（长线弃子/阵型缺陷等事实无法覆盖的理由）
+            llm_reasoning=(llm_basis + "\n" + self._arbitration_llm_text
+                           if self._arbitration_llm_text.strip() else llm_basis),
             engine_move_str=engine_move_str,
-            engine_name=self._arbitration_engine_name,
             engine_basis=engine_basis,
             in_check=in_check,
             opponent_in_check=opponent_in_check,
             move_count=move_count,
+            material_str=material_str,
         )
 
         system_prompt = get_arbitration_system_prompt()
