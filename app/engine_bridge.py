@@ -155,19 +155,24 @@ class EngineBridge(QObject):
 
         self._log("🔍 启动引擎搜索...", 'INFO')
 
-        # Pikafish 异步路径
-        if self.pikafish_available and on_done is not None:
+        # Pikafish 异步路径（健康检查 + 自动重启：进程可能在上次搜索后
+        # 静默死亡——假可用或已标记不可用；尝试重启恢复，失败才回退 MCTS，
+        # 避免"引擎中途死亡后整局棋力骤降为 MCTS 兜底"）
+        if on_done is not None and self._pikafish is not None:
             pf = self._pikafish
-            # 启动前健康检查：进程可能在上次搜索后静默死亡（退出码 0 或
-            # 写管道未报错时 _available 不会被置 False），此处兜住并回退 MCTS，
-            # 避免每次 AI 走子都白跑一次死引擎（与 start_hint_search 对齐）。
-            if pf is not None and (pf._proc is None or pf._proc.poll() is not None):
+            if pf._proc is None or pf._proc.poll() is not None:
                 if pf._proc is not None:
                     self._log(
                         f"  ⚠️ Pikafish 进程已意外退出（code={pf._proc.returncode}），"
-                        f"回退 MCTS", 'WARNING')
-                pf._available = False
-            else:
+                        f"尝试重启...", 'WARNING')
+                if pf.restart():
+                    self._log("  ✅ Pikafish 重启成功，继续搜索", 'INFO')
+                else:
+                    self._log(
+                        f"  ⚠️ Pikafish 重启失败（{pf.error_msg}），回退 MCTS",
+                        'WARNING')
+            if (pf.available and pf._proc is not None
+                    and pf._proc.poll() is None):
                 time_ms = self._pikafish_time_s(depth) * 1000
                 self._log(f"  🐟 Pikafish 搜索中（时限 {time_ms // 1000}s）...", 'INFO')
                 self._pikafish.search_async(
@@ -262,17 +267,22 @@ class EngineBridge(QObject):
         game_version = self._get_game_ver()
         cancel_version = self._get_cancel()
 
-        # ── Pikafish 路径 ──
-        if self.pikafish_available:
+        # ── Pikafish 路径（健康检查 + 自动重启，与 start_search 一致）──
+        if self._pikafish is not None:
             pf = self._pikafish
-            # 启动前健康检查：进程可能在上次搜索后意外死亡
-            if pf._proc is not None and pf._proc.poll() is not None:
-                self._log(
-                    f"  ⚠️ Pikafish 进程已意外退出（code={pf._proc.returncode}），"
-                    f"回退 MCTS", 'WARNING')
-                pf._available = False
-                # 继续往下走 MCTS
-            else:
+            if pf._proc is None or pf._proc.poll() is not None:
+                if pf._proc is not None:
+                    self._log(
+                        f"  ⚠️ Pikafish 进程已意外退出（code={pf._proc.returncode}），"
+                        f"尝试重启...", 'WARNING')
+                if pf.restart():
+                    self._log("  ✅ Pikafish 重启成功，继续提示搜索", 'INFO')
+                else:
+                    self._log(
+                        f"  ⚠️ Pikafish 重启失败（{pf.error_msg}），回退 MCTS",
+                        'WARNING')
+            if (pf.available and pf._proc is not None
+                    and pf._proc.poll() is None):
                 self._log(f"  🐟 Pikafish 提示搜索中（{int(MCTS_TIME_LIMIT)}s）...", 'INFO')
                 self._start_pf_hint(g, game_version, cancel_version, on_done)
                 return

@@ -639,6 +639,8 @@ class GameController:
             tools=worker_tools,
             game=self.game,
             current_player=player,
+            # evaluate_position 工具用 Pikafish 大师级评估（None 时回退手工）
+            pikafish=self._engine.pikafish,
         )
         worker.signals.finished.connect(self.on_ai_finished)
         self.ai_manager.set_active_worker(worker)
@@ -670,9 +672,9 @@ class GameController:
                 emove_str = f"{epn} {format_move(efr, efc, etr, etc)}"
                 self.log(f"🔍 {engine_name} 推荐: {emove_str}", 'INFO')
                 # 信任分级：Pikafish 战术强度远超 LLM，默认采信；
-                # MCTS 兜底强度有限（与 search_best_move 相当或更弱），仅作参考。
-                # 旧文案固定声称"search_best_move 强度低于引擎"，
-                # 在 MCTS 兜底时为假，会错误校准 LLM 的信任。
+                # MCTS 兜底为本地轻量引擎，仅作参考。
+                # （search_best_move 现也由 Pikafish 提供，与引擎推荐同源，
+                # 不重复强调"低于引擎"以免错误校准 LLM 信任。）
                 if engine_name == 'Pikafish':
                     trust_note = (
                         f"{engine_name} 是顶级战术引擎，战术计算远超语言模型。"
@@ -680,14 +682,22 @@ class GameController:
                         f"并解释为何优于推荐。"
                         f"推荐已由引擎深度分析，**无需再调用 evaluate_position / "
                         f"search_best_move 验证**；若怀疑有漏算可调用一次核对。"
-                        f"（search_best_move 是本地浅层搜索，强度远低于 {engine_name}，"
-                        f"只用于验证具体战术点。）"
+                        f"（search_best_move 同样由 {engine_name} 提供，与推荐同源，"
+                        f"重复调用仅在二次核对时有意义。）"
                     )
                 else:
+                    # MCTS 兜底分支：此时 Pikafish 不可用（否则不会走兜底），
+                    # 工具实际会降级为本地搜索/手工评估——文案不得声称
+                    # "由 Pikafish 提供"，否则误导 LLM 信任降级工具
+                    if self._engine.pikafish_available:
+                        tool_note = ("建议用 search_best_move / evaluate_position"
+                                     "（由 Pikafish 提供）独立分析后自主决策。")
+                    else:
+                        tool_note = ("分析工具当前降级为本地轻量评估"
+                                     "（Pikafish 不可用），以你的判断为主。")
                     trust_note = (
-                        f"{engine_name} 是本地引擎，强度有限"
-                        f"（与 search_best_move 相当或更弱），其推荐仅供参考。"
-                        f"请用 evaluate_position / search_best_move 独立分析后自主决策。"
+                        f"{engine_name} 是本地轻量引擎，强度有限，其推荐仅供参考。"
+                        f"{tool_note}"
                     )
                 engine_hint = (
                     f"## 🔍 {engine_name} 参考走法\n\n"

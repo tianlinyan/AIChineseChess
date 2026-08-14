@@ -59,7 +59,10 @@ class AIWorker:
                  timeout: int = AI_TIMEOUT_SECONDS,
                  # ── 工具执行所需 ──
                  game: Optional[ChineseChessGame] = None,
-                 current_player: int = 0) -> None:
+                 current_player: int = 0,
+                 # Pikafish 引擎（evaluate_position 工具的大师级评估源；
+                 # 由 controller 注入，None → 回退手工评估）
+                 pikafish: Optional['PikafishEngine'] = None) -> None:
         super().__init__()
         self.model_info = model_info
         self.prompt = prompt
@@ -73,6 +76,7 @@ class AIWorker:
         self.timeout = timeout
         self.game = game
         self.current_player = current_player
+        self.pikafish = pikafish
         self.signals = AIWorkerSignals()
         self._cancelled = threading.Event()
         self._session: Optional[requests.Session] = None
@@ -83,8 +87,9 @@ class AIWorker:
         # 兜底文本解析只用此池，排除 DeepSeek 推理文本里"讨论过但未选中"
         # 的坐标干扰（M-AI-5）
         self._content_texts: list = []
-        # 在途的 Alpha-Beta 搜索引擎（cancel() 可中止，M-AI-1）
-        self._active_search_engine: Optional[SearchEngine] = None
+        # 在途搜索对象（SearchEngine 或 PikafishEngine，均有 .stop()；
+        # cancel() 调用以中止，M-AI-1）
+        self._active_search_engine = None
         # search_best_move 每步最多一次（系统提示词约定，此处强制）
         self._search_used = False
         # evaluate_position 每步最多两次（防弱模型刷满轮次导致无走法）
@@ -296,10 +301,11 @@ class AIWorker:
             return json.dumps({'error': f'未知工具: {name}'}, ensure_ascii=False)
 
     def _run_search(self, args: dict) -> str:
-        """执行 Alpha-Beta 搜索，返回搜索最佳走法及快速评估的候选列表。
+        """执行深度搜索，返回搜索最佳走法及候选列表。
 
-        使用两步策略：①Alpha-Beta 深搜索找最佳走法；
-        ②对所有合法走法用快速静态评估（~0.05ms/步）排序，返回 top-N。
+        优先 Pikafish 深搜（MultiPV 主变，大师级战术）——LLM 拿到的
+        战术参考与引擎决策同源；Pikafish 不可用/未初始化/搜索失败时
+        回退本地 Alpha-Beta（原实现）。
         """
         try:
             # 参数类型防线：弱模型可能传字符串/None，钳制必须在 try 内，
@@ -312,23 +318,107 @@ class AIWorker:
                 ensure_ascii=False)
 
         try:
-            # 主搜索 — 用快照隔离，不修改 self.game.board
+            # 用快照隔离，不修改 self.game.board
+            tmp_game = self.game.snapshot()
+            tmp_game.current_player = self.current_player
+
+            if self.pikafish is not None:
+                result = self._run_search_pikafish(tmp_game, depth, top_n)
+                if result is not None:
+                    return result
+                # Pikafish 失败 → 静默回退本地（不把引擎故障暴露给模型）。
+                # 但若已被 cancel（暂停/重置），不再启动全量本地 AB：
+                # 否则取消不生效且陈旧 worker 空耗 CPU 至多 30s
+                if self._cancelled.is_set():
+                    return json.dumps({'error': '任务已取消'}, ensure_ascii=False)
+            return self._run_search_local(tmp_game, depth, top_n)
+        except Exception as e:
+            return json.dumps({'error': f'搜索失败: {e}'}, ensure_ascii=False)
+
+    def _run_search_pikafish(self, tmp_game, depth: int,
+                             top_n: int):
+        """Pikafish 深搜路径（MultiPV）。返回 JSON 字符串；失败返回 None 回退。"""
+        pf = self.pikafish
+        player = self.current_player
+        # depth 参数映射为思考时限（2~8 → 2.6s~7.4s，封顶 8s）
+        movetime = min(8000, 1000 + depth * 800)
+        # 注册在途搜索：cancel() 发 UCI stop 尽快中止（M-AI-1 同款机制）
+        self._active_search_engine = pf
+        try:
+            # 持锁原子搜索：一次持锁内完成「切 MultiPV 3 → 搜索 → 恢复 1」
+            # 并返回候选快照——消除 set/search/restore 撕裂窗口与
+            # _top_moves 跨搜索 TOCTOU（见 PikafishEngine.search_atomic）；
+            # 锁超时/引擎失败返回 None → 回退本地
+            result = pf.search_atomic(tmp_game, player, movetime,
+                                      multipv=3, lock_timeout_ms=5000)
+            if result is None:
+                return None
+            best_move, raw_top = result
+            # MultiPV 候选：走子方视角评分 → 统一红方视角（与其余工具口径一致）
+            top_moves = []
+            for mv, sc in raw_top[:top_n]:
+                top_moves.append((mv, sc if player == 1 else -sc))
+            best_score = top_moves[0][1] if top_moves else 0.0
+
+            board = tmp_game.board
+            lines = []
+            lines.append(f"Pikafish 深度搜索完成（时限 {movetime // 1000}s，"
+                         f"MultiPV {len(raw_top)} 线）")
+            if best_score >= 99990:
+                lines.append("搜索最佳评分: 将杀（红方胜定）")
+            elif best_score <= -99990:
+                lines.append("搜索最佳评分: 将杀（黑方胜定）")
+            else:
+                lines.append(f"搜索最佳评分: {best_score:+.0f}"
+                             f"（正值=红优，负值=黑优）")
+            lines.append("")
+
+            bfr, bfc, btr, btc = best_move
+            bp = board[bfr][bfc]
+            bpn = PIECE_SYMBOLS.get(bp, bp)
+            bc = board[btr][btc]
+            bcap = f" 吃{PIECE_SYMBOLS.get(bc, bc)}" if bc != '.' else ''
+            lines.append(f"★ 搜索首选: {bpn} {chr(65+bfc)}{bfr+1}→"
+                         f"{chr(65+btc)}{btr+1}{bcap}")
+            lines.append("")
+
+            lines.append(f"候选走法 Top-{len(top_moves)}（MultiPV 主变，按引擎评分排序）：")
+            for i, (mv, _score) in enumerate(top_moves, 1):
+                fr, fc, tr, tc = mv
+                piece = board[fr][fc]
+                pn = PIECE_SYMBOLS.get(piece, piece)
+                from_c = f"{chr(65+fc)}{fr+1}"
+                to_c = f"{chr(65+tc)}{tr+1}"
+                cap = board[tr][tc]
+                cap_info = f" 吃{PIECE_SYMBOLS.get(cap, cap)}" if cap != '.' else ''
+                marker = ' ← 搜索首选' if mv == best_move else ''
+                lines.append(f"  {i}. {pn} {from_c}→{to_c}{cap_info}{marker}")
+
+            lines.append("")
+            lines.append("请综合考虑搜索建议和你的战略判断，选择最优走法。最终调用 move_piece 提交。")
+            return json.dumps({'result': '\n'.join(lines)}, ensure_ascii=False)
+        except Exception:
+            return None
+        finally:
+            self._active_search_engine = None
+
+    def _run_search_local(self, tmp_game, depth: int, top_n: int) -> str:
+        """回退路径：本地 Alpha-Beta 深搜索 + 全走法静态评估排序（原实现）。"""
+        player = self.current_player
+        opponent = 3 - player
+        try:
             engine = SearchEngine(
                 max_depth=depth,
                 time_limit=min(30.0, 2.0 + depth * 3.0),
             )
             # 注册在途引擎：cancel() 调 engine.stop() 尽快中止搜索（M-AI-1）
             self._active_search_engine = engine
-            tmp_game = self.game.snapshot()
-            tmp_game.current_player = self.current_player
-            best_move = engine.search(tmp_game, self.current_player)
+            best_move = engine.search(tmp_game, player)
 
             if not best_move:
                 return json.dumps({'error': '未找到合法走法'}, ensure_ascii=False)
 
             board = tmp_game.board  # 快照棋盘，不碰 live board
-            player = self.current_player
-            opponent = 3 - player
 
             # 对所有走法用增强评估排序（MVV-LVA + 局面分 + 将军检测）
             # 使用 tmp_game 隔离，避免工作线程访问 self.game.board 的数据竞争
@@ -417,20 +507,36 @@ class AIWorker:
                               for c in range(BOARD_WIDTH) if board[r][c] != '.')
             endgame = total_pieces <= 14
 
-            score = evaluate(
-                board,
-                legal_moves_red=len(red_moves),
-                legal_moves_black=len(black_moves),
-                red_in_check=red_check,
-                black_in_check=black_check,
-                endgame=endgame,
-            )
+            score = None
+            score_source = '手工评估'
+            # Pikafish 大师级评估优先（evaluate_fen：红方视角厘兵，与
+            # evaluate() 口径一致）。worker 线程在 LLM 回合中调用，此时
+            # hybrid 模式的引擎搜索已完成（LLM 在其后启动），锁空闲；
+            # 引擎不可用/超时/未初始化 → None 回退手工评估。
+            if self.pikafish is not None:
+                try:
+                    s = self.pikafish.evaluate_fen(board, self.current_player)
+                    if s is not None:
+                        score = s
+                        score_source = 'Pikafish NNUE'
+                except Exception:
+                    score = None
+            if score is None:
+                score = evaluate(
+                    board,
+                    legal_moves_red=len(red_moves),
+                    legal_moves_black=len(black_moves),
+                    red_in_check=red_check,
+                    black_in_check=black_check,
+                    endgame=endgame,
+                )
 
             # 统计子力（共享函数，不含将/帥，单位=兵）
             red_material, black_material, _, _ = compute_material(board)
 
             lines = []
-            lines.append(f"局面评估: {score:+.0f}（正值=红优，负值=黑优）")
+            lines.append(f"局面评估: {score:+.0f}（正值=红优，负值=黑优，"
+                         f"{score_source}）")
             lines.append(f"红方子力: {red_material:g}  |  黑方子力: {black_material:g}")
             material_diff = red_material - black_material
             if material_diff > 0:

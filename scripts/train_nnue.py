@@ -295,6 +295,10 @@ def main():
     parser.add_argument('--resume', action='store_true', help='从已有数据继续')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子（默认 42，保证训练可复现）')
+    parser.add_argument('--data', default=None,
+                        help='加载外部数据 npz（如 scripts/gen_selfplay.py '
+                             '产出的 data/selfplay_data.npz，含 X/y 键）；'
+                             '缺省时生成数据')
     args = parser.parse_args()
 
     # 固定全局随机种子：数据生成、训练/验证切分、逐 epoch 洗牌均依赖
@@ -310,7 +314,29 @@ def main():
         os.makedirs(data_dir, exist_ok=True)
 
     # 加载或生成数据
-    if args.resume and os.path.isfile(DATA_FILE):
+    if args.data and os.path.isfile(args.data):
+        print(f'从 {args.data} 加载外部训练数据...')
+        d = np.load(args.data)
+        X, y = d['X'], d['y']
+        # 输入校验：维度/样本数/有限性缺一不可，否则深层崩溃或训出垃圾权重
+        ok = True
+        if X.ndim != 2 or X.shape[1] != INPUT_DIM:
+            print(f'[FAIL] X 维度应为 (N, {INPUT_DIM})，实际 {X.shape}')
+            ok = False
+        if len(X) != len(y):
+            print(f'[FAIL] X({len(X)}) 与 y({len(y)}) 样本数不一致')
+            ok = False
+        if len(y) == 0:
+            print('[FAIL] 数据为空')
+            ok = False
+        if ok and not (np.isfinite(X).all() and np.isfinite(y).all()):
+            print('[FAIL] X/y 含 NaN 或 Inf')
+            ok = False
+        if not ok:
+            return 1
+        print(f'  样本 {len(y)}，特征维度 {X.shape[1]}'
+              f'（标签范围 [{y.min():+.3f}, {y.max():+.3f}]）')
+    elif args.resume and os.path.isfile(DATA_FILE):
         print(f'从 {DATA_FILE} 加载已有训练数据...')
         d = np.load(DATA_FILE)
         X, y = d['X'], d['y']
