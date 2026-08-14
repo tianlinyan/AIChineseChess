@@ -27,6 +27,10 @@ class AIManager:
         if self.active_worker:
             self.active_worker.cancel()
             self.active_worker = None
+        # 复位 busy 与线程引用：避免调用方忘记手动 set_busy(False) 导致
+        # is_busy() 恒 True、后续走子被拒的死锁（脆弱隐式契约的显式化）
+        self.ai_move_in_progress = False
+        self._active_thread = None
 
     def is_busy(self) -> bool:
         return self.ai_move_in_progress or self.active_worker is not None

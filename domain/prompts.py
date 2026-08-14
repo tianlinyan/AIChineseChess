@@ -522,6 +522,9 @@ def build_arbitration_prompt(
                      '捉双', '抽将', '兑子', '优势', '劣势', '简化', '暴露']
         if len(sentences) <= 6:
             # 句数太少时 head/tail 切片会重叠 → 按原序截断，避免重复句子
+            head = sentences[:3]
+            mid = sentences[3:-3]
+            tail = sentences[-3:]
             combined = sentences
         else:
             head = sentences[:3]  # 前 3 句（通常是局面判断）
@@ -530,13 +533,25 @@ def build_arbitration_prompt(
             mid = [s for s in sentences[3:-3]
                    if any(kw in s for kw in key_words)]
             combined = head + mid + tail
-        # 如果挑出的句子总长超限，按顺序截
+        # 截断保 tail：最终选择理由最该被仲裁看到，永远追加在末尾。
+        # 先给 head/mid 分配预算（780 − tail 长度），tail 整段保留；
+        # tail 本身超限时退化为按原序截断（旧行为）。
+        tail_text = ''.join(tail)
         llm_summary = ''
-        for s in combined:
-            if len(llm_summary) + len(s) > 780:
-                llm_summary += "\n…(省略)…\n"
-                break
-            llm_summary += s
+        if tail_text and len(tail_text) < 780:
+            budget = 780 - len(tail_text)
+            for s in head + mid:
+                if len(llm_summary) + len(s) > budget:
+                    llm_summary += "\n…(省略)…\n"
+                    break
+                llm_summary += s
+            llm_summary += tail_text
+        else:
+            for s in combined:
+                if len(llm_summary) + len(s) > 780:
+                    llm_summary += "\n…(省略)…\n"
+                    break
+                llm_summary += s
         # 摘要过短（如首句即超限）→ 回退头尾截取，保证仲裁能看到实质理由
         if len(llm_summary.strip()) < 50:
             llm_summary = llm_reasoning[:500] + "\n…(省略)…\n" + llm_reasoning[-300:]

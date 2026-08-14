@@ -79,7 +79,9 @@ class ChineseChessGame:
         g = cls()
         g.board = board
         g.current_player = player
-        g._king_pos = dict(king_pos)
+        # king_pos 为 None 时用空 dict：is_in_check/_is_king_facing 会走
+        # 全盘扫描自愈回退（已实证该路径正确），不抛 dict(None) TypeError
+        g._king_pos = dict(king_pos or {})
         g.recompute_hash()
         g._recompute_incremental()  # 从快照棋盘重建增量缓存
         return g
@@ -166,7 +168,15 @@ class ChineseChessGame:
                 self._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - from_row][from_col]
                 self._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - to_row][to_col]
         if captured != '.':
-            self._material_counts[captured] = self._material_counts.get(captured, 0) - 1
+            # 递减并清除 0 值键：与 _recompute_incremental（只含在场棋子）
+            # 保持结构一致。否则某类棋子被吃光后残留 {piece: 0} 键，
+            # test_incremental 的严格 dict 相等断言会偶发误报
+            # （0 计数不贡献任何评分，功能无差异，纯结构一致性）
+            _mc = self._material_counts.get(captured, 0) - 1
+            if _mc > 0:
+                self._material_counts[captured] = _mc
+            else:
+                self._material_counts.pop(captured, None)
             if captured.isupper():
                 self._red_piece_count -= 1
             else:
@@ -543,6 +553,12 @@ class ChineseChessGame:
             if captures_only:
                 return
         elif self.get_piece_owner(target) == player:
+            return
+        elif target.upper() == 'K':
+            # 不能直接吃掉对方的将/帅：合法对局中对方将不可能处于被吃状态，
+            # 但棋盘被外部直接赋值/残局导入/编辑器修改时会暴露此走法；
+            # 若不拦截，搜索/MCTS/EGTB 会选中它并把对方将移出棋盘，
+            # 破坏后续局面哈希与重复检测的一致性。
             return
         if not self._would_be_illegal(fr, fc, tr, tc, player):
             moves.append((fr, fc, tr, tc))

@@ -42,9 +42,12 @@ class LogManager:
         color = LOG_COLORS.get(level.upper(), LOG_COLORS['DEFAULT'])
         timestamp = QDateTime.currentDateTime().toString('hh:mm:ss')
         # message 可能含 LLM 原始响应等任意文本，必须 HTML 转义；
-        # 时间戳 span 是程序自己生成的 HTML，不受影响
+        # 时间戳 span 是程序自己生成的 HTML，不受影响。
+        # 换行转 <br>：insertHtml 会把 \n 折叠为空格，导致 LLM 多行思考
+        # 文本变成一长行；在 escape 之后替换，不引入 HTML 注入面。
+        escaped = escape(message).replace('\n', '<br>')
         html = f'<span style="color:#888">{timestamp}</span> '
-        html += f'<span style="color:{color}">{escape(message)}</span>'
+        html += f'<span style="color:{color}">{escaped}</span>'
         # 用光标副本在文末插入，不移动视口；insertBlock 保证每条日志独占一个块，
         # maximumBlockCount 才能按条裁剪（<br> 只是块内软换行，不产生新块）
         cursor = self._widget.textCursor()

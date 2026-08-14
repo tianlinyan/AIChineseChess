@@ -265,6 +265,10 @@ class GameController:
                       to_row: int, to_col: int) -> None:
         if not self.is_active or self.is_paused or self.game.game_over:
             return
+        if self.ai_manager.is_busy():
+            # 防御：AI 回合残留 busy 时禁止人类走子，避免与在飞 AI 请求竞争
+            self.log("AI 正在思考中，暂无法走子", 'WARNING')
+            return
         current_player = self.game.current_player
         current_model = self.model1 if current_player == 1 else self.model2
         if current_model != HUMAN_MODEL:
@@ -735,7 +739,7 @@ class GameController:
         try:
             from_row, from_col = parse_coord(from_coord)
             to_row, to_col = parse_coord(to_coord)
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, TypeError, AttributeError):
             self.last_move_error = (
                 f"坐标 '{from_coord}'→'{to_coord}' 无法解析。"
                 f"请确保坐标格式正确：列字母 A~I，行数字 1~10。"
@@ -1283,7 +1287,7 @@ class GameController:
         try:
             arb_row, arb_col = parse_coord(from_coord)
             arb_to_row, arb_to_col = parse_coord(to_coord)
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, TypeError, AttributeError):
             self.log(f"仲裁坐标解析失败 '{from_coord}'→'{to_coord}'，采用 LLM 走法（不计分）", 'WARNING')
             self._finish_ai_move()
             if self._arbitration_llm_move:

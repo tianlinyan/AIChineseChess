@@ -37,6 +37,8 @@ class EngineBridge(QObject):
     search_done = pyqtSignal(tuple)
     # 人类提示搜索结果中继（独立信号，不触发 _finish_ai_move）
     hint_done = pyqtSignal(tuple)
+    # Pikafish/NNUE 后台初始化完成：参数 (pf_or_None, diag_lines)
+    init_done = pyqtSignal(tuple)
 
     # 搜索深度 → MCTS 模拟次数映射
     _DEPTH_SIMS_MAP = {1: 500, 2: 800, 3: 1200, 4: 1600,
@@ -56,11 +58,15 @@ class EngineBridge(QObject):
         self._get_depth = get_search_depth
         self._get_cancel = get_cancel_version
         self._get_game_ver = get_game_version
+        # 后台初始化结果排队回主线程处理（EngineBridge 在主线程创建）
+        self.init_done.connect(self._on_init_done)
 
         self._pikafish: Optional['PikafishEngine'] = None
         self._pikafish_ready: bool = False
-        self._active_mcts: Optional['MCTSEngine'] = None
-        self._mcts_thread: Optional[threading.Thread] = None
+        # 在飞的 MCTS 搜索：按线程对象关联引擎与线程，支持并发兜底搜索。
+        # 单槽位会让旧线程的 finally 清空新搜索的引用，导致 stop_all 失效。
+        self._active_mcts: dict = {}     # thread -> MCTSEngine
+        self._mcts_threads: dict = {}    # thread -> threading.Thread
 
     # ── 公开接口 ──
 
@@ -73,39 +79,69 @@ class EngineBridge(QObject):
         return self._pikafish
 
     def init_pikafish(self) -> None:
-        """延迟初始化 Pikafish + NNUE。需在 main 就绪后调用。"""
+        """延迟初始化 Pikafish + NNUE。需在 main 就绪后调用。
+
+        构造 PikafishEngine 含 UCI 握手，最多阻塞 10s——放在后台线程执行，
+        避免主窗口启动期假死；结果经 init_done 信号排队回主线程写日志、
+        更新状态（不跨线程触碰 QTextEdit）。
+        """
         if self._pikafish_ready:
             return
         self._pikafish_ready = True
 
-        # ── Pikafish ──
-        if PikafishEngine is None:
-            return
-        try:
-            self._pikafish = PikafishEngine()
-            if self._pikafish.available:
-                self._log("🐟 Pikafish 引擎已就绪（NNUE 评估，大师级棋力）", 'INFO')
-            else:
-                err = self._pikafish.error_msg
-                if err:
-                    for line in err.split('\n'):
-                        self._log(f"[Pikafish] {line.strip()}", 'WARNING')
-                self._pikafish = None
-        except Exception as e:
-            self._log(f"[Pikafish] 初始化异常: {e}", 'WARNING')
-            self._pikafish = None
+        def _init() -> None:
+            diag_lines: list = []  # [(text, level), ...]
+            pf = None
 
-        # ── 本地 NNUE 评估网络 ──
+            # ── Pikafish ──
+            if PikafishEngine is not None:
+                try:
+                    pf = PikafishEngine()
+                    if pf.available:
+                        diag_lines.append(("🐟 Pikafish 引擎已就绪"
+                                          "（NNUE 评估，大师级棋力）", 'INFO'))
+                    else:
+                        err = pf.error_msg
+                        if err:
+                            diag_lines.extend(
+                                (f"[Pikafish] {line.strip()}", 'WARNING')
+                                for line in err.split('\n'))
+                        pf = None
+                except Exception as e:
+                    diag_lines.append((f"[Pikafish] 初始化异常: {e}", 'WARNING'))
+                    pf = None
+
+            # ── 本地 NNUE 评估网络 ──
+            try:
+                from domain.nnue import get_nnue
+                nnue = get_nnue()
+                if nnue is not None:
+                    diag_lines.append(("🧠 本地 NNUE 评估网络已加载 "
+                                      "(Alpha-Beta 搜索加速)", 'INFO'))
+                else:
+                    diag_lines.append(("🧠 本地 NNUE 权重未找到，"
+                                      "搜索使用手工评估", 'INFO'))
+            except Exception as e:
+                diag_lines.append((f"[NNUE] 加载异常: {e}", 'WARNING'))
+
+            # 回主线程（QObject 信号自动排队，不直接跨线程调用 _log）
+            self.init_done.emit((pf, diag_lines))
+
+        threading.Thread(target=_init, daemon=True).start()
+
+    def _on_init_done(self, result: tuple) -> None:
+        """主线程：应用后台初始化结果（更新状态 + 写日志）。"""
         try:
-            from domain.nnue import get_nnue
-            nnue = get_nnue()
-            if nnue is not None:
-                self._log("🧠 本地 NNUE 评估网络已加载 "
-                          "(Alpha-Beta 搜索加速)", 'INFO')
-            else:
-                self._log("🧠 本地 NNUE 权重未找到，搜索使用手工评估", 'INFO')
-        except Exception as e:
-            self._log(f"[NNUE] 加载异常: {e}", 'WARNING')
+            pf, diag_lines = result
+        except (TypeError, ValueError):
+            return
+        self._pikafish = pf
+        for entry in diag_lines:
+            try:
+                text, level = entry
+            except (TypeError, ValueError):
+                text, level = str(entry), 'INFO'
+            self._log(text, level)
 
     def start_search(self, game: ChineseChessGame, player: int,
                      on_done: Callable) -> None:
@@ -121,13 +157,24 @@ class EngineBridge(QObject):
 
         # Pikafish 异步路径
         if self.pikafish_available and on_done is not None:
-            time_ms = self._pikafish_time_s(depth) * 1000
-            self._log(f"  🐟 Pikafish 搜索中（时限 {time_ms // 1000}s）...", 'INFO')
-            self._pikafish.search_async(
-                game, player, time_ms=time_ms,
-                callback=lambda m, err: self.search_done.emit(
-                    (m, player, on_done, game_version, cancel_version, err)))
-            return
+            pf = self._pikafish
+            # 启动前健康检查：进程可能在上次搜索后静默死亡（退出码 0 或
+            # 写管道未报错时 _available 不会被置 False），此处兜住并回退 MCTS，
+            # 避免每次 AI 走子都白跑一次死引擎（与 start_hint_search 对齐）。
+            if pf is not None and (pf._proc is None or pf._proc.poll() is not None):
+                if pf._proc is not None:
+                    self._log(
+                        f"  ⚠️ Pikafish 进程已意外退出（code={pf._proc.returncode}），"
+                        f"回退 MCTS", 'WARNING')
+                pf._available = False
+            else:
+                time_ms = self._pikafish_time_s(depth) * 1000
+                self._log(f"  🐟 Pikafish 搜索中（时限 {time_ms // 1000}s）...", 'INFO')
+                self._pikafish.search_async(
+                    game, player, time_ms=time_ms,
+                    callback=lambda m, err: self.search_done.emit(
+                        (m, player, on_done, game_version, cancel_version, err)))
+                return
 
         # MCTS 后台线程路径
         if on_done is not None:
@@ -146,7 +193,6 @@ class EngineBridge(QObject):
         g = game.snapshot()
         g.current_player = player
         engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_FALLBACK_TIME_LIMIT)
-        self._active_mcts = engine
 
         def _run():
             move = None
@@ -156,11 +202,18 @@ class EngineBridge(QObject):
             except Exception as e:
                 result['error'] = f'MCTS 回退异常: {e}'
             finally:
-                self._active_mcts = None
-                self.search_done.emit((move, player, on_done, game_version, cancel_version, ''))
+                # 只移除自己的条目，避免清空并发启动的新搜索引用
+                self._active_mcts.pop(threading.current_thread(), None)
+                # _mcts_threads 同样只删自己：否则每次搜索永久累积一个
+                # 线程条目，长会话 dict 无限增长（内存泄漏）
+                self._mcts_threads.pop(threading.current_thread(), None)
+                self.search_done.emit(
+                    (move, player, on_done, game_version, cancel_version, ''))
 
-        self._mcts_thread = threading.Thread(target=_run, daemon=True)
-        self._mcts_thread.start()
+        thread = threading.Thread(target=_run, daemon=True)
+        self._active_mcts[thread] = engine
+        self._mcts_threads[thread] = thread
+        thread.start()
 
     def pikafish_time_s(self) -> int:
         """当前搜索深度对应的 Pikafish 搜索秒数。"""
@@ -170,10 +223,9 @@ class EngineBridge(QObject):
         """停止在飞的后台搜索（reset/pause/shutdown 时调用）。"""
         if self._pikafish is not None:
             self._pikafish.stop()
-        mcts = self._active_mcts
-        if mcts is not None:
+        for engine in list(self._active_mcts.values()):
             try:
-                mcts.stop()
+                engine.stop()
             except Exception:
                 pass
 
@@ -259,9 +311,9 @@ class EngineBridge(QObject):
     def shutdown(self) -> None:
         """清理引擎资源。"""
         self.stop_all()
-        mcts_thread = self._mcts_thread
-        if mcts_thread and mcts_thread.is_alive():
-            mcts_thread.join(timeout=2.0)
+        for thread in list(self._mcts_threads.values()):
+            if thread.is_alive():
+                thread.join(timeout=2.0)
         try:
             self.search_done.disconnect()
         except TypeError:
@@ -293,7 +345,6 @@ class EngineBridge(QObject):
         self._log(f"  🌳 MCTS 启动 ({desc}, {sims}次模拟, 深度={depth})", 'INFO')
         result = {}
         engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_TIME_LIMIT)
-        self._active_mcts = engine
 
         def _run():
             move = None
@@ -304,7 +355,10 @@ class EngineBridge(QObject):
             except Exception as e:
                 result['error'] = f'MCTS 搜索异常: {e}'
             finally:
-                self._active_mcts = None
+                # 只移除自己的条目，避免清空并发启动的新搜索引用
+                self._active_mcts.pop(threading.current_thread(), None)
+                # 同 start_mcts_fallback：_mcts_threads 只删自己防泄漏
+                self._mcts_threads.pop(threading.current_thread(), None)
                 self.search_done.emit(
                     (move, player, _logged_on_done,
                      game_version, cancel_version, ''))
@@ -328,5 +382,7 @@ class EngineBridge(QObject):
                 self._log(f"  ⚠️ MCTS未找到走法{detail}", 'WARNING')
             on_done(move, player)
 
-        self._mcts_thread = threading.Thread(target=_run, daemon=True)
-        self._mcts_thread.start()
+        thread = threading.Thread(target=_run, daemon=True)
+        self._active_mcts[thread] = engine
+        self._mcts_threads[thread] = thread
+        thread.start()

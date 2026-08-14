@@ -293,7 +293,14 @@ def main():
     parser = argparse.ArgumentParser(description='训练 NNUE 风格评估网络')
     parser.add_argument('--quick', action='store_true', help='快速测试模式')
     parser.add_argument('--resume', action='store_true', help='从已有数据继续')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='随机种子（默认 42，保证训练可复现）')
     args = parser.parse_args()
+
+    # 固定全局随机种子：数据生成、训练/验证切分、逐 epoch 洗牌均依赖
+    # 全局 np.random，不播种会导致两次运行结果不可复现（此前仅权重初始化
+    # 单独用了 RandomState(42)，与其余随机源不一致）。
+    np.random.seed(args.seed)
 
     n_samples = QUICK_SAMPLES if args.quick else FULL_SAMPLES
 

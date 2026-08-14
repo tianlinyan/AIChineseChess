@@ -9,3 +9,6 @@ requests>=2.28
 
 # 环境变量加载（可选：用于 .env 文件中管理 API 密钥）
 python-dotenv>=1.0
+
+# NNUE 评估网络推理（domain/nnue.py）与训练脚本（scripts/train_nnue.py）
+numpy>=1.24

@@ -110,6 +110,9 @@ class PikafishEngine:
         # 永久阻塞（旧实现会连关窗退出都一起卡死）
         self._out_q: 'queue.Queue' = queue.Queue()
         self._reader_thread: Optional[threading.Thread] = None
+        # reader 线程死亡标记：__init__ 即置位（_start_engine 前若失败，
+        # _read_line 的守卫逻辑也能安全读取该属性）
+        self._reader_dead = False
         # MultiPV 结果缓存（每次搜索前清零，_read_bestmove 中收集）
         self._top_moves: list = []  # [(move_tuple, score_cp), ...]
 
@@ -277,7 +280,22 @@ class PikafishEngine:
                             error = f'返回非法或无法解析的走法: {uci!r}'
                             move = None
                     else:
-                        error = f'引擎无响应/超时（{time_ms}ms + 10s 兜底）'
+                        # 区分进程死亡 vs 真超时：进程静默退出时 _read_bestmove
+                        # 因 poll() 非 None 直接 break 返回 None，不抛异常，
+                        # 若不在此标记不可用，后续每次搜索都会白跑一次死引擎
+                        # 再 MCTS 兜底，且日志反复误报"超时"。
+                        proc = self._proc
+                        if proc is None or proc.poll() is not None:
+                            if proc is not None:
+                                error = (f'引擎进程已意外退出'
+                                         f'（退出码 0x{proc.returncode & 0xFFFFFFFF:08X}）')
+                            else:
+                                error = '引擎进程已关闭'
+                            self._available = False
+                            if proc is not None:
+                                self._kill_proc()
+                        else:
+                            error = f'引擎无响应/超时（{time_ms}ms + 10s 兜底）'
             except (OSError, ValueError, BrokenPipeError) as e:
                 error = f'引擎通信异常（进程已终止）: {e}'
                 self._available = False
@@ -300,8 +318,10 @@ class PikafishEngine:
         需 MultiPV 已启用。返回 [(move, visits=score_cp, avg_value=score_cp), ...]，
         其中 visits 实际存储 centipawn 评分。
         """
+        with self._lock:
+            top = list(self._top_moves[:n])
         result = []
-        for move, score_cp in self._top_moves[:n]:
+        for move, score_cp in top:
             # visits 存评分为整数（兼容 MCTSEngine 接口），avg_value 存归一化值
             result.append((move, int(score_cp), score_cp / 100.0))
         return result
@@ -311,7 +331,8 @@ class PikafishEngine:
 
         供 controller 做高置信度判断。
         """
-        return list(self._top_moves)
+        with self._lock:
+            return list(self._top_moves)
 
     def _parse_multipv_line(self, line: str) -> None:
         """解析 MultiPV info 行，将 (move, score_cp) 追加到 self._top_moves。
@@ -494,30 +515,43 @@ class PikafishEngine:
             pass
         return False
 
-    def _purge_lines(self) -> None:
-        """排空行队列中的残留输出。
+    def _drain_out_q(self) -> None:
+        """非阻塞排空行队列（丢弃残留输出）。"""
+        try:
+            while True:
+                self._out_q.get_nowait()
+        except queue.Empty:
+            pass
+
+    def _purge_lines(self, timeout: float = 1.0) -> None:
+        """排空行队列 + isready/readyok 握手，确保上一局已收尾。
 
         上次搜索超时残留的 bestmove 若留在队列里，会被下一次搜索的
         _read_bestmove 第一行读到——把上一局的走法当成本局结果返回
         （合法性校验拦不住"合法但错误"的走法）。每次发 position 前
         调用（持锁状态下，残留只可能来自上次超时）。
 
-        引擎收到 stop 后吐出 bestmove 存在几十 ms 延迟：单次排空可能
-        刚好错过，导致残留 bestmove 被下一次 _read_bestmove 消费。
-        50ms 后二次排空覆盖这一窗口（搜索耗时以秒计，代价可忽略）。
+        固定 sleep 无法可靠覆盖"stop→bestmove"的异步延迟窗口（引擎卡顿
+        时可能远超 50ms），改用 UCI isready 握手：引擎在完成上一局收尾
+        （吐出 bestmove）后才会响应 readyok，天然形成同步屏障，且不引入
+        固定等待。代价是一次往返（毫秒级），搜索以秒计可忽略。
         """
-        try:
-            while True:
-                self._out_q.get_nowait()
-        except queue.Empty:
-            pass
-        # 二次排空：覆盖 stop→bestmove 的异步延迟窗口
-        time.sleep(0.05)
-        try:
-            while True:
-                self._out_q.get_nowait()
-        except queue.Empty:
-            pass
+        self._drain_out_q()
+        if not self._proc or not self._proc.stdout:
+            return
+        if not self._send('isready'):
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._proc.poll() is not None:
+                return  # 进程已死，_read_bestmove 会因 poll() 直接失败
+            line = self._read_line(min(0.2, deadline - time.time()))
+            if line and 'readyok' in line:
+                break
+            if self._reader_dead and self._out_q.empty():
+                return
+        # 握手后再排空一次，消费 readyok 之前的任何残留行
+        self._drain_out_q()
 
     def stop(self) -> None:
         """请求引擎中断当前搜索（UCI stop）。

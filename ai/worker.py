@@ -12,7 +12,7 @@ from domain.constants import (
     AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT,
     AI_OUTPUT_TRUNCATE_LENGTH, AI_OUTPUT_MIN_TRIM_POSITION,
     BOARD_HEIGHT, BOARD_WIDTH,
-    PIECE_SYMBOLS,
+    PIECE_SYMBOLS, parse_coord,
 )
 from domain.prompts import DEFAULT_TOOLS
 from domain.evaluation import evaluate, PIECE_VALUE, compute_material
@@ -25,6 +25,17 @@ from domain.search import SearchEngine
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_TOOL_TURNS = 4  # 每回合最多工具调用轮数（防止死循环）
+
+
+def _clamp_int(value, lo: int, hi: int) -> int:
+    """将参数钳制到 [lo, hi]，非数值类型抛 TypeError/ValueError。
+
+    弱模型可能传字符串/None/bool（如 {"depth": "4"}），max/min 对这些
+    值抛 TypeError 且无法被下游恢复——此处集中校验并给出可恢复的异常。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f'参数应为整数，实际为 {type(value).__name__}')
+    return max(lo, min(hi, int(value)))
 
 
 class AIWorkerSignals(QObject):
@@ -68,6 +79,12 @@ class AIWorker:
 
         # 收集所有工具调用产生的文本
         self._all_texts: list = []
+        # 仅存正式 content（不含 reasoning_content / 工具结果）——
+        # 兜底文本解析只用此池，排除 DeepSeek 推理文本里"讨论过但未选中"
+        # 的坐标干扰（M-AI-5）
+        self._content_texts: list = []
+        # 在途的 Alpha-Beta 搜索引擎（cancel() 可中止，M-AI-1）
+        self._active_search_engine: Optional[SearchEngine] = None
         # search_best_move 每步最多一次（系统提示词约定，此处强制）
         self._search_used = False
         # evaluate_position 每步最多两次（防弱模型刷满轮次导致无走法）
@@ -129,20 +146,21 @@ class AIWorker:
             content = (message.get('content') or '').strip()
             reasoning = message.get('reasoning_content', '')
 
-            # 收集文本
+            # 收集文本：_all_texts 用于展示日志（含推理/工具结果）；
+            # _content_texts 仅存正式 content，供兜底文本解析（M-AI-5）
             if reasoning:
                 self._all_texts.append(reasoning)
             if content:
                 self._all_texts.append(content)
+                self._content_texts.append(content)
 
             # ── 提取 tool_calls ──
             tool_calls = message.get('tool_calls', [])
             if not tool_calls:
-                # 无 tool_calls → 尝试文本解析（仅从 LLM 文本提取，
-                # 排除 [Tool: ...] 工具结果里的坐标干扰）
-                llm_texts = [t for t in self._all_texts
-                             if not t.startswith('[Tool:')]
-                fc, tc = parse_coordinates_from_text('\n'.join(llm_texts))
+                # 无 tool_calls → 尝试文本解析（仅从 LLM 正式 content 提取，
+                # 排除 [Tool: ...] 工具结果与 reasoning 里的坐标干扰）
+                fc, tc = parse_coordinates_from_text(
+                    '\n'.join(self._content_texts))
                 if fc and tc:
                     return fc, tc, self._build_full_text()
                 # 无法解析，继续等下一轮（或最终失败）
@@ -161,24 +179,26 @@ class AIWorker:
                 else:
                     other_calls.append(tool_entry)
 
-            # 如果 move_piece 被调用，提取坐标并结束
+            # ── 处理 move_piece：合法则直接结束，否则反馈错误让模型自纠 ──
+            move_error = None
             if move_piece_call is not None:
                 fc, tc = self._extract_move_from_call(move_piece_call)
                 if fc and tc:
-                    return fc, tc, self._build_full_text()
-                # move_piece 参数无效，继续
+                    if self._validate_move(fc, tc) is not None:
+                        return fc, tc, self._build_full_text()
+                    move_error = f'走法 {fc}→{tc} 不合法，请从合法走法列表中选择'
+                else:
+                    move_error = '坐标参数无效：请用列字母 A-I + 行数字 1-10 的格式'
 
-            # ── 执行其他工具调用 ──
-            if other_calls:
-                # 将 assistant message（仅含已执行工具）加入历史
-                # 若有无效 move_piece 调用，排除它以保持历史一致
-                # 仅保留 role/content/tool_calls：reasoning_content 回传
-                # 会被严格校验的部署（DeepSeek/vLLM）拒绝
-                clean_calls = [t for t in tool_calls if t in other_calls]
+            # ── 执行其他工具调用，并回应无效 move_piece ──
+            if other_calls or move_error is not None:
+                # 保留本轮全部 tool_calls（含无效 move_piece，下方追加对应
+                # tool 结果）；仅剔除 reasoning_content，因其回传会被严格
+                # 校验的部署（DeepSeek/vLLM）拒绝。
                 messages.append({
                     'role': 'assistant',
                     'content': message.get('content') or '',
-                    'tool_calls': clean_calls,
+                    'tool_calls': tool_calls,
                 })
 
                 for tool_entry in other_calls:
@@ -188,11 +208,6 @@ class AIWorker:
                     try:
                         args = json.loads(raw_args)
                     except (json.JSONDecodeError, TypeError):
-                        # JSON 解析失败 → 尝试从原始文本提取坐标（move_piece 专用）
-                        if name == 'move_piece' and isinstance(raw_args, str):
-                            fc, tc = parse_coordinates_from_text(raw_args)
-                            if fc and tc:
-                                return fc, tc, self._build_full_text()
                         args = {}
                     if not isinstance(args, dict):
                         # arguments 解析成 list/标量 → 视为无参，避免 .get 崩溃
@@ -205,25 +220,57 @@ class AIWorker:
                         'tool_call_id': tool_entry.get('id', ''),
                         'content': result,
                     })
-                # 继续下一轮，让 LLM 基于工具结果做决策
+
+                # 无效 move_piece 也要给出 tool 结果，否则模型不知道被拒，
+                # 会在后续轮次重复同样的坏调用，烧光 MAX_TOOL_TURNS
+                if move_error is not None:
+                    self._all_texts.append(
+                        f"[Tool: move_piece]\n"
+                        f"{json.dumps({'error': move_error}, ensure_ascii=False)}")
+                    messages.append({
+                        'role': 'tool',
+                        'tool_call_id': move_piece_call.get('id', ''),
+                        'content': json.dumps({'error': move_error},
+                                              ensure_ascii=False),
+                    })
+                # 继续下一轮，让 LLM 基于工具结果（含错误）做决策
                 continue
 
-            # tool_calls 存在但没有 move_piece 也没有其他已知工具 → 尝试解析
-            for tool_entry in tool_calls:
-                fc2, tc2 = self._extract_move_from_call(tool_entry)
-                if fc2 and tc2:
-                    return fc2, tc2, self._build_full_text()
+            # tool_calls 非空时分类必然命中 move_piece_call 或 other_calls，
+            # 上方分支恒 return/continue，以下不可达（防御性 break）
             break
 
         # ── 所有轮次结束，最后一次尝试文本解析 ──
         full = self._build_full_text()
-        llm_texts = [t for t in self._all_texts if not t.startswith('[Tool:')]
-        fc, tc = parse_coordinates_from_text('\n'.join(llm_texts))
+        fc, tc = parse_coordinates_from_text('\n'.join(self._content_texts))
         if fc and tc:
             return fc, tc, full
         return '', '', f'ERROR: {MAX_TOOL_TURNS} 轮工具调用后未找到有效走法'
 
     # ── 工具执行 ──
+
+    def _validate_move(self, from_coord: str, to_coord: str):
+        """校验坐标字符串是否为当前局面的合法走法。
+
+        返回 (fr, fc, tr, tc) 或 None（坐标格式错误或走法非法）。
+        在 worker 侧校验而非推迟到 controller，避免"格式正确但违规"的
+        走法浪费一整轮，也防止把非法走法当成最终结果提交。
+        """
+        try:
+            fr, fc = parse_coord(from_coord)
+            tr, tc = parse_coord(to_coord)
+        except (ValueError, IndexError, TypeError, AttributeError):
+            return None
+        if self.game is None:
+            return None
+        move = (fr, fc, tr, tc)
+        # 用快照校验（M-AI-6）：worker 线程不触碰 live game。直接调
+        # live game 的 get_all_legal_moves 会在 is_in_check 自愈路径
+        # 跨线程写 _king_pos 缓存，与主线程 move_piece 存在读-改-写
+        # 窗口；快照完全隔离该竞态。
+        tmp = self.game.snapshot()
+        tmp.current_player = self.current_player
+        return move if move in tmp.get_all_legal_moves(self.current_player) else None
 
     def _execute_tool(self, name: str, args: dict) -> str:
         """在本地执行 AI 工具调用，返回 JSON 结果字符串。"""
@@ -254,8 +301,15 @@ class AIWorker:
         使用两步策略：①Alpha-Beta 深搜索找最佳走法；
         ②对所有合法走法用快速静态评估（~0.05ms/步）排序，返回 top-N。
         """
-        depth = min(max(args.get('depth', 3), 2), 8)
-        top_n = min(max(args.get('top_n', 3), 1), 5)
+        try:
+            # 参数类型防线：弱模型可能传字符串/None，钳制必须在 try 内，
+            # 否则 TypeError 冒泡到 run() 兜底 → 整步失败且模型得不到可恢复错误
+            depth = _clamp_int(args.get('depth', 3), 2, 8)
+            top_n = _clamp_int(args.get('top_n', 3), 1, 5)
+        except (TypeError, ValueError):
+            return json.dumps(
+                {'error': '参数类型错误：depth 应为 2~8、top_n 应为 1~5 的整数'},
+                ensure_ascii=False)
 
         try:
             # 主搜索 — 用快照隔离，不修改 self.game.board
@@ -263,6 +317,8 @@ class AIWorker:
                 max_depth=depth,
                 time_limit=min(30.0, 2.0 + depth * 3.0),
             )
+            # 注册在途引擎：cancel() 调 engine.stop() 尽快中止搜索（M-AI-1）
+            self._active_search_engine = engine
             tmp_game = self.game.snapshot()
             tmp_game.current_player = self.current_player
             best_move = engine.search(tmp_game, self.current_player)
@@ -341,6 +397,9 @@ class AIWorker:
 
         except Exception as e:
             return json.dumps({'error': f'搜索失败: {e}'}, ensure_ascii=False)
+        finally:
+            # 无论成功/异常/被 cancel 中止，都解除在途引擎引用
+            self._active_search_engine = None
 
     def _run_evaluate(self) -> str:
         """执行静态局面评估"""
@@ -425,7 +484,15 @@ class AIWorker:
             args = args_data
         if not isinstance(args, dict):
             return '', ''  # arguments 为 null/list/标量（弱模型常见）
-        return args.get('from', ''), args.get('to', '')
+        from_coord = args.get('from', '')
+        to_coord = args.get('to', '')
+        # 类型防线：弱模型可能输出非字符串坐标（数字/数组），truthy 判断
+        # 无法拦截 → 逃逸到 controller 的 parse_coord 抛 TypeError/AttributeError
+        # （其 except 只捕获 ValueError/IndexError），异常进入 Qt 槽导致
+        # set_busy(False) 不执行、游戏永久卡死。此处强制字符串类型并归一化。
+        if not isinstance(from_coord, str) or not isinstance(to_coord, str):
+            return '', ''
+        return from_coord.strip().upper(), to_coord.strip().upper()
 
     # ── API 请求 ──
 
@@ -434,6 +501,15 @@ class AIWorker:
 
     def cancel(self) -> None:
         self._cancelled.set()
+        # 中止在途的 Alpha-Beta 搜索（M-AI-1）：SearchEngine.stop() 置
+        # _stop_flag，_is_time_up 随即返回 True，搜索尽快退出（单次最长
+        # ~30s → 通常在毫秒级响应）。属性读写跨线程，GIL 下原子。
+        engine = self._active_search_engine
+        if engine is not None:
+            try:
+                engine.stop()
+            except Exception:
+                pass
         if self._session is not None:
             try:
                 self._session.close()

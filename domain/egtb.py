@@ -9,6 +9,8 @@
 import re
 import sys
 import time
+import http.client
+import ssl
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -31,6 +33,7 @@ CACHE_MAX_SIZE = 5000          # 正缓存最大条目数（超出淘汰最旧�
 NEG_CACHE_MAX_SIZE = 5000      # 负缓存最大条目数（与正缓存同上限，防长会话膨胀）
 CLOUD_FAIL_BREAKER_COUNT = 3   # 连续网络失败次数上限，达到后熔断
 CLOUD_BREAKER_SECONDS = 120    # 熔断后暂停云查询的秒数
+CHESSDB_MAX_RESPONSE_BYTES = 65536  # 云库响应体字节上限（防异常超大响应占内存）
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -113,9 +116,15 @@ def probe_cloud(board: list, current_player: int) -> Optional[dict]:
         req = urllib.request.Request(url)
         req.add_header('User-Agent', 'AIChineseChess/1.0')
         with urllib.request.urlopen(req, timeout=CHESSDB_TIMEOUT) as resp:
-            text = resp.read().decode('utf-8', errors='replace')
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as e:
-        # 网络不可用、超时 → 负缓存 + 熔断计数
+            # 限制响应体大小，防异常响应占内存
+            data = resp.read(CHESSDB_MAX_RESPONSE_BYTES + 1)
+            if len(data) > CHESSDB_MAX_RESPONSE_BYTES:
+                data = data[:CHESSDB_MAX_RESPONSE_BYTES]
+            text = data.decode('utf-8', errors='replace')
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            ValueError, http.client.HTTPException, ssl.SSLError) as e:
+        # 网络不可用、超时、连接中断（IncompleteRead/BadStatusLine 等
+        # HTTPException 子类）→ 负缓存 + 熔断计数
         print(f"[EGTB] 云库查询失败: {e}", file=sys.stderr, flush=True)
         _neg_cache_put(cache_key, now)
         _cloud_fail_count += 1
@@ -316,8 +325,25 @@ def _can_win(attackers: list, current_player: int, owner: int,
                 return (score, 30)
             return (0.0, 0)     # 未过河/老兵/有防守子 → 和棋
 
-    # 多子：有車则必胜
+    # 多子：有車则必胜；但車馬/車炮（无第二个車/无兵）对士象全为官和。
+    # 注意：車馬炮/車雙馬/車雙炮 vs 士象全 为必胜（多一个攻子可破士象全防守），
+    # 只有单一辅助子（馬或炮）时才是官和 —— 条件必须限定 len(others) == 1。
     if has_rook:
+        others = [p for p, _, _ in attackers if p != 'R']
+        if (defender_advisors >= 2 and defender_bishops >= 2
+                and len(others) == 1 and others[0] in ('N', 'C')):
+            return (0.0, 0)  # 車馬/車炮 vs 士象全 → 官和
+        # 車+兵 vs 士象全：兵未过河或沉底（老兵）时无法参与进攻，
+        # 近似单車 vs 士象全 → 官和；过河且未沉底的兵可助車破防 → 必胜。
+        # 过河/沉底判断与单兵分支（:321-323）口径一致。
+        if (defender_advisors >= 2 and defender_bishops >= 2
+                and others and all(p == 'P' for p in others)):
+            pawn_inert = all(
+                not ((r <= 4) if owner == 1 else (r >= 5))
+                or ((r == 0) if owner == 1 else (r == 9))
+                for p, r, c in attackers if p == 'P')
+            if pawn_inert:
+                return (0.0, 0)
         score = 85000 if owner == current_player else -85000
         return (score, 15)
 

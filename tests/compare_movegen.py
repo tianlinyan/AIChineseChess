@@ -33,6 +33,13 @@ def board_from_fen(fen: str):
 
 
 def main():
+    # 基线缺失或为空时不能静默通过：对拍测试的意义在于有真实对照数据，
+    # 空基线会让循环不执行、打印"100% 一致"并退出码 0，完全失去回归保护。
+    if not os.path.exists(BASELINE_PATH):
+        print(f'[FAIL] 基线文件不存在：{BASELINE_PATH}')
+        print('  请先运行 python tests/movegen_baseline.py 生成基线')
+        sys.exit(1)
+
     total = 0
     mismatches = 0
     with open(BASELINE_PATH, encoding='utf-8') as f:
@@ -68,9 +75,13 @@ def main():
                     print('…（ mismatch 过多，提前终止）')
                     break
     print(f'\n共 {total} 个局面，不一致 {mismatches} 个')
+    if total == 0:
+        print(f'[FAIL] 基线文件为空：{BASELINE_PATH}')
+        print('  请先运行 python tests/movegen_baseline.py 生成基线')
+        sys.exit(1)
     if mismatches:
         sys.exit(1)
-    print('✓ 走法生成与基线 100% 一致')
+    print('[PASS] 走法生成与基线 100% 一致')
 
 
 if __name__ == '__main__':

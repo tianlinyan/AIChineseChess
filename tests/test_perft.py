@@ -65,18 +65,19 @@ def test_initial_perft():
     check('初始 perft(1) = 44', n1 == 44,
           f'actual={n1} time={t1:.2f}s')
 
-    # perft(2): 红走 44 种，黑应对 → 总数
+    # perft(2): 红走 44 种，黑应对 → 总数。钉死精确值，<5% 计数偏差
+    # 会被宽容区间掩盖（这正是 perft 最该捕获的走法生成错误类型）
     t0 = time.time()
     n2 = perft(g, 1, 2)
     t2 = time.time() - t0
-    check('初始 perft(2) ≈ 1920', 1900 <= n2 <= 2000,
+    check('初始 perft(2) = 1920', n2 == 1920,
           f'actual={n2} time={t2:.2f}s')
 
-    # perft(3) — 仅验证不崩溃，数值作参考
+    # perft(3) — 钉死精确黄金值（真实值 79666）
     t0 = time.time()
     n3 = perft(g, 1, 3)
     t3 = time.time() - t0
-    check('初始 perft(3) 有结果（不作精确值检查）', n3 > 1000,
+    check('初始 perft(3) = 79666', n3 == 79666,
           f'actual={n3} time={t3:.2f}s')
 
 

@@ -64,7 +64,7 @@ LLM 分析 + 引擎参考 → 一致→落子 / 分歧→DeepSeek 仲裁
 - **Chinese UI**: 全部中文。无 i18n 基础设施。
 - **No persistence**: 游戏状态仅内存。`QSettings` 仅用于左侧面板折叠状态。
 - **Vision mode**: 棋盘渲染为 QPixmap 以 JPEG base64 发送。**DeepSeek API 不支持 `image_url`**——控制器对 `model.type == 'deepseek'` 自动禁用视觉；AIWorker 对 DeepSeek 模型过滤 `image_url`。
-- **Opening book**: 46 条标准开局线（`domain/openings.py`），前缀加权随机选择。
+- **Opening book**: 165 条标准开局线（`domain/openings.py`），前缀加权随机选择。
 - **EGTB integration**: 本地启发式≤10 子；chessdb.cn cloud 查询≤6 子已实现但未接入生产——所有生产调用者使用 `allow_cloud=False`。
 - **MCTS fallback**: 后台线程 MCTS 使用缩减限制。Hybrid 模式 LLM 失败直接用引擎结果或随机，不回落搜索。
 - **Prompts**: 紧凑结构化提示词。合法走法带战术标注（×吃子、+将军、⚠️重复和棋风险）；子力平衡每回合透视注入；走子历史截断至最近 24 手。`evaluate_position` 与 `search_best_move` 评分统一为红方视角（正值=红优）。仲裁使用"安全门优先，收益排序"两步式评分，候选附对称客观事实包（吃子/将军/将杀/评估/重复）。
@@ -75,4 +75,4 @@ LLM 分析 + 引擎参考 → 一致→落子 / 分歧→DeepSeek 仲裁
 
 ## Search Constants
 
-`SEARCH_MAX_DEPTH` 是 UI 搜索强度 spinbox 的默认值（1~6），**非** Alpha-Beta 深度；它缩放 MCTS 模拟数和 Pikafish 时间（见 controller `_DEPTH_SIMS_MAP`）。
+`SEARCH_MAX_DEPTH` 是 UI 搜索强度 spinbox 的**上限**（1~8，UI 默认 5；`ui/panel.py` 引用该常量），**非** Alpha-Beta 深度；它缩放 MCTS 模拟数和 Pikafish 时间（见 controller `_DEPTH_SIMS_MAP`）。

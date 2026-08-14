@@ -33,7 +33,7 @@ def empty_board():
 
 
 def make_game_with_board(board, player=1):
-    """按给定棋盘构造 game（同步将位缓存与 Zobrist 哈希）。"""
+    """按给定棋盘构造 game（同步将位缓存、Zobrist 哈希与增量缓存）。"""
     game = ChineseChessGame()
     game.board = [row[:] for row in board]
     game.current_player = player
@@ -44,6 +44,9 @@ def make_game_with_board(board, player=1):
             elif game.board[r][c] == 'k':
                 game._king_pos[2] = (r, c)
     game.recompute_hash()
+    # 重建增量缓存：否则携带标准棋盘的陈旧 material_counts/PST，
+    # 后续断言绝对评估值/is_endgame/EGTB piece_count 会拿到错误数据
+    game._recompute_incremental()
     return game
 
 
@@ -163,10 +166,16 @@ def test_mcts_real_search():
     check('MCTS 不污染调用方棋盘',
           game2.get_board_state_string() == before)
 
-    # LLM 先验引导：给【非吃車】走法极高误导性先验，搜索仍应选中吃車
+    # LLM 先验引导：给【非吃車】走法 (5,0,0,0) 极高误导性先验、其余走法
+    # 压低，搜索仍应选中吃車——验证 PUCT 能翻盘先验误导。
+    # （priors.get(move, 1.0)：未指定走法默认 1.0，必须显式压低其余走法，
+    #   否则误导走法 0.9 反而低于默认 1.0，测试名不副实。）
     game3 = tactical_game()
+    legal3 = game3.get_all_legal_moves(1)
+    priors = {m: 0.1 for m in legal3}
+    priors[(5, 0, 0, 0)] = 0.9
     eng3 = MCTSEngine(max_simulations=2000, time_limit=10.0)
-    move3 = eng3.search(game3, 1, priors={(5, 0, 0, 0): 0.9})
+    move3 = eng3.search(game3, 1, priors=priors)
     check('MCTS 带误导先验仍找到白吃車', move3 == TACTICAL_CAPTURE,
           f'实际 {move3}')
 

@@ -157,7 +157,12 @@ LMR_MIN_DEPTH = 3               # 剩余深度 < 此值不缩减（浅层不减�
 JIANGSHA_SCORE = 99999          # 将杀基础分
 KUNBI_SCORE = 50000             # 困毙基础分
 # |score| 超过此值视为杀/困分：存取置换表必须按 ply 折算
-# （静态评估量级远低于此；EGTB 大分本身即杀棋距离分，折算方向一致）
+# （静态评估量级远低于此）。杀分/困毙分编码的是"距根步数"，
+# 经 _tt_score_to_relative 折算为 ply 无关常量后跨迭代/换位存取自洽。
+# 注意：EGTB 分也会越过此阈值被折算——本地启发分（50000~85000）与
+# DTM 分（99999-dtm*10）是固定值或"距杀棋步数"，折算会引入 ≤max_depth
+# 的微小漂移；该漂移远小于不同走法间分数差，不改变必胜/必和判定与
+# 走法选择，属可接受的已知行为（经数值验证）。
 MATE_TT_BOUND = KUNBI_SCORE - 10000
 
 
@@ -717,8 +722,13 @@ class SearchEngine:
                 game._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - fr][fc]
                 game._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - tr][tc]
         if captured != '.':
-            # 被吃子计数/PST
-            game._material_counts[captured] = game._material_counts.get(captured, 0) - 1
+            # 被吃子计数/PST（递减后清除 0 值键，与 _recompute_incremental
+            # 只含在场棋子的结构一致，见 game.py move_piece 同款逻辑）
+            _mc = game._material_counts.get(captured, 0) - 1
+            if _mc > 0:
+                game._material_counts[captured] = _mc
+            else:
+                game._material_counts.pop(captured, None)
             if captured.isupper():
                 game._red_piece_count -= 1
             else:

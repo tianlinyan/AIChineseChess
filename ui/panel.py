@@ -7,6 +7,8 @@ from PyQt6.QtWidgets import (
     QLabel, QGroupBox, QSpinBox, QFrame,
 )
 
+from domain.constants import SEARCH_MAX_DEPTH
+
 
 def _section_label(text: str) -> QLabel:
     """统一的小节标题样式。"""
@@ -203,10 +205,10 @@ def setup_left_expanded(parent) -> None:
     rdlbl.setStyleSheet("color: #c0a0a0; font-size: 13px;")
     red_layout.addWidget(rdlbl, 1, 0)
     parent.red_search_depth_spin = QSpinBox()
-    parent.red_search_depth_spin.setRange(1, 8)
+    parent.red_search_depth_spin.setRange(1, SEARCH_MAX_DEPTH)
     parent.red_search_depth_spin.setMinimumHeight(26)
     parent.red_search_depth_spin.setStyleSheet(_spinbox_style())
-    parent.red_search_depth_spin.setToolTip("红方搜索强度 1~8")
+    parent.red_search_depth_spin.setToolTip(f"红方搜索强度 1~{SEARCH_MAX_DEPTH}")
     parent.red_search_depth_spin.valueChanged.connect(parent.on_red_search_depth_changed)
     parent.red_search_depth_spin.setValue(5)  # connect 之后设值，确保信号送达
     red_layout.addWidget(parent.red_search_depth_spin, 1, 1)
@@ -259,10 +261,10 @@ def setup_left_expanded(parent) -> None:
     bdlbl.setStyleSheet("color: #a0a0c0; font-size: 13px;")
     black_layout.addWidget(bdlbl, 1, 0)
     parent.black_search_depth_spin = QSpinBox()
-    parent.black_search_depth_spin.setRange(1, 8)
+    parent.black_search_depth_spin.setRange(1, SEARCH_MAX_DEPTH)
     parent.black_search_depth_spin.setMinimumHeight(26)
     parent.black_search_depth_spin.setStyleSheet(_spinbox_style())
-    parent.black_search_depth_spin.setToolTip("黑方搜索强度 1~8")
+    parent.black_search_depth_spin.setToolTip(f"黑方搜索强度 1~{SEARCH_MAX_DEPTH}")
     parent.black_search_depth_spin.valueChanged.connect(parent.on_black_search_depth_changed)
     parent.black_search_depth_spin.setValue(5)
     black_layout.addWidget(parent.black_search_depth_spin, 1, 1)
