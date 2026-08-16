@@ -53,7 +53,6 @@ class AIWorker:
                  image_base64: Optional[str] = None,
                  player_name: str = '', version: int = 0,
                  cancel_version: int = 0,
-                 think: bool = True,
                  system_prompt: str = '',
                  tools: Optional[tuple] = None,
                  timeout: int = AI_TIMEOUT_SECONDS,
@@ -70,7 +69,6 @@ class AIWorker:
         self.player_name = player_name
         self.version = version
         self.cancel_version = cancel_version
-        self.think = think
         self.system_prompt = system_prompt
         self.tools = tools if tools is not None else DEFAULT_TOOLS
         self.timeout = timeout
@@ -602,8 +600,8 @@ class AIWorker:
 
     # ── API 请求 ──
 
-    def _is_lmstudio(self) -> bool:
-        return self.model_info.type == 'lmstudio'
+    def _is_llama_server(self) -> bool:
+        return self.model_info.type == 'llama-server'
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -630,16 +628,14 @@ class AIWorker:
             'stream': False,
             'tools': list(self.tools),
         }
-        is_lmstudio = self._is_lmstudio()
+        is_llama_server = self._is_llama_server()
         if self.model_info.tools_choice:
-            if is_lmstudio:
+            if is_llama_server:
                 payload['tool_choice'] = 'required'
             else:
                 payload['tool_choice'] = self.model_info.tools_choice
-        if self.think is not None and is_lmstudio:
-            payload['chat_template_kwargs'] = {"enable_thinking": self.think}
-        if self.think is not None and not is_lmstudio and self.model_info.type == 'deepseek':
-            payload['think'] = self.think
+        # 不传递 think / enable_thinking 参数：think 模式取消，
+        # 由 llama-server / DeepSeek 按其默认行为处理
         payload.update(self.model_info.options)
         return payload
 

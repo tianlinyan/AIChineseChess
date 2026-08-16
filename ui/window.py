@@ -211,13 +211,6 @@ class MainWindow(QMainWindow):
                    self.model2_combo.currentData() is not None)
         self.start_btn.setEnabled(enabled)
 
-    def on_disable_think_changed(self, state: int) -> None:
-        if state == Qt.CheckState.Checked.value:
-            self.think_check.setEnabled(False)
-            self.think_check.setChecked(False)
-        else:
-            self.think_check.setEnabled(True)
-
     # ── 红方 AI 引擎控制 ──
 
     def on_red_ai_mode_changed(self, idx: int) -> None:

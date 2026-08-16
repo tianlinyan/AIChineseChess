@@ -3,14 +3,14 @@
     {
       "id": "qwen3.5-p1",
       "name": "AI",
-      "type": "lmstudio",
+      "type": "llama-server",
       "endpoint": "http://192.168.0.19:8888/v1/chat/completions",
       "model": "qwen3.5"
     },
     {
       "id": "qwen3.5-p2",
       "name": "AI",
-      "type": "lmstudio",
+      "type": "llama-server",
       "endpoint": "http://192.168.0.19:8888/v1/chat/completions",
       "model": "qwen3.5"
     },

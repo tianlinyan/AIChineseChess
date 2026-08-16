@@ -41,7 +41,7 @@ python main.py
     {
       "id": "qwen3.5-p1",
       "name": "AI",
-      "type": "lmstudio",
+      "type": "llama-server",
       "endpoint": "http://localhost:8888/v1/chat/completions",
       "model": "qwen3.5"
     },
@@ -59,7 +59,7 @@ python main.py
 
 - `id` 后缀 `-p1`/`-p2` 决定归属红/黑方下拉框；`arbitration` 为仲裁模型（不进玩家下拉框）
 - `api_key` 支持 `${ENV_VAR}` 占位符：创建 `.env` 文件（已被 gitignore）或设置环境变量，如 `DEEPSEEK_API_KEY=sk-xxx`
-- `type`: `lmstudio`（OpenAI 兼容本地端点）/ `deepseek`（DeepSeek API，不支持视觉）
+- `type`: `llama-server`（OpenAI 兼容本地端点）/ `deepseek`（DeepSeek API，不支持视觉）
 - 每方至少需要一个模型；`models.json` 不存在时回退并提示
 
 ## 🎮 AI 模式（红黑独立配置）

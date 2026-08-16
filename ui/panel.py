@@ -295,17 +295,6 @@ def setup_left_expanded(parent) -> None:
     parent.vision_check.setStyleSheet(_check_style())
     ctrl_layout.addWidget(parent.vision_check)
 
-    parent.think_check = QCheckBox("think / no_think")
-    parent.think_check.setChecked(True)
-    parent.think_check.setStyleSheet(_check_style())
-    ctrl_layout.addWidget(parent.think_check)
-
-    parent.disable_think_check = QCheckBox("禁用 think（兼容模式）")
-    parent.disable_think_check.setChecked(False)
-    parent.disable_think_check.setStyleSheet(_check_style())
-    parent.disable_think_check.stateChanged.connect(parent.on_disable_think_changed)
-    ctrl_layout.addWidget(parent.disable_think_check)
-
     layout.addWidget(ctrl_group)
 
     layout.addWidget(_spacer(6))

@@ -25,7 +25,7 @@ python tests/test_incremental.py  # 增量缓存一致性
 
 - 顶层 `models` 数组（`models.json.example` 为模板）。`id` 后缀 `-p1`/`-p2` 决定归属哪一方玩家下拉框；`arbitration` 是仲裁模型，不出现在玩家下拉框。
 - `api_key` 支持 `${ENV_VAR}` 占位符；`main.py` 启动时加载 `.env`（PyInstaller 打包后定位 exe 旁，与 `services/models.py` 一致）。
-- `type`: `lmstudio`（OpenAI 兼容本地端点）/ `deepseek`（DeepSeek API — **不支持视觉**，控制器/AIWorker 对 deepseek 过滤 `image_url`）。
+- `type`: `llama-server`（OpenAI 兼容本地端点）/ `deepseek`（DeepSeek API — **不支持视觉**，控制器/AIWorker 对 deepseek 过滤 `image_url`）。
 
 ### 两个搜索引擎 — 角色分明
 
