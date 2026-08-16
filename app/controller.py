@@ -17,7 +17,7 @@ from domain.constants import (
     PROMPT_HISTORY_MAX_ITEMS,
 )
 from domain.prompts import (
-    HUMAN_MODEL, get_system_prompt, get_system_prompt_lite,
+    HUMAN_MODEL, get_system_prompt,
     build_move_prompt, format_legal_moves,
     get_arbitration_system_prompt, build_arbitration_prompt,
     TOOLS_BASIC, DEFAULT_TOOLS,
@@ -598,20 +598,13 @@ class GameController:
         player_name = '红方' if player == 1 else '黑方'
         current_version = self.game_version
 
-        # think参数
-        if self.main and self.main.disable_think_check.isChecked():
-            think_enabled = None
-        else:
-            think_enabled = (self.main.think_check.isChecked()
-                             if self.main else True)
-
-        # 系统提示词 — 强模型用精简版，本地模型用完整版
-        # llm_only 模式下不描述不可用的分析工具
+        # 系统提示词 — 统一使用完整版（含完整棋规：棋子走法表/九宫/约束），
+        # 不依赖"模型已掌握棋规"的假设；DeepSeek 等强模型同样接收完整规则。
+        # models.json 中配置了 system_prompt 的模型优先使用自定义提示词。
+        # llm_only 模式下不描述不可用的分析工具。
         include_tools = self._ai_mode_for(player) != 'llm_only'
         if model.system_prompt:
             system_prompt = model.system_prompt
-        elif model.type and model.type.startswith('deepseek'):
-            system_prompt = get_system_prompt_lite(include_analysis_tools=include_tools)
         else:
             system_prompt = get_system_prompt(include_analysis_tools=include_tools)
 
@@ -634,7 +627,6 @@ class GameController:
             model, prompt, image, player_name,
             version=current_version,
             cancel_version=self.ai_manager.cancel_version,
-            think=think_enabled,
             system_prompt=system_prompt,
             tools=worker_tools,
             game=self.game,
@@ -671,19 +663,21 @@ class GameController:
                 epn = PIECE_SYMBOLS.get(self.game.board[efr][efc], '?')
                 emove_str = f"{epn} {format_move(efr, efc, etr, etc)}"
                 self.log(f"🔍 {engine_name} 推荐: {emove_str}", 'INFO')
-                # 信任分级：Pikafish 战术强度远超 LLM，默认采信；
+                # 信任分级：Pikafish 推荐是重要参考——不强制采信，也不轻慢；
                 # MCTS 兜底为本地轻量引擎，仅作参考。
                 # （search_best_move 现也由 Pikafish 提供，与引擎推荐同源，
                 # 不重复强调"低于引擎"以免错误校准 LLM 信任。）
                 if engine_name == 'Pikafish':
                     trust_note = (
-                        f"{engine_name} 是顶级战术引擎，战术计算远超语言模型。"
-                        f"**默认采信其推荐**；仅当你有具体的战略理由时才坚持己见，"
-                        f"并解释为何优于推荐。"
-                        f"推荐已由引擎深度分析，**无需再调用 evaluate_position / "
-                        f"search_best_move 验证**；若怀疑有漏算可调用一次核对。"
-                        f"（search_best_move 同样由 {engine_name} 提供，与推荐同源，"
-                        f"重复调用仅在二次核对时有意义。）"
+                        f"{engine_name} 是顶级战术引擎，战术计算远超语言模型，"
+                        f"其推荐经过深度分析，应作为**重要参考优先考虑**。"
+                        f"你拥有最终决定权：没有反对理由时采纳推荐；"
+                        f"若基于具体战略理由（长线弃子/残局过渡/阵型缺陷/局面直觉）"
+                        f"认为推荐并非最优，可坚持己见并说明理由——"
+                        f"理由充分时，不采纳推荐是允许的。"
+                        f"对推荐有疑虑时，可调用 evaluate_position / search_best_move "
+                        f"二次核对（两者同样由 {engine_name} 提供，与推荐同源，"
+                        f"仅在核对时有意义）。"
                     )
                 else:
                     # MCTS 兜底分支：此时 Pikafish 不可用（否则不会走兜底），
@@ -1239,14 +1233,6 @@ class GameController:
         system_prompt = get_arbitration_system_prompt()
         current_version = self.game_version
 
-        # think 参数与正常 LLM 请求一致：尊重 UI 的禁用/启用勾选
-        # （旧代码硬编码 think=True，DeepSeek reasoner 又慢又贵）
-        if self.main and self.main.disable_think_check.isChecked():
-            arb_think = None
-        else:
-            arb_think = (self.main.think_check.isChecked()
-                         if self.main else True)
-
         self.arbitration_count += 1
         self.log(f"🔨 已启动仲裁 ({arbitrator_model.name}) 第 {self.arbitration_count} 次", 'INFO')
 
@@ -1258,7 +1244,6 @@ class GameController:
             arbitrator_model, prompt, None, f"{player_name}仲裁",
             version=current_version,
             cancel_version=self.ai_manager.cancel_version,
-            think=arb_think,
             system_prompt=system_prompt,
             tools=TOOLS_BASIC,
             timeout=ARBITRATION_TIMEOUT_SECONDS,

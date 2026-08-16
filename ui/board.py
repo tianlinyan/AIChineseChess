@@ -9,7 +9,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 
-from domain.constants import VISION_IMAGE_QUALITY, VISION_IMAGE_MAX_WIDTH, PIECE_SYMBOLS
+from domain.constants import VISION_IMAGE_QUALITY, VISION_IMAGE_MAX_WIDTH, VISION_IMAGE_SCALE, PIECE_SYMBOLS
 from domain.game import ChineseChessGame
 
 
@@ -202,7 +202,9 @@ class BoardWidget(QWidget):
 
     def capture_board_image(self):
         # 使用 render() 而非 grab()：在窗口遮挡/最小化时仍能正确渲染
-        pixmap = QPixmap(self.size())
+        # 按 VISION_IMAGE_SCALE 超采样渲染（默认 2 倍），放大后仍保持清晰
+        scale = max(1, VISION_IMAGE_SCALE)
+        pixmap = QPixmap(QSize(self.width() * scale, self.height() * scale))
         self.render(pixmap)
         if pixmap.isNull():
             return ""

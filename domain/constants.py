@@ -58,7 +58,8 @@ PROMPT_HISTORY_MAX_ITEMS = 24    # 提示词中走子历史的最大条数（超
 
 # ── 视觉模式 ──
 VISION_IMAGE_QUALITY = 80        # JPEG 质量 (1-100)，越低文件越小
-VISION_IMAGE_MAX_WIDTH = 300     # 图片最大宽度 (px)，0=不限制
+VISION_IMAGE_SCALE = 2           # 截图渲染放大倍数（超采样，放大后仍清晰）
+VISION_IMAGE_MAX_WIDTH = 600     # 图片最大宽度 (px)，0=不限制（原 300，放大一倍）
 
 # ── 棋子符号映射 ──
 # 红黑棋子名称：車馬炮红黑通用，帅/将、仕/士、相/象、兵/卒一一对应
