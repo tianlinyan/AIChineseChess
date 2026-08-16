@@ -1,5 +1,4 @@
 import json
-import re
 import threading
 from typing import Optional
 
@@ -9,8 +8,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from domain.models import ModelInfo
 from ai.parser import parse_coordinates_from_text
 from domain.constants import (
-    AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT,
-    AI_OUTPUT_TRUNCATE_LENGTH, AI_OUTPUT_MIN_TRIM_POSITION,
+    AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT, AI_MAX_OUTPUT_TOKENS,
     BOARD_HEIGHT, BOARD_WIDTH,
     PIECE_SYMBOLS, parse_coord,
 )
@@ -559,19 +557,9 @@ class AIWorker:
     # ── 辅助 ──
 
     def _build_full_text(self) -> str:
+        # 汇总 LLM 推理/正式回复/工具结果，思考日志完整展示，不截断
         parts = [t for t in self._all_texts if t]
-        full = '\n\n'.join(parts)
-        # 智能截断
-        if len(full) > AI_OUTPUT_TRUNCATE_LENGTH:
-            m = re.search(
-                r'.*[。！？!\?\n]',
-                full[AI_OUTPUT_MIN_TRIM_POSITION:AI_OUTPUT_TRUNCATE_LENGTH]
-            )
-            if m:
-                full = full[:AI_OUTPUT_MIN_TRIM_POSITION + m.end()]
-            else:
-                full = full[:AI_OUTPUT_TRUNCATE_LENGTH] + '...'
-        return full
+        return '\n\n'.join(parts)
 
     def _extract_move_from_call(self, tool_call: dict) -> tuple:
         """从单个 tool_call 提取 move_piece 坐标"""
@@ -627,6 +615,10 @@ class AIWorker:
             'messages': messages,
             'stream': False,
             'tools': list(self.tools),
+            # 输出 token 硬上限（≈1000 字 + 工具调用开销）。
+            # 放在 update(options) 之前：models.json 里配置了 max_tokens 的
+            # 模型可精确覆盖此默认值。
+            'max_tokens': AI_MAX_OUTPUT_TOKENS,
         }
         is_llama_server = self._is_llama_server()
         if self.model_info.tools_choice:

@@ -103,6 +103,7 @@ def get_system_prompt(*, include_analysis_tools: bool = True) -> str:
     prompt = """# 身份与铁律
 
 你是中国象棋 AI 棋手。目标：**赢棋**；底线：**不输**——被将死或困毙（无合法走法）均判负。合法性由规则引擎把关（见下），你要做的是在安全前提下积极进取：优势时果断，劣势时顽强。
+**所有输出一律使用简体中文**（棋子名、坐标如 A1~I10、工具名 move_piece 等代码标识除外）。
 
 提交走法的**唯一方式**是调用 `move_piece(from="列行", to="列行")`，坐标格式：列 A~I，行 1~10。
 ✅ `move_piece(from="H10", to="G8")`
@@ -123,7 +124,7 @@ def get_system_prompt(*, include_analysis_tools: bool = True) -> str:
 
 每步上限：`search_best_move` 最多 1 次，`evaluate_position` 最多 2 次（超出会被工具拒绝）。**你拥有最终决定权**，工具结果只是参考。
 
-**推荐顺序**：①`evaluate_position` 快速评估 → ②复杂局面再用 `search_best_move` → ③`move_piece` 提交。总轮次 ≤4，分析简明扼要，尽早提交。"""
+**推荐顺序**：①`evaluate_position` 快速评估 → ②复杂局面再用 `search_best_move` → ③`move_piece` 提交。总轮次 ≤4，分析（含推理）≤1000 字，简明扼要，尽早提交。"""
     else:
         prompt += """
 
@@ -203,6 +204,7 @@ def get_system_prompt_lite(*, include_analysis_tools: bool = True) -> str:
     prompt = """# 身份与铁律
 
 你是中国象棋 AI 棋手。目标：**赢棋**；底线：**不输**——被将死或困毙（无合法走法）均判负。合法性由规则引擎把关（见下），你要做的是在安全前提下积极进取：优势时果断，劣势时顽强。
+**所有输出一律使用简体中文**（棋子名、坐标如 A1~I10、工具名 move_piece 等代码标识除外）。
 
 提交走法的**唯一方式**是调用 `move_piece(from="列行", to="列行")`，坐标格式：列 A~I，行 1~10。
 ✅ `move_piece(from="H10", to="G8")`
@@ -223,7 +225,7 @@ def get_system_prompt_lite(*, include_analysis_tools: bool = True) -> str:
 
 每步上限：`search_best_move` 最多 1 次，`evaluate_position` 最多 2 次（超出会被工具拒绝）。**你拥有最终决定权**，工具结果只是参考，有具体战术理由可坚持己见。
 
-**推荐顺序**：①`evaluate_position` → ②如需 `search_best_move` → ③`move_piece`。总轮次 ≤4，尽早提交。"""
+**推荐顺序**：①`evaluate_position` → ②如需 `search_best_move` → ③`move_piece`。总轮次 ≤4，分析 ≤1000 字，尽早提交。"""
     else:
         prompt += """
 
@@ -422,6 +424,10 @@ def build_move_prompt(current_player: int, board_str: str, history: str,
             else:
                 parts.append("列表组内已按战术价值排序，如有将军/吃子类着法可优先考虑。")
         parts.append("")
+
+    # ═══ 8. 语言要求（置于末尾，近因效应加强中文输出）═══
+    parts.append("---")
+    parts.append("**回复一律使用简体中文**（坐标、棋子名、工具名除外）。")
 
     return "\n".join(parts)
 

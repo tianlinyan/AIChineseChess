@@ -9,9 +9,8 @@ AI_RETRY_LIMIT = 3
 AI_TIMEOUT_SECONDS = 600
 AI_CONNECT_TIMEOUT = 15        # API 连接超时（秒）：与读取超时分离，端点黑洞快速失败
 ARBITRATION_TIMEOUT_SECONDS = 180  # 仲裁超时（秒），比正常 LLM 调用更短
-AI_OUTPUT_TRUNCATE_LENGTH = 1000
-AI_OUTPUT_MIN_TRIM_POSITION = 500
 AI_RETRY_DELAY_MS = 3000
+AI_MAX_OUTPUT_TOKENS = 2048     # 单次回复输出 token 硬上限（≈1000 字 + 工具调用 JSON 开销；models.json 的 options 可覆盖）
 # ── 搜索引擎配置 ──
 SEARCH_MAX_DEPTH = 8             # 搜索强度 (1-8)：MCTS模拟次数 500~5000，Pikafish时限 depth×3s（封顶 MCTS_TIME_LIMIT=30s）
 SEARCH_TIME_LIMIT = 40.0         # 搜索时间上限（秒）
