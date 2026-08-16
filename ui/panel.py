@@ -295,6 +295,16 @@ def setup_left_expanded(parent) -> None:
     parent.vision_check.setStyleSheet(_check_style())
     ctrl_layout.addWidget(parent.vision_check)
 
+    # 显示 AI 思考过程（reasoning_content 推理文本）：默认不勾选
+    # （日志只显示正式回复；勾选后连推理一起显示，便于复盘）
+    parent.show_think_check = QCheckBox("显示 AI 思考过程（含推理）")
+    parent.show_think_check.setChecked(False)
+    parent.show_think_check.setStyleSheet(_check_style())
+    parent.show_think_check.setToolTip(
+        "勾选后思考日志显示模型的推理过程（reasoning_content）；"
+        "默认关闭，只显示正式回复。")
+    ctrl_layout.addWidget(parent.show_think_check)
+
     layout.addWidget(ctrl_group)
 
     layout.addWidget(_spacer(6))

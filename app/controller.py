@@ -690,7 +690,8 @@ class GameController:
     def on_ai_finished(self, from_coord: str, to_coord: str,
                        full_text: str, error: str,
                        tokens: int, version: int,
-                       cancel_version: int = 0) -> None:
+                       cancel_version: int = 0,
+                       content_text: str = '') -> None:
         if not self._check_callback_valid(version, cancel_version, 'AI',
                                           needs_cleanup=True):
             return
@@ -698,13 +699,23 @@ class GameController:
         current_player = self.game.current_player
         player_name = '红方' if current_player == 1 else '黑方'
 
-        if full_text:
+        # 左侧面板"显示 AI 思考过程"开关：勾选 → 显示完整文本（含推理）；
+        # 默认关闭 → 只显示正式回复
+        show_think = bool(
+            self.main and getattr(self.main, 'show_think_check', None)
+            and self.main.show_think_check.isChecked())
+
+        if full_text or content_text:
             # 标题行保留红/黑颜色区分（红方日志红、黑方日志黑）；
-            # 思考正文改用 INFO 灰（与 "🔍 Pikafish 推荐" 等引擎日志同色），
-            # 避免整块红/黑着色导致长思考文本难以阅读
+            # 正文按开关：含推理全文 / 仅正式回复（不含 [Tool: ...]）
             self.log(f"  {player_name} AI 思考:",
                      'red' if current_player == 1 else 'black')
-            self.log(full_text.strip(), 'INFO')
+            if show_think and full_text:
+                self.log(full_text.strip(), 'INFO')
+            elif content_text:
+                self.log(content_text.strip(), 'INFO')
+            else:
+                self.log('（模型本轮仅输出推理，无正式回复文本）', 'INFO')
         if error:
             self.log(f"{player_name} AI 错误: {error}", 'ERROR')
 
@@ -1232,7 +1243,8 @@ class GameController:
     def on_arbitration_finished(self, from_coord: str, to_coord: str,
                                  full_text: str, error: str,
                                  tokens: int, version: int,
-                                 cancel_version: int = 0) -> None:
+                                 cancel_version: int = 0,
+                                 content_text: str = '') -> None:
         """仲裁完成回调：评分 + 执行仲裁结果。"""
         if not self._check_callback_valid(version, cancel_version, '仲裁',
                                           needs_cleanup=True):
@@ -1298,9 +1310,16 @@ class GameController:
         if self.main:
             self.main.update_ai_score()
 
-        # ── 日志仲裁分析 ──
-        if full_text:
-            self.log(f"  🔨 仲裁分析:\n{full_text}\n", 'INFO')
+        # ── 日志仲裁分析（按"显示 AI 思考过程"开关：勾选含推理全文，
+        #    默认只显示正式回复）──
+        show_think = bool(
+            self.main and getattr(self.main, 'show_think_check', None)
+            and self.main.show_think_check.isChecked())
+        if full_text or content_text:
+            self.log(
+                f"  🔨 仲裁分析:\n"
+                f"{(full_text if show_think and full_text else content_text).strip()}\n",
+                'INFO')
 
         # 格式化双方走法用于日志
         arb_piece = self.game.board[arb_row][arb_col]

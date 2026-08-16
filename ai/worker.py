@@ -56,8 +56,9 @@ def _clamp_int(value, lo: int, hi: int) -> int:
 
 
 class AIWorkerSignals(QObject):
-    finished = pyqtSignal(str, str, str, str, int, int, int)
-    # from_coord, to_coord, full_text, error, tokens, version, cancel_version
+    finished = pyqtSignal(str, str, str, str, int, int, int, str)
+    # from_coord, to_coord, full_text, error, tokens, version,
+    # cancel_version, content_text（正式回复，不含推理/工具结果）
 
 
 class AIWorker:
@@ -131,13 +132,15 @@ class AIWorker:
             if (not from_coord or not to_coord) and 'ERROR:' in full_text:
                 error = full_text
                 full_text = ''
+            # content_text = 正式回复（不含推理/工具结果），供日志"只显示正式回复"
+            content_text = '\n\n'.join(t for t in self._content_texts if t)
             self.signals.finished.emit(
                 from_coord, to_coord, full_text, error, 0,
-                self.version, self.cancel_version)
+                self.version, self.cancel_version, content_text)
         except Exception as e:
             self.signals.finished.emit(
                 '', '', '', str(e), 0,
-                self.version, self.cancel_version)
+                self.version, self.cancel_version, '')
         finally:
             self._session.close()
 
