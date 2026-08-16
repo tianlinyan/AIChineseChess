@@ -117,7 +117,6 @@ class PikafishEngine:
         self._lock = threading.RLock()  # 可重入：_kill_proc 可能在持锁时被调用
         self._available = False
         self._error_msg: str = ''  # 启动失败时的诊断信息
-        self._pending_async: int = 0   # 进行中的异步搜索计数
         # 引擎 stdout 由独立 reader 线程读入行队列 —— 主逻辑按截止时间
         # queue.get(timeout=...) 取行，避免 readline() 在引擎静默挂起时
         # 永久阻塞（旧实现会连关窗退出都一起卡死）
@@ -129,7 +128,8 @@ class PikafishEngine:
         # MultiPV 结果缓存（每次搜索前清零，_read_bestmove 中收集）
         self._top_moves: list = []  # [(move_tuple, score_cp), ...]（按序号升序）
         self._top_moves_dict: dict = {}  # multipv 序号 -> (move, score)，只存最新迭代
-        # 当前引擎 MultiPV 配置值（正式走子恒 1；search_atomic/set_multipv 维护）
+        # 当前引擎 MultiPV 配置值（正式走子恒 1；search_atomic 内部
+        # 临时切 MultiPV 并在 finally 恢复 1）
         self._multipv: int = 1
 
         if binary_path is None:
@@ -227,30 +227,6 @@ class PikafishEngine:
         finally:
             self._lock.release()
 
-    def evaluate_position(self, game, player: int,
-                          depth: int = 1) -> Optional[int]:
-        """快速评估局面 — go depth N，返回走子方视角 centipawn 评分。"""
-        if not self._available:
-            return None
-
-        with self._lock:
-            try:
-                self._top_moves = []  # 清除缓存，确保读到本次搜索结果
-                self._top_moves_dict = {}
-                fen = board_to_fen(game.board, player)
-                self._purge_lines()
-                self._send(f'position fen {fen}')
-                self._send(f'go depth {depth}')
-
-                best_move_uci = self._read_bestmove(5000)
-                if not best_move_uci:
-                    return None
-                if self._top_moves:
-                    return self._top_moves[0][1]
-            except (OSError, ValueError, BrokenPipeError):
-                pass
-            return None
-
     def _search_locked(self, game, player: int,
                        time_ms: int) -> Optional[tuple]:
         """锁内搜索核心（调用方必须已持 self._lock）。
@@ -328,7 +304,7 @@ class PikafishEngine:
         供并发调用方（LLM 工具线程）使用，一次持锁内完成全部步骤：
 
         - **消除 MultiPV 撕裂**：set/search/restore 合并为原子段，其他
-          线程无法在中间插入（旧的 set_multipv→search→set_multipv 恢复
+          线程无法在中间插入（旧的"先切 MultiPV 再搜索、事后恢复"写法
           存在"错误 MultiPV 值启动搜索"的窗口）。
         - **消除 _top_moves 跨搜索 TOCTOU**：候选快照在持锁期间导出
           （_search_locked 已 finalize），返回后不再另起锁读取，不会被
@@ -339,7 +315,7 @@ class PikafishEngine:
         Returns:
             (best_move, top_snapshot) 或 None（锁超时/引擎不可用/搜索失败）
             top_snapshot: [(move, score_cp), ...] 走子方视角厘兵，
-            按 multipv 序号升序（与 get_top_moves_scores 同语义）。
+            按 multipv 序号升序（与 get_top_moves 同源数据）。
         """
         if not self._available or not self._proc:
             return None
@@ -393,7 +369,6 @@ class PikafishEngine:
             callback(None, '引擎不可用')
             return
 
-        self._pending_async += 1
         # 重置 MultiPV 收集缓存
         self._top_moves = []
         self._top_moves_dict = {}
@@ -408,7 +383,6 @@ class PikafishEngine:
             tmp_game.current_player = player
             legal_moves = set(tmp_game.get_all_legal_moves(player))
         except Exception as e:
-            self._pending_async -= 1
             callback(None, f'棋盘快照失败: {e}')
             return
 
@@ -453,32 +427,9 @@ class PikafishEngine:
                 callback(move, error)
             except Exception:
                 pass
-            finally:
-                self._pending_async -= 1
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
-
-    def set_multipv(self, n: int, lock_timeout_ms: int = 2000) -> None:
-        """设置 MultiPV 主变数（持锁，与搜索互斥）。
-
-        正式走子用 MultiPV 1（棋力最大）；LLM search_best_move 工具
-        需要候选时临时切 MultiPV 3、搜索后恢复 1（见 ai/worker.py）。
-        锁超时（默认 2s）后静默放弃：引擎正忙时不让调用方（LLM 工具
-        线程）阻塞等锁。
-        """
-        if not self._available:
-            return
-        if not self._lock.acquire(timeout=max(0.5, lock_timeout_ms / 1000.0)):
-            return
-        try:
-            n = max(1, int(n))
-            self._send(f'setoption name MultiPV value {n}')
-            self._multipv = n
-        except (OSError, ValueError, BrokenPipeError):
-            pass
-        finally:
-            self._lock.release()
 
     def get_top_moves(self, n: int = 3) -> List[Tuple[tuple, int, float]]:
         """返回前 N 个最优走法及评分（接口兼容 MCTSEngine）。
@@ -493,14 +444,6 @@ class PikafishEngine:
             # visits 存评分为整数（兼容 MCTSEngine 接口），avg_value 存归一化值
             result.append((move, int(score_cp), score_cp / 100.0))
         return result
-
-    def get_top_moves_scores(self) -> list:
-        """返回原始 MultiPV 评分列表 [(move, score_cp), ...]。
-
-        供 controller 做高置信度判断。
-        """
-        with self._lock:
-            return list(self._top_moves)
 
     def _parse_multipv_line(self, line: str) -> None:
         """解析 MultiPV info 行，按 multipv 序号存最终迭代结果。
@@ -544,7 +487,7 @@ class PikafishEngine:
         """搜索结束（收到 bestmove）后：按 multipv 序号升序导出最终结果。
 
         _top_moves_dict 只含每个序号的最新（最深迭代）条目；
-        转成列表供 get_top_moves / get_top_moves_scores 读取。
+        转成列表供 get_top_moves 读取。
         """
         self._top_moves = [self._top_moves_dict[i]
                            for i in sorted(self._top_moves_dict)]
@@ -676,7 +619,7 @@ class PikafishEngine:
                     # ── 棋力配置（正式走子用单主变 + 多线程 + 大哈希）──
                     # MultiPV 1：MultiPV>1 会把算力摊给多条主变、降低单线
                     # 深度，正式走子不必要；LLM search_best_move 工具需要
-                    # 候选时经 set_multipv(3) 临时切换、用后恢复。
+                    # 候选时经 search_atomic(multipv=3) 临时切换、用后恢复。
                     # Threads：单线程（UCI 默认）棋力明显偏弱，按核数启用。
                     # Hash：默认 16MB 换位表过小，中残局重复局面重算。
                     # Move Overhead 0：本地进程无网络/界面延迟，UCI 默认
@@ -800,7 +743,7 @@ class PikafishEngine:
         - 每 0.5s 轮询一次 queue，同时检查进程存活，引擎死亡后最多 0.5s 即可检测
         - 总时间上限 = 实际搜索时间 + 10s 兜底
         - 超时或进程死亡时返回 None（调用方回退 MCTS）
-        - 沿途收集 multipv info 行到 self._top_moves（供高置信度短路使用）
+        - 沿途收集 multipv info 行到 self._top_moves（供 get_top_moves 读取）
         """
         if not self._proc or not self._proc.stdout:
             return None

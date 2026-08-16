@@ -63,16 +63,22 @@ class EngineBridge(QObject):
 
         self._pikafish: Optional['PikafishEngine'] = None
         self._pikafish_ready: bool = False
+        # shutdown 后置位：init 线程的迟到结果不再覆盖已清理的状态
+        self._shutdown: bool = False
         # 在飞的 MCTS 搜索：按线程对象关联引擎与线程，支持并发兜底搜索。
         # 单槽位会让旧线程的 finally 清空新搜索的引用，导致 stop_all 失效。
         self._active_mcts: dict = {}     # thread -> MCTSEngine
-        self._mcts_threads: dict = {}    # thread -> threading.Thread
 
     # ── 公开接口 ──
 
     @property
     def pikafish_available(self) -> bool:
-        return self._pikafish is not None and self._pikafish.available
+        # 不仅要 available 标志，还要进程真实存活：PikafishEngine.restart()
+        # 的文档明确"进程被 kill 后 _available 仍可能为 True（假可用）"，
+        # 控制器据此决定"工具由 Pikafish 提供"的文案，假可用会误导
+        pf = self._pikafish
+        return (pf is not None and pf.available
+                and pf._proc is not None and pf._proc.poll() is None)
 
     @property
     def pikafish(self) -> Optional['PikafishEngine']:
@@ -134,6 +140,14 @@ class EngineBridge(QObject):
         try:
             pf, diag_lines = result
         except (TypeError, ValueError):
+            return
+        if self._shutdown:
+            # 迟到结果：shutdown 已清理引擎，直接关闭并丢弃
+            if pf is not None:
+                try:
+                    pf.close()
+                except Exception:
+                    pass
             return
         self._pikafish = pf
         for entry in diag_lines:
@@ -209,20 +223,12 @@ class EngineBridge(QObject):
             finally:
                 # 只移除自己的条目，避免清空并发启动的新搜索引用
                 self._active_mcts.pop(threading.current_thread(), None)
-                # _mcts_threads 同样只删自己：否则每次搜索永久累积一个
-                # 线程条目，长会话 dict 无限增长（内存泄漏）
-                self._mcts_threads.pop(threading.current_thread(), None)
                 self.search_done.emit(
                     (move, player, on_done, game_version, cancel_version, ''))
 
         thread = threading.Thread(target=_run, daemon=True)
         self._active_mcts[thread] = engine
-        self._mcts_threads[thread] = thread
         thread.start()
-
-    def pikafish_time_s(self) -> int:
-        """当前搜索深度对应的 Pikafish 搜索秒数。"""
-        return self._pikafish_time_s(self._get_depth())
 
     def stop_all(self) -> None:
         """停止在飞的后台搜索（reset/pause/shutdown 时调用）。"""
@@ -287,26 +293,36 @@ class EngineBridge(QObject):
                 self._start_pf_hint(g, game_version, cancel_version, on_done)
                 return
 
-        # ── MCTS 兜底路径 ──
-        self._log("  🌳 Pikafish 不可用，MCTS 提示搜索中（800次模拟）...", 'INFO')
+        # ── MCTS 兜底路径（引擎在线程外创建并注册，stop_all 可中断）──
+        sims = MCTS_FALLBACK_SIMULATIONS
+        self._log(f"  🌳 Pikafish 不可用，MCTS 提示搜索中（{sims}次模拟）...", 'INFO')
+        engine = MCTSEngine(max_simulations=sims,
+                            time_limit=MCTS_FALLBACK_TIME_LIMIT)
 
         def _run_mcts() -> None:
             move = None
             try:
-                engine = MCTSEngine(max_simulations=800, time_limit=5.0)
                 move = engine.search(g, player)
             except Exception:
                 pass
             finally:
+                # 只移除自己的条目，避免清空并发启动的新搜索引用
+                self._active_mcts.pop(threading.current_thread(), None)
                 self.hint_done.emit((move, game_version, cancel_version, on_done))
 
-        threading.Thread(target=_run_mcts, daemon=True).start()
+        thread = threading.Thread(target=_run_mcts, daemon=True)
+        self._active_mcts[thread] = engine
+        thread.start()
 
     # ── 提示搜索内部实现 ──
 
     def _start_pf_hint(self, g: ChineseChessGame, game_version: int,
                        cancel_version: int, on_done: Callable) -> None:
-        """启动 Pikafish 提示搜索，复用 search_async（与 AI 搜索同路径）。"""
+        """启动 Pikafish 提示搜索，复用 search_async（与 AI 搜索同路径）。
+
+        时限按搜索深度映射（depth×3s，上限 MCTS_TIME_LIMIT），
+        与 controller._trigger_hint 的文档承诺一致。
+        """
 
         def _on_result(move, error: str) -> None:
             if error:
@@ -314,20 +330,25 @@ class EngineBridge(QObject):
             # 用 pyqtSignal 中继到主线程
             self.hint_done.emit((move, game_version, cancel_version, on_done))
 
-        self._pikafish.search_async(g, g.current_player,
-                                    time_ms=int(MCTS_TIME_LIMIT * 1000),
-                                    callback=_on_result)
+        self._pikafish.search_async(
+            g, g.current_player,
+            time_ms=self._pikafish_time_s(self._get_depth()) * 1000,
+            callback=_on_result)
 
     def shutdown(self) -> None:
         """清理引擎资源。"""
+        self._shutdown = True
         self.stop_all()
-        for thread in list(self._mcts_threads.values()):
+        for thread in list(self._active_mcts.keys()):
             if thread.is_alive():
                 thread.join(timeout=2.0)
-        try:
-            self.search_done.disconnect()
-        except TypeError:
-            pass
+        # 断开全部信号：shutdown 后迟到的 emit 不再投递
+        # （hint_done/init_done 的槽仍连着，之前只断开 search_done）
+        for sig in (self.search_done, self.hint_done, self.init_done):
+            try:
+                sig.disconnect()
+            except TypeError:
+                pass
         if self._pikafish:
             try:
                 self._pikafish.close()
@@ -351,8 +372,7 @@ class EngineBridge(QObject):
         g = game.snapshot()
         g.current_player = player
 
-        desc = "均匀先验"
-        self._log(f"  🌳 MCTS 启动 ({desc}, {sims}次模拟, 深度={depth})", 'INFO')
+        self._log(f"  🌳 MCTS 启动 ({sims}次模拟, 深度={depth})", 'INFO')
         result = {}
         engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_TIME_LIMIT)
 
@@ -367,8 +387,6 @@ class EngineBridge(QObject):
             finally:
                 # 只移除自己的条目，避免清空并发启动的新搜索引用
                 self._active_mcts.pop(threading.current_thread(), None)
-                # 同 start_mcts_fallback：_mcts_threads 只删自己防泄漏
-                self._mcts_threads.pop(threading.current_thread(), None)
                 self.search_done.emit(
                     (move, player, _logged_on_done,
                      game_version, cancel_version, ''))
@@ -394,5 +412,4 @@ class EngineBridge(QObject):
 
         thread = threading.Thread(target=_run, daemon=True)
         self._active_mcts[thread] = engine
-        self._mcts_threads[thread] = thread
         thread.start()

@@ -13,7 +13,7 @@ import re
 from typing import Optional
 
 from domain.game import ChineseChessGame
-from domain.constants import BOARD_HEIGHT, BOARD_WIDTH, PIECE_SYMBOLS, format_coord
+from domain.constants import PIECE_SYMBOLS, format_coord
 from domain.evaluation import PIECE_VALUE
 
 # ── 人类玩家 Sentinel ──
@@ -91,8 +91,7 @@ EVALUATE_POSITION_TOOL = {
 }
 
 TOOLS_BASIC = (MOVE_PIECE_TOOL,)
-TOOLS = (SEARCH_BEST_MOVE_TOOL, EVALUATE_POSITION_TOOL, MOVE_PIECE_TOOL)
-DEFAULT_TOOLS = TOOLS
+DEFAULT_TOOLS = (SEARCH_BEST_MOVE_TOOL, EVALUATE_POSITION_TOOL, MOVE_PIECE_TOOL)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -190,78 +189,6 @@ def get_system_prompt(*, include_analysis_tools: bool = True) -> str:
 **应将**（被将军）：对方車将军，你可躲将/垫仕/吃車 → 选价值最高的（吃車 > 垫 > 躲）。
 **兑子决策**（中局）：車(9)兑馬+炮(8.5) → 账面-0.5，但残局有过河卒优势 → 可兑。車单换炮(4.5)或馬(4) → 巨亏，除非直接杀棋。
 **残局简化**（残局）：車+卒 vs 馬+炮。車控线远强于馬炮 → 寻找兑子简化，車对单子必胜。
-
-现在分析局面，从合法走法列表中选择最优走法，调用 `move_piece`。"""
-
-    return prompt
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 系统提示词 — 精简版（DeepSeek 等强模型，已掌握棋规）
-# ══════════════════════════════════════════════════════════════════════════════
-
-def get_system_prompt_lite(*, include_analysis_tools: bool = True) -> str:
-    prompt = """# 身份与铁律
-
-你是中国象棋 AI 棋手。目标：**赢棋**；底线：**不输**——被将死或困毙（无合法走法）均判负。合法性由规则引擎把关（见下），你要做的是在安全前提下积极进取：优势时果断，劣势时顽强。
-**所有输出一律使用简体中文**（棋子名、坐标如 A1~I10、工具名 move_piece 等代码标识除外）。
-
-提交走法的**唯一方式**是调用 `move_piece(from="列行", to="列行")`，坐标格式：列 A~I，行 1~10。
-✅ `move_piece(from="H10", to="G8")`
-❌ 文本输出坐标、"炮二平五"、只分析不调用工具 → 全部无效
-
-**合法走法列表已由规则引擎校验**：送将、将帅对面、违规走法已被剔除；你被将军时列表只剩解除将军的着法。你只需从中**选择最优**，无需再验证合法性。唯一例外是 ⚠️ 标记的走法：它们合法，但走后局面第三次重复，会**立即**判和棋或长将判负。
-
-# 工具
-
-| 工具 | 用途 | 何时用 |
-|------|------|--------|
-| `move_piece` | 提交走法 | **每步必须调用**，必须是最后一轮 |"""
-
-    if include_analysis_tools:
-        prompt += """
-| `search_best_move` | 战术搜索 | 复杂中局/怀疑有杀棋捉双时。开局、局面简单或唯一应将时**不要**用 |
-| `evaluate_position` | 局面评估 | 兑子决策/残局判断。不必每步都用 |
-
-每步上限：`search_best_move` 最多 1 次，`evaluate_position` 最多 2 次（超出会被工具拒绝）。**你拥有最终决定权**，工具结果只是参考，有具体战术理由可坚持己见。
-
-**推荐顺序**：①`evaluate_position` → ②如需 `search_best_move` → ③`move_piece`。总轮次 ≤4，分析 ≤1000 字，尽早提交。"""
-    else:
-        prompt += """
-
-直接调用 `move_piece` 提交走法，无需使用其他工具。"""
-
-    prompt += """
-
-# 一、坐标
-
-9列(A~I)×10行(1~10)。A1=黑底线(左上)，I10=红底线(右下)。红大写，黑小写，空位=`.`。黑九宫:行1~3列D~F，红九宫:行8~10列D~F。
-
-# 二、长将与重复（⚠️ 标注）
-
-长将 — 局面循环中一方**每一步都是将军** → 该方判负。
-重复和棋 — 同一局面第三次出现 → 立即和棋。
-⚠️ 走法合法但会立即结束游戏：优势时勿踩，劣势时可利用重复求和。每步应有明确目的，避免纯粹等待性的来回挪动；防守必需的调整（仕相、将的移动）完全合理。
-
-# 三、估值与兑子
-
-**估值**：車9 · 炮4.5 · 馬4 · 相/象2 · 仕/士2 · 兵/卒1(未过河)~2(过河/残局)
-
-低价值换高价值，不轻易車换馬/炮。善用車的控线威力。炮残局贬值(缺架)，馬/过河卒残局升值。相/士=最后防线勿兑尽。
-
-# 四、阶段策略
-
-**开局(前10回合)**：快速出子，車占肋道(D/F列)，馬跳活位，炮架中路。忌重复动子。
-**中局(11~25回合)**：捉双/抽将/闪击/牵制/卧槽馬。注意己方安全。
-**残局(25回合后或双方合计子力≤14)**：卒逼宫，将可助攻。車控要线最优。
-
-# 五、思考流程
-
-**安全** → 被将军？列表只剩应将着法，直接从中选择。对方上一步意图？
-**机会** → 能将军/吃大子/捉双/抽将？杀棋路线：卧槽馬/挂角馬/铁门栓/天地炮/重炮/双車错/闷宫。优势简化，劣势复杂化。
-**选择** → 从合法走法中选最优，确认有明确价值。多步等值时优先出子，突出車的作用。
-**对比引擎**（如有）→ 引擎参考来自独立引擎，信赖程度以参考块内的具体说明为准。一致采纳，有具体理由可坚持己见。
-**提交** → 调用 `move_piece`。唯一禁止项：选 ⚠️ 走法（正求和的劣势方除外）。
 
 现在分析局面，从合法走法列表中选择最优走法，调用 `move_piece`。"""
 
@@ -532,7 +459,14 @@ def build_arbitration_prompt(
     llm_move_str: str, llm_reasoning: str, engine_move_str: str,
     in_check: bool = False, opponent_in_check: bool = False, move_count: int = 0,
     engine_basis: str = '', material_str: str = '',
+    candidate_order: Optional[list] = None,
 ) -> str:
+    """构建仲裁提示词。
+
+    candidate_order: 候选排列 [0/1, 0/1]（0=LLM 候选，1=引擎候选）。
+    None 时内部随机洗牌；由调用方（controller）传入时按给定顺序展示，
+    调用方需同步构建 label_to_move 映射供 worker 的文本兜底解析使用。
+    """
     player_display = '红方' if player == 1 else '黑方'
     player_color = '大写字母' if player == 1 else '小写字母'
 
@@ -543,41 +477,43 @@ def build_arbitration_prompt(
     llm_summary = llm_reasoning
     if len(llm_summary) > 800:
         # 保留含关键推理词的句子（因为/所以/最佳/选择/威胁/优于/弃子/杀棋）
-        sentences = re.split(r'(?<=[。！？\n])', llm_reasoning)
+        sentences = [s for s in re.split(r'(?<=[。！？\n])', llm_reasoning)
+                     if s.strip()]
         key_words = ['因为', '所以', '最佳', '选择', '威胁', '优于', '弃子', '杀棋',
                      '捉双', '抽将', '兑子', '优势', '劣势', '简化', '暴露']
+        llm_summary = ''
         if len(sentences) <= 6:
-            # 句数太少时 head/tail 切片会重叠 → 按原序截断，避免重复句子
-            head = sentences[:3]
-            mid = sentences[3:-3]
-            tail = sentences[-3:]
-            combined = sentences
+            # 句数太少：head(前3)/tail(后3) 切片会重叠导致句子重复，
+            # 直接按原序整体截断（尾部句数太少，保尾没有意义）
+            for s in sentences:
+                if len(llm_summary) + len(s) > 780:
+                    llm_summary += "\n…(省略)…\n"
+                    break
+                llm_summary += s
         else:
             head = sentences[:3]  # 前 3 句（通常是局面判断）
             tail = sentences[-3:]  # 后 3 句（通常是最终选择理由）
             # 中间挑含关键词的句子
             mid = [s for s in sentences[3:-3]
                    if any(kw in s for kw in key_words)]
-            combined = head + mid + tail
-        # 截断保 tail：最终选择理由最该被仲裁看到，永远追加在末尾。
-        # 先给 head/mid 分配预算（780 − tail 长度），tail 整段保留；
-        # tail 本身超限时退化为按原序截断（旧行为）。
-        tail_text = ''.join(tail)
-        llm_summary = ''
-        if tail_text and len(tail_text) < 780:
-            budget = 780 - len(tail_text)
-            for s in head + mid:
-                if len(llm_summary) + len(s) > budget:
-                    llm_summary += "\n…(省略)…\n"
-                    break
-                llm_summary += s
-            llm_summary += tail_text
-        else:
-            for s in combined:
-                if len(llm_summary) + len(s) > 780:
-                    llm_summary += "\n…(省略)…\n"
-                    break
-                llm_summary += s
+            # 截断保 tail：最终选择理由最该被仲裁看到，永远追加在末尾。
+            # 先给 head/mid 分配预算（780 − tail 长度），tail 整段保留；
+            # tail 本身超限时退化为按原序截断。
+            tail_text = ''.join(tail)
+            if len(tail_text) < 780:
+                budget = 780 - len(tail_text)
+                for s in head + mid:
+                    if len(llm_summary) + len(s) > budget:
+                        llm_summary += "\n…(省略)…\n"
+                        break
+                    llm_summary += s
+                llm_summary += tail_text
+            else:
+                for s in head + mid + tail:
+                    if len(llm_summary) + len(s) > 780:
+                        llm_summary += "\n…(省略)…\n"
+                        break
+                    llm_summary += s
         # 摘要过短（如首句即超限）→ 回退头尾截取，保证仲裁能看到实质理由
         if len(llm_summary.strip()) < 50:
             llm_summary = llm_reasoning[:500] + "\n…(省略)…\n" + llm_reasoning[-300:]
@@ -619,7 +555,12 @@ def build_arbitration_prompt(
         (engine_move_str,
          engine_basis if engine_basis.strip() else "（未提供分析）"),
     ]
-    random.shuffle(candidates)
+    if candidate_order is None:
+        random.shuffle(candidates)
+    else:
+        # controller 传入固定顺序（并据以构建 label_to_move 映射，
+        # 供 AIWorker 的仲裁文本兜底解析使用）
+        candidates = [candidates[i] for i in candidate_order]
     for label, (move_s, basis_s) in zip(('A', 'B'), candidates):
         parts.append(f"### 候选 {label}：**{move_s}**")
         parts.append("```")

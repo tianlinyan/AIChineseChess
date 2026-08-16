@@ -10,21 +10,16 @@ AI_TIMEOUT_SECONDS = 600
 AI_CONNECT_TIMEOUT = 15        # API 连接超时（秒）：与读取超时分离，端点黑洞快速失败
 ARBITRATION_TIMEOUT_SECONDS = 180  # 仲裁超时（秒），比正常 LLM 调用更短
 AI_RETRY_DELAY_MS = 3000
-AI_MAX_OUTPUT_TOKENS = 2048     # 单次回复输出 token 硬上限（≈1000 字 + 工具调用 JSON 开销；models.json 的 options 可覆盖）
 # ── 搜索引擎配置 ──
 SEARCH_MAX_DEPTH = 8             # 搜索强度 (1-8)：MCTS模拟次数 500~5000，Pikafish时限 depth×3s（封顶 MCTS_TIME_LIMIT=30s）
+DEFAULT_SEARCH_DEPTH = min(5, SEARCH_MAX_DEPTH)  # UI 搜索强度默认值（controller 与 panel 共用，避免两处不一致）
 SEARCH_TIME_LIMIT = 40.0         # 搜索时间上限（秒）
 
 # ── MCTS 配置 ──
 MCTS_TIME_LIMIT = 30.0           # MCTS / Pikafish 时间上限（秒）
 MCTS_EXPLORATION = 1.4           # UCB1 探索参数
-MCTS_PRIOR_STRENGTH = 50         # LLM走法先验强度（虚拟访问次数乘数）
 MCTS_FALLBACK_SIMULATIONS = 800  # 回退搜索模拟次数（后台线程执行，不阻塞 UI）
 MCTS_FALLBACK_TIME_LIMIT = 10.0  # 回退搜索时间上限（秒）
-
-# ── Pikafish 高置信度短路 ──
-PIKAFISH_MULTIPV = 3             # MultiPV 搜索主变数
-PIKAFISH_CONFIDENCE_THRESHOLD = 300  # 高置信分差阈值（厘兵），超过此分差跳过 LLM 直接采信引擎
 
 # ── 残局库配置 ──
 EGTB_MAX_PIECES = 10             # 残局库查询的最大子力数

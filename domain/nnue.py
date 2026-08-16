@@ -227,7 +227,7 @@ class NnueNet:
         acc.values += self._b1
         return acc
 
-    def update_accumulator(self, acc: 'Accumulator', board: list,
+    def update_accumulator(self, acc: 'Accumulator',
                            fr: int, fc: int, tr: int, tc: int,
                            piece: str, captured: str) -> None:
         """增量更新累加器：走子 piece 从 (fr,fc) 到 (tr,tc)，吃掉 captured。
@@ -252,7 +252,7 @@ class NnueNet:
             if cap_idx >= 0:
                 acc.values -= self._w1[cap_idx * 90 + sq_new]
 
-    def unmake_accumulator(self, acc: 'Accumulator', board: list,
+    def unmake_accumulator(self, acc: 'Accumulator',
                            fr: int, fc: int, tr: int, tc: int,
                            piece: str, captured: str) -> None:
         """撤销累加器更新（与 update_accumulator 对称）。"""
@@ -285,12 +285,6 @@ class Accumulator:
     def __init__(self, size: int):
         self.values = np.zeros(size, dtype=np.float32)
 
-    def copy(self) -> 'Accumulator':
-        """深拷贝（用于快照/工作局面）。"""
-        acc = Accumulator.__new__(Accumulator)
-        acc.values = self.values.copy()
-        return acc
-
 
 # ── 全局单例 ──
 _nnue_net: Optional[NnueNet] = None
@@ -303,12 +297,4 @@ def get_nnue() -> Optional[NnueNet]:
     if not _nnue_checked:
         _nnue_net = NnueNet()
         _nnue_checked = True
-    return _nnue_net if _nnue_net.available else None
-
-
-def reload_nnue() -> Optional[NnueNet]:
-    """强制重新加载 NNUE 权重（用于训练后热更新）。"""
-    global _nnue_net, _nnue_checked
-    _nnue_net = NnueNet()
-    _nnue_checked = True
     return _nnue_net if _nnue_net.available else None

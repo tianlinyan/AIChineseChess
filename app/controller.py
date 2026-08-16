@@ -7,7 +7,7 @@ from PyQt6.QtCore import QTimer, QDateTime
 from domain.constants import (
     AI_RETRY_LIMIT, AI_RETRY_DELAY_MS, AI_DELAY_MS,
     THINKING_TIMER_INTERVAL,
-    SEARCH_MAX_DEPTH,
+    DEFAULT_SEARCH_DEPTH,
     OPENING_BOOK_ENABLED, OPENING_BOOK_MAX_MOVES,
     OPENING_DELAY_MS,
     AI_DEFAULT_MODE, ARBITRATION_TIMEOUT_SECONDS,
@@ -51,18 +51,10 @@ class GameController:
         # ── AI 配置（红黑独立，可被 UI 修改） ──
         self.red_ai_mode: str = AI_DEFAULT_MODE
         self.black_ai_mode: str = AI_DEFAULT_MODE
-        self.red_search_depth: int = SEARCH_MAX_DEPTH
-        self.black_search_depth: int = SEARCH_MAX_DEPTH
+        self.red_search_depth: int = DEFAULT_SEARCH_DEPTH
+        self.black_search_depth: int = DEFAULT_SEARCH_DEPTH
         self.red_use_opening_book: bool = OPENING_BOOK_ENABLED
         self.black_use_opening_book: bool = OPENING_BOOK_ENABLED
-
-        self.stats: dict = {
-            'start_time': None,
-            'move_count': 0,
-            'search_nodes': 0,
-        }
-        self.red_total_time: int = 0
-        self.black_total_time: int = 0
 
         self.thinking_start_time: Optional[QDateTime] = None
         self.thinking_timer: Optional[QTimer] = None
@@ -158,13 +150,6 @@ class GameController:
         self.retry_count = 0
         self.last_move_error = ''
         self._random_action_count = 0
-        self.stats = {
-            'start_time': QDateTime.currentDateTime(),
-            'move_count': 0,
-            'search_nodes': 0,
-        }
-        self.red_total_time = 0
-        self.black_total_time = 0
 
         self.main.start_btn.setEnabled(False)
         self.main.pause_btn.setEnabled(True)
@@ -208,8 +193,6 @@ class GameController:
 
         self.last_red_raw = ''
         self.last_black_raw = ''
-        self.red_total_time = 0
-        self.black_total_time = 0
 
         # 重置 AI 计分
         self.ai_score = 0
@@ -219,11 +202,6 @@ class GameController:
         self._arbitration_engine_move = None
         if self.main:
             self.main.update_ai_score()
-
-        self.stats = {
-            'start_time': None, 'move_count': 0,
-            'search_nodes': 0,
-        }
 
         if self.main:
             self.main.update_player_status()
@@ -277,15 +255,8 @@ class GameController:
         result = self.game.move_piece(from_row, from_col, to_row, to_col)
         if result['success']:
             self._hint_active = False  # 取消进行中的提示搜索
-            if self.thinking_start_time:
-                elapsed = self.thinking_start_time.secsTo(QDateTime.currentDateTime())
-                if elapsed < 0:
-                    elapsed = 0
-                if current_player == 1:
-                    self.red_total_time += elapsed
-                else:
-                    self.black_total_time += elapsed
-                self.thinking_start_time = None
+            # 结算人类思考计时（红/黑总用时数据无消费者，仅复位计时段）
+            self.thinking_start_time = None
 
             from_coord = f"{chr(65 + from_col)}{from_row + 1}"
             to_coord = f"{chr(65 + to_col)}{to_row + 1}"
@@ -324,6 +295,11 @@ class GameController:
         2. 中残局阶段：启动 Pikafish 搜索（时间=搜索深度×3s，上限 MCTS_TIME_LIMIT），结果显示在日志中
         """
         if not self.is_active or self.is_paused or self.game.game_over:
+            return
+        # 重入保护：人类快速连走时 start_thinking_timer 会投递多个
+        # singleShot(300)，不检查会导致并发启动多个 30s 提示搜索，
+        # 且先完成的回调把 _hint_active 置 False 使后一个结果被丢弃
+        if self._hint_active:
             return
         current_player = self.game.current_player
         current_model = self.model1 if current_player == 1 else self.model2
@@ -723,8 +699,12 @@ class GameController:
         player_name = '红方' if current_player == 1 else '黑方'
 
         if full_text:
-            self.log(f"  {player_name} AI 思考:\n{full_text}\n",
+            # 标题行保留红/黑颜色区分（红方日志红、黑方日志黑）；
+            # 思考正文改用 INFO 灰（与 "🔍 Pikafish 推荐" 等引擎日志同色），
+            # 避免整块红/黑着色导致长思考文本难以阅读
+            self.log(f"  {player_name} AI 思考:",
                      'red' if current_player == 1 else 'black')
+            self.log(full_text.strip(), 'INFO')
         if error:
             self.log(f"{player_name} AI 错误: {error}", 'ERROR')
 
@@ -757,7 +737,7 @@ class GameController:
                 if self.retry_count <= AI_RETRY_LIMIT:
                     self.ai_manager.set_busy(False)
                     self.ai_manager.clear_active_worker()
-                    self._defer_ai_move(self.retry_count * 2000)
+                    self._defer_ai_move(self.retry_count * AI_RETRY_DELAY_MS)
                     return
                 else:
                     self._finish_ai_move()
@@ -823,7 +803,7 @@ class GameController:
                 if self.retry_count <= AI_RETRY_LIMIT:
                     self.ai_manager.set_busy(False)
                     self.ai_manager.clear_active_worker()
-                    self._defer_ai_move(self.retry_count * 2000)
+                    self._defer_ai_move(self.retry_count * AI_RETRY_DELAY_MS)
                     return
                 else:
                     self._finish_ai_move()
@@ -862,10 +842,8 @@ class GameController:
         self._current_ai_player = player  # 确保引擎桥接读到正确深度
         if self._random_action_count > 3:
             self.log("连续回退过多 — 停止游戏", 'ERROR')
-            self.is_active = False
-            if self.main:
-                self.main.start_btn.setEnabled(True)
-                self.main.pause_btn.setEnabled(False)
+            self.handle_game_over(
+                {'game_over': True, 'winner': 0, 'message': '连续异常，游戏终止'})
             return
 
         # Pikafish/MCTS 异步回退
@@ -894,10 +872,8 @@ class GameController:
         self._random_action_count += 1
         if self._random_action_count > 3:
             self.log("连续随机走子过多 — 停止游戏", 'ERROR')
-            self.is_active = False
-            if self.main:
-                self.main.start_btn.setEnabled(True)
-                self.main.pause_btn.setEnabled(False)
+            self.handle_game_over(
+                {'game_over': True, 'winner': 0, 'message': '连续异常，游戏终止'})
             return
 
         moves = self.game.get_all_legal_moves(current_player)
@@ -962,20 +938,11 @@ class GameController:
                           current_player: int,
                           source: str = '') -> None:
         """统一处理走子成功后的状态更新"""
-        # 计时
-        if self.thinking_start_time:
-            elapsed = self.thinking_start_time.secsTo(QDateTime.currentDateTime())
-            if elapsed < 0:
-                elapsed = 0
-            if current_player == 1:
-                self.red_total_time += elapsed
-            else:
-                self.black_total_time += elapsed
-            self.thinking_start_time = None
+        # 结束当前思考计时段（红/黑总用时数据无消费者，仅复位）
+        self.thinking_start_time = None
 
         # 更新统计
         self.last_move_error = ''
-        self.stats['move_count'] += 1
 
         # 记录走子
         from_coord = format_coord(from_row, from_col)
@@ -1054,15 +1021,6 @@ class GameController:
             return False
         return True
 
-    def _fallback_arbitration(self, player: int) -> None:
-        """仲裁回退：仲裁失败时采用 LLM 走法或随机。"""
-        self._finish_ai_move()
-        if self._arbitration_llm_move:
-            self._execute_guarded_move(self._arbitration_llm_move,
-                                       player, 'LLM(仲裁回退)')
-        else:
-            self._random_move(player)
-
     def _fallback_hybrid_engine(self, player: int, final_move=None) -> None:
         """Hybrid 模式引擎兜底：LLM 失败时采用引擎走法或随机。"""
         self._finish_ai_move()
@@ -1073,11 +1031,10 @@ class GameController:
             self._random_move(player)
 
     def _execute_guarded_move(self, move: tuple, player: int, source: str,
-                              on_failure=None, reset_random: bool = True) -> None:
+                              reset_random: bool = True) -> None:
         """统一兜底走法：执行走法并处理后走子流程。
 
-        失败时调用 on_failure（默认 _random_move），替代原来分散的
-        _execute_fallback_move / _execute_llm_fallback 两个方法。
+        失败时回退 _random_move（原 on_failure 参数无任何调用方传值，已移除）。
         """
         fr, fc, tr, tc = move
         result = self.game.move_piece(fr, fc, tr, tc)
@@ -1095,7 +1052,7 @@ class GameController:
         else:
             self.log(f"{source}走子失败: {result.get('message', '未知')}", 'ERROR')
             self._finish_ai_move()
-            (on_failure or self._random_move)(player)
+            self._random_move(player)
 
     # ── 第三方仲裁（DeepSeek） ──
 
@@ -1212,6 +1169,18 @@ class GameController:
         in_check = self.game.is_in_check(player)
         opponent_in_check = self.game.is_in_check(opponent)
 
+        # 候选 A/B 顺序由本处决定并同步构建 label_to_move 映射：
+        # 实证 qwen3.8 思考模式会吞掉工具调用（0 tool_calls + 空 content），
+        # 仲裁模型只需在文本里表达"选 A/B"，worker 据此解析候选。
+        order = [0, 1]  # 0=LLM 候选, 1=引擎候选
+        random.shuffle(order)
+        llm_move = self._arbitration_llm_move
+        engine_move = self._arbitration_engine_move
+        label_to_move = {
+            'A': llm_move if order[0] == 0 else engine_move,
+            'B': llm_move if order[1] == 0 else engine_move,
+        }
+
         prompt = build_arbitration_prompt(
             player=player,
             board_str=board_str,
@@ -1228,6 +1197,7 @@ class GameController:
             opponent_in_check=opponent_in_check,
             move_count=move_count,
             material_str=material_str,
+            candidate_order=order,
         )
 
         system_prompt = get_arbitration_system_prompt()
@@ -1249,6 +1219,9 @@ class GameController:
             timeout=ARBITRATION_TIMEOUT_SECONDS,
             game=self.game,
             current_player=player,
+            # 仲裁必须二选一：白名单限死候选，标签映射供文本兜底解析
+            allowed_moves={llm_move, engine_move},
+            label_to_move=label_to_move,
         )
         worker.signals.finished.connect(self.on_arbitration_finished)
         self.ai_manager.set_active_worker(worker)
@@ -1386,7 +1359,14 @@ class GameController:
         self.is_active = False
         self.retry_count = 0
         self._hint_active = False
+        # 停止在飞的引擎搜索（将杀后 MCTS/Pikafish 继续烧 CPU 至自然结束，
+        # 结果虽被版本门控丢弃，纯属浪费）
+        self._engine.stop_all()
         if self.main:
+            # 清除棋盘上残留的选中高亮（人类将杀 AI 时选中圈会遗留）
+            self.main.board_widget.selected_row = -1
+            self.main.board_widget.selected_col = -1
+            self.main.board_widget.update()
             self.main.update_game_status()
             self.main.update_player_status()
             self.main.start_btn.setEnabled(True)
@@ -1421,14 +1401,7 @@ class GameController:
     def pause_thinking_timer(self) -> None:
         if self.thinking_timer:
             self.thinking_timer.stop()
-        if self.thinking_start_time:
-            elapsed = self.thinking_start_time.secsTo(QDateTime.currentDateTime())
-            if elapsed > 0:
-                current_player = self.game.current_player
-                if current_player == 1:
-                    self.red_total_time += elapsed
-                else:
-                    self.black_total_time += elapsed
+        # 暂停即结束当前思考计时段（总用时无消费者）
         self.thinking_start_time = None
         if self.main:
             self.main.think_timer_label.setText("思考用时: -")

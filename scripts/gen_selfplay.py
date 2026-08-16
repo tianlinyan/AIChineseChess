@@ -41,7 +41,7 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from domain.game import ChineseChessGame
 from domain.pikafish import PikafishEngine
-from domain.nnue import NnueNet, INPUT_DIM
+from domain.nnue import NnueNet
 from domain.fen import board_to_fen
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)),

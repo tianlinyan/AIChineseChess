@@ -10,7 +10,6 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 
 from domain.constants import VISION_IMAGE_QUALITY, VISION_IMAGE_MAX_WIDTH, VISION_IMAGE_SCALE, PIECE_SYMBOLS
-from domain.game import ChineseChessGame
 
 
 class BoardWidget(QWidget):
@@ -23,6 +22,9 @@ class BoardWidget(QWidget):
         self.game = None
         self.padding = 60
         self.cell_size = 0
+        # 棋盘纵向偏移（paintEvent 计算）：固定 590×650 下棋盘高度
+        # 小于控件高度，用偏移使棋盘垂直居中而非底部留白 120px
+        self.y_offset = 0
         self.setFixedSize(590, 650)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.selected_row = -1
@@ -42,6 +44,8 @@ class BoardWidget(QWidget):
         h = self.height()
         self.cell_size = min((w - 2 * self.padding) / (self.game.size_cols - 1),
                              (h - 2 * self.padding) / (self.game.size_rows - 1))
+        # 纵向居中：棋盘实际高度 (rows-1)*cell_size，上下各留一半余量
+        self.y_offset = (h - (self.game.size_rows - 1) * self.cell_size) / 2
 
         # 木色背景
         painter.fillRect(0, 0, w, h, QColor('#bE9867'))
@@ -49,26 +53,26 @@ class BoardWidget(QWidget):
         # 横线
         painter.setPen(QPen(QColor('#4B5A2B'), 1.5))
         for i in range(self.game.size_rows):
-            y = self.padding + i * self.cell_size
+            y = self.y_offset + i * self.cell_size
             painter.drawLine(QPointF(self.padding, y), QPointF(w - self.padding, y))
 
         # 竖线（分上下两段，河界不画；最左最右列为贯通全盘的边线）
-        top_max_y = self.padding + 4 * self.cell_size
-        bottom_min_y = self.padding + 5 * self.cell_size
-        bottom_max_y = self.padding + (self.game.size_rows - 1) * self.cell_size
+        top_max_y = self.y_offset + 4 * self.cell_size
+        bottom_min_y = self.y_offset + 5 * self.cell_size
+        bottom_max_y = self.y_offset + (self.game.size_rows - 1) * self.cell_size
         for j in range(self.game.size_cols):
             x = self.padding + j * self.cell_size
             if j == 0 or j == self.game.size_cols - 1:
                 # 左列A和右列I是贯通全盘的边线
-                painter.drawLine(QPointF(x, self.padding), QPointF(x, bottom_max_y))
+                painter.drawLine(QPointF(x, self.y_offset), QPointF(x, bottom_max_y))
             else:
-                painter.drawLine(QPointF(x, self.padding), QPointF(x, top_max_y))
+                painter.drawLine(QPointF(x, self.y_offset), QPointF(x, top_max_y))
                 painter.drawLine(QPointF(x, bottom_min_y), QPointF(x, bottom_max_y))
 
         # 河界文字
         painter.setPen(QPen(QColor('#000000'), 2))
         painter.setFont(QFont('KaiTi', int(self.cell_size * 0.4)))
-        painter.drawText(QRectF(self.padding, self.padding + 4 * self.cell_size,
+        painter.drawText(QRectF(self.padding, self.y_offset + 4 * self.cell_size,
                                 w - 2 * self.padding, self.cell_size),
                          Qt.AlignmentFlag.AlignCenter, "楚河    汉界")
 
@@ -77,13 +81,13 @@ class BoardWidget(QWidget):
         # 黑方九宫（行0-2，列3-5）
         x_left = self.padding + 3 * self.cell_size
         x_right = self.padding + 5 * self.cell_size
-        y_top = self.padding + 0 * self.cell_size
-        y_bottom = self.padding + 2 * self.cell_size
+        y_top = self.y_offset + 0 * self.cell_size
+        y_bottom = self.y_offset + 2 * self.cell_size
         painter.drawLine(QPointF(x_left, y_top), QPointF(x_right, y_bottom))
         painter.drawLine(QPointF(x_right, y_top), QPointF(x_left, y_bottom))
         # 红方九宫（行7-9，列3-5）
-        y_top = self.padding + 7 * self.cell_size
-        y_bottom = self.padding + 9 * self.cell_size
+        y_top = self.y_offset + 7 * self.cell_size
+        y_bottom = self.y_offset + 9 * self.cell_size
         painter.drawLine(QPointF(x_left, y_top), QPointF(x_right, y_bottom))
         painter.drawLine(QPointF(x_right, y_top), QPointF(x_left, y_bottom))
 
@@ -91,7 +95,7 @@ class BoardWidget(QWidget):
         painter.setFont(QFont('Arial', max(9, int(self.cell_size * 0.25))))
         painter.setPen(QPen(QColor('#4B5A2B')))
         for i in range(self.game.size_rows):
-            y = self.padding + i * self.cell_size
+            y = self.y_offset + i * self.cell_size
             painter.drawText(QRectF(8, y - self.cell_size / 2, self.padding - 16, self.cell_size),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, str(i + 1))
             painter.drawText(QRectF(w - self.padding + 8, y - self.cell_size / 2, self.padding - 16, self.cell_size),
@@ -115,26 +119,26 @@ class BoardWidget(QWidget):
         if self.game.last_move:
             fr, fc, tr, tc, _ = self.game.last_move
             x1 = self.padding + fc * self.cell_size
-            y1 = self.padding + fr * self.cell_size
+            y1 = self.y_offset + fr * self.cell_size
             painter.setPen(QPen(QColor('#f1c40f'), 2, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(QPointF(x1, y1), self.cell_size * 0.3, self.cell_size * 0.3)
             x2 = self.padding + tc * self.cell_size
-            y2 = self.padding + tr * self.cell_size
+            y2 = self.y_offset + tr * self.cell_size
             painter.setPen(QPen(QColor('#f1c40f'), 2))
             painter.drawEllipse(QPointF(x2, y2), self.cell_size * 0.3, self.cell_size * 0.3)
 
         # 选中棋子高亮
         if self.selected_row != -1 and self.selected_col != -1:
             x = self.padding + self.selected_col * self.cell_size
-            y = self.padding + self.selected_row * self.cell_size
+            y = self.y_offset + self.selected_row * self.cell_size
             painter.setPen(QPen(QColor('#00ff00'), 3))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(QPointF(x, y), self.cell_size * 0.3, self.cell_size * 0.3)
 
     def _draw_piece(self, painter, row, col, piece):
         x = self.padding + col * self.cell_size
-        y = self.padding + row * self.cell_size
+        y = self.y_offset + row * self.cell_size
         r = self.cell_size * 0.4
 
         # 阴影
@@ -162,15 +166,16 @@ class BoardWidget(QWidget):
                          PIECE_SYMBOLS.get(piece, piece))
 
     def mousePressEvent(self, event: QMouseEvent):
+        event.accept()
         if not self.game or self.game.game_over:
             return
         x = event.position().x()
         y = event.position().y()
         if (x < self.padding or x > self.width() - self.padding or
-                y < self.padding or y > self.height() - self.padding):
+                y < self.y_offset or y > self.y_offset + (self.game.size_rows - 1) * self.cell_size):
             return
         col = round((x - self.padding) / self.cell_size) if self.cell_size > 0 else -1
-        row = round((y - self.padding) / self.cell_size) if self.cell_size > 0 else -1
+        row = round((y - self.y_offset) / self.cell_size) if self.cell_size > 0 else -1
         if 0 <= row < self.game.size_rows and 0 <= col < self.game.size_cols:
             if self.selected_row != -1 and self.selected_col != -1:
                 if row == self.selected_row and col == self.selected_col:

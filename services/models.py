@@ -50,7 +50,9 @@ class ModelManager:
             models_path = os.path.join(base, 'models.json')
 
         try:
-            with open(models_path, 'r', encoding='utf-8') as f:
+            # utf-8-sig：兼容带 UTF-8 BOM 的 models.json（记事本保存会加 BOM，
+            # 用 utf-8 读取时 json.load 会抛 "Unexpected UTF-8 BOM"）
+            with open(models_path, 'r', encoding='utf-8-sig') as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 items = data.get('models', [])
@@ -102,11 +104,14 @@ class ModelManager:
                 m for m in self.models if m.id.endswith('-p1')]
             self.player2_models = common + [
                 m for m in self.models if m.id.endswith('-p2')]
-            # 某侧无可用模型时回退到全量列表（保证下拉框非空）
+            # 某侧无可用模型时回退到全量列表（保证下拉框非空）；
+            # 仲裁裁判不参与对弈，回退同样要排除，避免混入玩家下拉框
             if not self.player1_models:
-                self.player1_models = list(self.models)
+                self.player1_models = [
+                    m for m in self.models if m.id != 'arbitration']
             if not self.player2_models:
-                self.player2_models = list(self.models)
+                self.player2_models = [
+                    m for m in self.models if m.id != 'arbitration']
         except (FileNotFoundError, json.JSONDecodeError,
                 ValueError, TypeError, AttributeError) as e:
             msg = f"加载 models.json 失败: {e}"

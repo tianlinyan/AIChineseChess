@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from domain.game import ChineseChessGame
 from domain.search import SearchEngine
-from domain.evaluation import PIECE_VALUE, RED_PST
+from domain.evaluation import RED_PST
 
 BOARD_HEIGHT = 10
 

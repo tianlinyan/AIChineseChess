@@ -1,4 +1,7 @@
 import json
+import os
+import re
+import sys
 import threading
 from typing import Optional
 
@@ -8,7 +11,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from domain.models import ModelInfo
 from ai.parser import parse_coordinates_from_text
 from domain.constants import (
-    AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT, AI_MAX_OUTPUT_TOKENS,
+    AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT,
     BOARD_HEIGHT, BOARD_WIDTH,
     PIECE_SYMBOLS, parse_coord,
 )
@@ -23,6 +26,22 @@ from domain.search import SearchEngine
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_TOOL_TURNS = 4  # 每回合最多工具调用轮数（防止死循环）
+
+# 仲裁文本中的候选标签：'候选 A' / '选择 B' / '选A' / '采纳 A' 等
+# （[AB]\b 的 \b 保证不误匹配 'A1' 这类坐标里的列字母）
+_ARB_LABEL_RE = re.compile(
+    r'(?:候选|选(?:择|用|取)?|采纳|同意|取)\s*([AB])\b', re.IGNORECASE)
+
+# ── 诊断开关（仅定位用，不影响任何逻辑）──
+# 设置环境变量 AI_DEBUG=1 后，每次 LLM 请求/响应/工具校验的关键结构
+# 会打印到 stderr，用于排查"工具调用不可靠"的真实环节（请求结构？
+# 响应结构？坐标校验？）。生产默认关闭。
+_AI_DEBUG = os.environ.get('AI_DEBUG') == '1'
+
+
+def _debug_log(msg: str) -> None:
+    if _AI_DEBUG:
+        print(f'[AI-DEBUG] {msg}', file=sys.stderr, flush=True)
 
 
 def _clamp_int(value, lo: int, hi: int) -> int:
@@ -59,7 +78,15 @@ class AIWorker:
                  current_player: int = 0,
                  # Pikafish 引擎（evaluate_position 工具的大师级评估源；
                  # 由 controller 注入，None → 回退手工评估）
-                 pikafish: Optional['PikafishEngine'] = None) -> None:
+                 pikafish: Optional['PikafishEngine'] = None,
+                 # ── 仲裁专用：候选走法集合 + A/B 标签映射 ──
+                 # 实证：qwen3.8 思考模式（reasoning 5000+ 字符）下 required
+                 # 失效，输出 0 tool_calls + 空 content，坐标淹没在推理文本。
+                 # 仲裁本质是二选一——模型只需表达"选 A/B"，无需生成坐标。
+                 # allowed_moves 限死候选；label_to_move 供"候选 A/B"标签解析
+                 # （controller 以 candidate_order 传入提示词顺序并同步构建）。
+                 allowed_moves: Optional[set] = None,
+                 label_to_move: Optional[dict] = None) -> None:
         super().__init__()
         self.model_info = model_info
         self.prompt = prompt
@@ -73,6 +100,8 @@ class AIWorker:
         self.game = game
         self.current_player = current_player
         self.pikafish = pikafish
+        self.allowed_moves = allowed_moves
+        self.label_to_move = label_to_move
         self.signals = AIWorkerSignals()
         self._cancelled = threading.Event()
         self._session: Optional[requests.Session] = None
@@ -83,6 +112,8 @@ class AIWorker:
         # 兜底文本解析只用此池，排除 DeepSeek 推理文本里"讨论过但未选中"
         # 的坐标干扰（M-AI-5）
         self._content_texts: list = []
+        # 最近一次 _validate_move 的合法走法缓存（供 move_error 附示例）
+        self._legal_cache: Optional[list] = None
         # 在途搜索对象（SearchEngine 或 PikafishEngine，均有 .stop()；
         # cancel() 调用以中止，M-AI-1）
         self._active_search_engine = None
@@ -131,6 +162,12 @@ class AIWorker:
                 raise Exception("任务已取消")
 
             payload = self._build_payload_with_messages(messages)
+            _debug_log(
+                f'轮次{turn + 1} 请求: model={payload.get("model")} '
+                f'tools={[t.get("function", {}).get("name") for t in payload.get("tools", [])]} '
+                f'tool_choice={payload.get("tool_choice")} '
+                f'messages={len(messages)}条 '
+                f'最后一条={str(messages[-1])[:200]}')
             resp = self._send_request(session, payload)
 
             try:
@@ -146,6 +183,12 @@ class AIWorker:
             message = choices[0].get('message') or {}
             content = (message.get('content') or '').strip()
             reasoning = message.get('reasoning_content', '')
+            tool_calls = message.get('tool_calls', []) or []
+            _debug_log(
+                f'轮次{turn + 1} 响应: message keys={list(message.keys())} '
+                f'content长度={len(content)} reasoning长度={len(reasoning)} '
+                f'tool_calls={len(tool_calls)}个 '
+                + ('首个tool_call=' + str(tool_calls[0])[:300] if tool_calls else ''))
 
             # 收集文本：_all_texts 用于展示日志（含推理/工具结果）；
             # _content_texts 仅存正式 content，供兜底文本解析（M-AI-5）
@@ -164,6 +207,13 @@ class AIWorker:
                     '\n'.join(self._content_texts))
                 if fc and tc:
                     return fc, tc, self._build_full_text()
+                # 仲裁场景：qwen3.8 思考模式吞掉工具调用（0 tool_calls +
+                # 空 content），按 '候选 A/B' 标签或候选坐标字面量兜底
+                arb_move = self._resolve_arbitration_choice()
+                if arb_move:
+                    fr, fc, tr, tc = arb_move
+                    return (f"{chr(65 + fc)}{fr + 1}", f"{chr(65 + tc)}{tr + 1}",
+                            self._build_full_text())
                 # 无法解析，继续等下一轮（或最终失败）
                 break
 
@@ -187,7 +237,17 @@ class AIWorker:
                 if fc and tc:
                     if self._validate_move(fc, tc) is not None:
                         return fc, tc, self._build_full_text()
-                    move_error = f'走法 {fc}→{tc} 不合法，请从合法走法列表中选择'
+                    # 附合法走法坐标示例：弱模型（qwen3.8）被引擎参考诱导时
+                    # 常提交非法坐标，给出可复制示例能显著提高下一轮改正率
+                    sample = ''
+                    if self._legal_cache:
+                        sample = '、'.join(
+                            f'{chr(65 + c)}{r + 1}→{chr(65 + tc2)}{tr + 1}'
+                            for r, c, tr, tc2 in self._legal_cache[:5])
+                    move_error = (f'走法 {fc}→{tc} 不合法，请从合法走法列表'
+                                  f'中选择一步（可选示例：{sample}）。'
+                                  if sample else
+                                  f'走法 {fc}→{tc} 不合法，请从合法走法列表中选择')
                 else:
                     move_error = '坐标参数无效：请用列字母 A-I + 行数字 1-10 的格式'
 
@@ -246,6 +306,22 @@ class AIWorker:
         fc, tc = parse_coordinates_from_text('\n'.join(self._content_texts))
         if fc and tc:
             return fc, tc, full
+        # 仲裁场景：从全文（含 reasoning_content）解析 '候选 A/B' 标签或
+        # 候选坐标字面量（模型只需表达选了哪个候选，无需生成坐标）
+        arb_move = self._resolve_arbitration_choice()
+        if arb_move:
+            fr, fc, tr, tc = arb_move
+            return (f"{chr(65 + fc)}{fr + 1}", f"{chr(65 + tc)}{tr + 1}", full)
+        # 4 轮耗尽且 content 无坐标：qwen3.8 等思考型模型把最终决定写在
+        # reasoning_content。取最后一条"模型文本"（排除 [Tool: ...] 工具
+        # 结果，其含引擎推荐/错误反馈坐标会污染解析），且必须通过
+        # _validate_move 合法性校验才采用——防止提交非法走法。
+        for text in reversed(self._all_texts):
+            if text.lstrip().startswith('[Tool:'):
+                continue
+            fc, tc = parse_coordinates_from_text(text)
+            if fc and tc and self._validate_move(fc, tc) is not None:
+                return fc, tc, full
         return '', '', f'ERROR: {MAX_TOOL_TURNS} 轮工具调用后未找到有效走法'
 
     # ── 工具执行 ──
@@ -261,6 +337,7 @@ class AIWorker:
             fr, fc = parse_coord(from_coord)
             tr, tc = parse_coord(to_coord)
         except (ValueError, IndexError, TypeError, AttributeError):
+            _debug_log(f'坐标解析失败: from={from_coord!r} to={to_coord!r}')
             return None
         if self.game is None:
             return None
@@ -271,7 +348,64 @@ class AIWorker:
         # 窗口；快照完全隔离该竞态。
         tmp = self.game.snapshot()
         tmp.current_player = self.current_player
-        return move if move in tmp.get_all_legal_moves(self.current_player) else None
+        legal = tmp.get_all_legal_moves(self.current_player)
+        self._legal_cache = legal  # 供 move_error 附合法示例用
+        if move not in legal:
+            _debug_log(
+                f'走法被拒: {from_coord}→{to_coord} 不在 {len(legal)} 个合法走法中'
+                f'（前5个={[str(m) for m in legal[:5]]}）')
+            return None
+        return move
+
+    def _resolve_arbitration_choice(self) -> Optional[tuple]:
+        """仲裁专用兜底：从模型文本中解析所选候选。
+
+        仅当 allowed_moves 非空（仲裁 worker）时启用。两种策略：
+        1. '候选 A/B' 标签 → label_to_move 映射（controller 知道
+           build_arbitration_prompt 随机化后的 A/B 各对应哪步）；
+        2. 候选坐标字面量（如 'H10→G8'）→ 文本中最后出现的候选。
+
+        content 为空（qwen3.8 思考模式把分析写在 reasoning_content）时
+        回退到含推理的模型文本（排除 [Tool: ...] 工具结果），白名单
+        保证只匹配候选，不受"讨论过但未选中"坐标干扰。
+        """
+        if not self.allowed_moves:
+            return None
+        # 文本池：正式 content 优先；content 全空时用含推理的模型文本
+        texts = ['\n'.join(self._content_texts)]
+        if not self._content_texts:
+            non_tool = [t for t in self._all_texts
+                        if not t.lstrip().startswith('[Tool:')]
+            if non_tool:
+                texts.append('\n'.join(non_tool))
+        for text in texts:
+            if not text.strip():
+                continue
+            # 策略 1：标签 → 候选（取最后一次出现的标签 = 最终决定）
+            if self.label_to_move:
+                matches = list(_ARB_LABEL_RE.finditer(text))
+                if matches:
+                    label = matches[-1].group(1).upper()
+                    mv = self.label_to_move.get(label)
+                    if mv:
+                        return mv
+            # 策略 2：候选坐标字面量（允许多种分隔符，取最后出现）
+            best = None
+            best_pos = -1
+            for mv in self.allowed_moves:
+                fr, fc, tr, tc = mv
+                frm = f"{chr(65 + fc)}{fr + 1}"
+                tos = f"{chr(65 + tc)}{tr + 1}"
+                pat = re.compile(
+                    re.escape(frm) + r'\s*(?:→|->|至|\.\.|\.|,|，|—|-)?\s*'
+                    + re.escape(tos))
+                for m in pat.finditer(text):
+                    if m.start() > best_pos:
+                        best_pos = m.start()
+                        best = mv
+            if best is not None:
+                return best
+        return None
 
     def _execute_tool(self, name: str, args: dict) -> str:
         """在本地执行 AI 工具调用，返回 JSON 结果字符串。"""
@@ -615,11 +749,12 @@ class AIWorker:
             'messages': messages,
             'stream': False,
             'tools': list(self.tools),
-            # 输出 token 硬上限（≈1000 字 + 工具调用开销）。
-            # 放在 update(options) 之前：models.json 里配置了 max_tokens 的
-            # 模型可精确覆盖此默认值。
-            'max_tokens': AI_MAX_OUTPUT_TOKENS,
         }
+        # 不设 max_tokens（旧版行为）：qwen3.8 思考模式推理可达 5000+
+        # 字符，任何输出上限都会先耗尽在推理上，导致响应末尾的
+        # tool_calls 被截断（0 tool_calls + 空 content → "4 轮工具调用后
+        # 未找到有效走法"）。models.json 的 options 仍可对个别模型显式
+        # 覆盖 max_tokens。
         is_llama_server = self._is_llama_server()
         if self.model_info.tools_choice:
             if is_llama_server:

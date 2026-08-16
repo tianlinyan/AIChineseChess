@@ -228,10 +228,6 @@ def _is_red(piece: str) -> bool:
     return piece.isupper()
 
 
-def _is_black(piece: str) -> bool:
-    return piece.islower()
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 四、主评估函数
 # ══════════════════════════════════════════════════════════════════════════════
@@ -541,11 +537,11 @@ def _open_column_bonus(board: list, col: int, is_red: bool) -> float:
             else:
                 enemy_bing += 1
     if friendly_bing == 0 and enemy_bing == 0:
-        return 1.0   # 全开放线
+        return 1.0   # 全开放线（己方車控线无阻）
     elif friendly_bing == 0:
-        return 0.6   # 半开放线（对敌方有利）
+        return 0.6   # 半开放线：己方无兵挡路（利于己方車进攻）
     elif enemy_bing == 0:
-        return 0.3   # 半开放线（对己方有利）
+        return 0.3   # 半开放线：己方兵挡路（对己方車不利）
     return 0.0
 
 
@@ -577,10 +573,14 @@ def _piece_coordination(ma_list: list, cannons: list,
 
 
 def _center_control(board: list, is_red: bool) -> float:
-    """中心控制（D-F列，行4-6）"""
+    """中心控制（D-F 列 × 行 3-6 的中路区域）。
+
+    行集合 {3,4,5,6} 在镜像翻转（r→9-r）下封闭（3↔6、4↔5），
+    保证评估红黑对称（test_evaluation 的对称性测试依赖此性质）。
+    """
     score = 0.0
     center_cols = (3, 4, 5)
-    for r in range(BOARD_HEIGHT):
+    for r in (3, 4, 5, 6):
         for c in center_cols:
             p = board[r][c]
             if p == '.':

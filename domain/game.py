@@ -538,33 +538,29 @@ class ChineseChessGame:
     def get_capture_moves(self, player):
         """只生成吃子走法（目标格有对方棋子）— 静止搜索专用。
 
-        通过过滤 get_all_legal_moves 的结果实现，与显式 captures_only
-        参数生成的结果完全等价。
+        通过过滤 get_all_legal_moves 的结果实现（定向吃子生成路径
+        captures_only 已移除，从未有调用方传 True）。
         """
         return [m for m in self.get_all_legal_moves(player)
                 if self.board[m[2]][m[3]] != '.']
 
-    # ── 定向走法生成辅助（captures_only=True 时只保留吃子）──
+    # ── 定向走法生成辅助 ──
 
-    def _append_if_legal(self, moves, fr, fc, tr, tc, player,
-                         captures_only=False):
+    def _append_if_legal(self, moves, fr, fc, tr, tc, player):
         target = self.board[tr][tc]
-        if target == '.':
-            if captures_only:
+        if target != '.':
+            if self.get_piece_owner(target) == player:
                 return
-        elif self.get_piece_owner(target) == player:
-            return
-        elif target.upper() == 'K':
-            # 不能直接吃掉对方的将/帅：合法对局中对方将不可能处于被吃状态，
-            # 但棋盘被外部直接赋值/残局导入/编辑器修改时会暴露此走法；
-            # 若不拦截，搜索/MCTS/EGTB 会选中它并把对方将移出棋盘，
-            # 破坏后续局面哈希与重复检测的一致性。
-            return
+            elif target.upper() == 'K':
+                # 不能直接吃掉对方的将/帅：合法对局中对方将不可能处于被吃状态，
+                # 但棋盘被外部直接赋值/残局导入/编辑器修改时会暴露此走法；
+                # 若不拦截，搜索/MCTS/EGTB 会选中它并把对方将移出棋盘，
+                # 破坏后续局面哈希与重复检测的一致性。
+                return
         if not self._would_be_illegal(fr, fc, tr, tc, player):
             moves.append((fr, fc, tr, tc))
 
-    def _gen_ray_moves(self, moves, r, c, player, cannon,
-                       captures_only=False):
+    def _gen_ray_moves(self, moves, r, c, player, cannon):
         """車：直线步进遇子即止（可吃）；炮：不吃子走空格，隔一子吃子。"""
         board = self.board
         for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -574,9 +570,7 @@ class ChineseChessGame:
                 t = board[nr][nc]
                 if not cannon:
                     if t == '.':
-                        if not captures_only:
-                            self._append_if_legal(
-                                moves, r, c, nr, nc, player)
+                        self._append_if_legal(moves, r, c, nr, nc, player)
                     else:
                         if self.get_piece_owner(t) != player:
                             self._append_if_legal(
@@ -585,9 +579,8 @@ class ChineseChessGame:
                 else:
                     if not screened:
                         if t == '.':
-                            if not captures_only:
-                                self._append_if_legal(
-                                    moves, r, c, nr, nc, player)
+                            self._append_if_legal(
+                                moves, r, c, nr, nc, player)
                         else:
                             screened = True
                     else:
@@ -599,7 +592,7 @@ class ChineseChessGame:
                 nr += dr
                 nc += dc
 
-    def _gen_knight_moves(self, moves, r, c, player, captures_only=False):
+    def _gen_knight_moves(self, moves, r, c, player):
         board = self.board
         for dr, dc in ((2, 1), (2, -1), (-2, 1), (-2, -1),
                        (1, 2), (1, -2), (-1, 2), (-1, -2)):
@@ -613,10 +606,9 @@ class ChineseChessGame:
                 leg_r, leg_c = r, c + dc // 2
             if board[leg_r][leg_c] != '.':
                 continue
-            self._append_if_legal(moves, r, c, tr, tc, player,
-                                  captures_only)
+            self._append_if_legal(moves, r, c, tr, tc, player)
 
-    def _gen_bishop_moves(self, moves, r, c, player, captures_only=False):
+    def _gen_bishop_moves(self, moves, r, c, player):
         red = self.is_red(self.board[r][c])
         for dr, dc in ((2, 2), (2, -2), (-2, 2), (-2, -2)):
             tr, tc = r + dr, c + dc
@@ -628,44 +620,39 @@ class ChineseChessGame:
             # 塞象眼
             if self.board[r + dr // 2][c + dc // 2] != '.':
                 continue
-            self._append_if_legal(moves, r, c, tr, tc, player,
-                                  captures_only)
+            self._append_if_legal(moves, r, c, tr, tc, player)
 
-    def _gen_advisor_moves(self, moves, r, c, player, captures_only=False):
+    def _gen_advisor_moves(self, moves, r, c, player):
         red = self.is_red(self.board[r][c])
         row_lo, row_hi = (7, 9) if red else (0, 2)
         for dr, dc in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
             tr, tc = r + dr, c + dc
             if not (row_lo <= tr <= row_hi and 3 <= tc <= 5):
                 continue
-            self._append_if_legal(moves, r, c, tr, tc, player,
-                                  captures_only)
+            self._append_if_legal(moves, r, c, tr, tc, player)
 
-    def _gen_king_moves(self, moves, r, c, player, captures_only=False):
+    def _gen_king_moves(self, moves, r, c, player):
         red = self.is_red(self.board[r][c])
         row_lo, row_hi = (7, 9) if red else (0, 2)
         for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             tr, tc = r + dr, c + dc
             if not (row_lo <= tr <= row_hi and 3 <= tc <= 5):
                 continue
-            self._append_if_legal(moves, r, c, tr, tc, player,
-                                  captures_only)
+            self._append_if_legal(moves, r, c, tr, tc, player)
 
-    def _gen_pawn_moves(self, moves, r, c, player, captures_only=False):
+    def _gen_pawn_moves(self, moves, r, c, player):
         red = self.is_red(self.board[r][c])
         # 前进方向：红兵行号减小，黑卒行号增大
         fwd = -1 if red else 1
         tr = r + fwd
         if self.in_board(tr, c):
-            self._append_if_legal(moves, r, c, tr, c, player,
-                                  captures_only)
+            self._append_if_legal(moves, r, c, tr, c, player)
         # 过河后才能横走：红兵 r<=4，黑卒 r>=5
         crossed = r <= 4 if red else r >= 5
         if crossed:
             for tc in (c - 1, c + 1):
                 if self.in_board(r, tc):
-                    self._append_if_legal(moves, r, c, r, tc, player,
-                                          captures_only)
+                    self._append_if_legal(moves, r, c, r, tc, player)
 
     def get_board_state_string(self):
         s = "   " + " ".join(chr(65 + i) for i in range(self.size_cols)) + "\n"
@@ -735,7 +722,7 @@ class ChineseChessGame:
         之后搜索的 _make_move/_unmake_move 增量维护这些字段，
         叶子节点直接读取而无需全盘扫描。
         """
-        from domain.evaluation import PIECE_VALUE, RED_PST
+        from domain.evaluation import RED_PST
         self._material_counts = {}
         self._red_piece_count = 0
         self._black_piece_count = 0

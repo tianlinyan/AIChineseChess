@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QLabel, QGroupBox, QSpinBox, QFrame,
 )
 
-from domain.constants import SEARCH_MAX_DEPTH
+from domain.constants import SEARCH_MAX_DEPTH, DEFAULT_SEARCH_DEPTH
 
 
 def _section_label(text: str) -> QLabel:
@@ -210,7 +210,7 @@ def setup_left_expanded(parent) -> None:
     parent.red_search_depth_spin.setStyleSheet(_spinbox_style())
     parent.red_search_depth_spin.setToolTip(f"红方搜索强度 1~{SEARCH_MAX_DEPTH}")
     parent.red_search_depth_spin.valueChanged.connect(parent.on_red_search_depth_changed)
-    parent.red_search_depth_spin.setValue(5)  # connect 之后设值，确保信号送达
+    parent.red_search_depth_spin.setValue(DEFAULT_SEARCH_DEPTH)  # connect 之后设值，确保信号送达
     red_layout.addWidget(parent.red_search_depth_spin, 1, 1)
 
     parent.red_opening_book_check = QCheckBox("开局库")
@@ -266,7 +266,7 @@ def setup_left_expanded(parent) -> None:
     parent.black_search_depth_spin.setStyleSheet(_spinbox_style())
     parent.black_search_depth_spin.setToolTip(f"黑方搜索强度 1~{SEARCH_MAX_DEPTH}")
     parent.black_search_depth_spin.valueChanged.connect(parent.on_black_search_depth_changed)
-    parent.black_search_depth_spin.setValue(5)
+    parent.black_search_depth_spin.setValue(DEFAULT_SEARCH_DEPTH)
     black_layout.addWidget(parent.black_search_depth_spin, 1, 1)
 
     parent.black_opening_book_check = QCheckBox("开局库")
@@ -308,7 +308,10 @@ def setup_left_expanded(parent) -> None:
     parent.start_btn = QPushButton("▶  开始对弈")
     parent.start_btn.setMinimumHeight(30)
     parent.start_btn.setStyleSheet(_btn_primary_style())
-    parent.start_btn.clicked.connect(parent.game_controller.start_game)
+    # clicked(bool) 会给槽传一个多余参数；用 lambda 屏蔽，避免未来
+    # start_game 加参时因签名不匹配直接 TypeError
+    parent.start_btn.clicked.connect(
+        lambda: parent.game_controller.start_game())
     btn_layout.addWidget(parent.start_btn)
 
     parent.pause_btn = QPushButton("⏸  暂停")

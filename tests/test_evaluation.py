@@ -11,7 +11,6 @@ import random as _rnd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from domain.game import ChineseChessGame
-from domain.search import SearchEngine
 from domain.evaluation import (
     evaluate, evaluate_fast, PIECE_VALUE, PIECE_VALUE_ENDGAME, RED_PST,
     compute_material,

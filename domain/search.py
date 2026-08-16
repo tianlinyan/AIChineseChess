@@ -747,7 +747,7 @@ class SearchEngine:
                 nnue = get_nnue()
                 if nnue is not None:
                     nnue.update_accumulator(
-                        game._nnue_acc, board, fr, fc, tr, tc, piece, captured)
+                        game._nnue_acc, fr, fc, tr, tc, piece, captured)
             except Exception:
                 pass
 
@@ -803,7 +803,7 @@ class SearchEngine:
                 nnue = get_nnue()
                 if nnue is not None:
                     nnue.unmake_accumulator(
-                        game._nnue_acc, board, fr, fc, tr, tc, piece, captured)
+                        game._nnue_acc, fr, fc, tr, tc, piece, captured)
             except Exception:
                 pass
 

@@ -21,7 +21,6 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from domain.game import ChineseChessGame
-from domain.pikafish import PikafishEngine
 from domain.nnue import NnueNet, INPUT_DIM, HIDDEN1_DIM, HIDDEN2_DIM, QA
 
 # ── 训练配置 ──

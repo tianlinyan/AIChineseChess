@@ -31,6 +31,9 @@ class MainWindow(QMainWindow):
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.setWindowFlags(
             self.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
+        # QSettings 在 setup_ui 之前创建：toggle_left_panel 依赖它，
+        # 避免"用户不可能在 __init__ 完成前点击"的脆弱时序契约
+        self.settings = QSettings('ChineseChessAI', 'ChineseChess')
 
         self.game = ChineseChessGame()
         self.model_manager = ModelManager()
@@ -49,8 +52,6 @@ class MainWindow(QMainWindow):
         # 推迟到事件循环执行，避免引擎子进程启动/UCI 握手卡住窗口显示；
         # 排在 setup_ui() 之后，事件循环启动时日志面板 widget 早已创建
         QTimer.singleShot(0, self.game_controller._engine.init_pikafish)
-
-        self.settings = QSettings('ChineseChessAI', 'ChineseChess')
 
     # ── UI 构建 ──
 
@@ -164,10 +165,13 @@ class MainWindow(QMainWindow):
             self.left_stack.setCurrentIndex(0)
             self.left_collapsed_flag = False
             state = self.settings.value('splitter_expanded_state')
-            if state and isinstance(state, QByteArray):
-                self.splitter.restoreState(state)
-            else:
-                self.splitter.setSizes([SPLITTER_SIZES[0], self.splitter.sizes()[1], self.splitter.sizes()[2]])
+            if (state and isinstance(state, QByteArray)
+                    and self.splitter.restoreState(state)):
+                return
+            # 状态缺失/损坏（如面板数变化）→ 按当前尺寸恢复左侧
+            self.splitter.setSizes(
+                [SPLITTER_SIZES[0], self.splitter.sizes()[1],
+                 self.splitter.sizes()[2]])
         else:
             state = self.splitter.saveState()
             self.settings.setValue('splitter_expanded_state', state)
@@ -266,11 +270,6 @@ class MainWindow(QMainWindow):
         self.game_controller.resume_thinking_timer()
 
     # ── UI 更新方法 ──
-
-    def update_ui(self) -> None:
-        self.board_widget.update()
-        self.update_game_status()
-        self.update_history_list()
 
     def update_game_status(self) -> None:
         g = self.game
