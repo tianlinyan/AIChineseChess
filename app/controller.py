@@ -83,7 +83,7 @@ class GameController:
         self.ai_score: int = 0  # LLM 与仲裁一致 +1，不一致 +0（不倒扣）
         self.arbitration_count: int = 0  # 仲裁触发次数
 
-        # ── 仲裁暂存（LLM 与引擎分歧时等待 DeepSeek 裁决）──
+        # ── 仲裁暂存（LLM 与引擎分歧时等待仲裁模型裁决）──
         self._arbitration_llm_move: Optional[tuple] = None
         self._arbitration_llm_text: str = ''
         self._arbitration_engine_move: Optional[tuple] = None
@@ -772,7 +772,7 @@ class GameController:
         # ── Hybrid 模式分歧检测：LLM ≠ 引擎 → 启动第三方仲裁 ──
         if (self._ai_mode_for(current_player) == 'hybrid' and self._hybrid_engine_move
                 and final_move != self._hybrid_engine_move):
-            # 暂存双方走法，启动 DeepSeek 仲裁
+            # 暂存双方走法，启动仲裁
             self._arbitration_llm_move = final_move
             self._arbitration_llm_text = full_text
             self._arbitration_engine_move = self._hybrid_engine_move
@@ -786,7 +786,7 @@ class GameController:
             lpn = PIECE_SYMBOLS.get(lpiece, lpiece)
             lrec = f"{lpn} {format_move(from_row, from_col, to_row, to_col)}"
             self.log(
-                f"⚖️ 分歧检测 | LLM选择: {lrec} | 引擎推荐: {erec} | 启动 DeepSeek 仲裁...",
+                f"⚖️ 分歧检测 | LLM选择: {lrec} | 引擎推荐: {erec} | 启动仲裁...",
                 'WARNING')
 
             # 启动仲裁（异步），仲裁完成后由 on_arbitration_finished 接管
@@ -1065,7 +1065,7 @@ class GameController:
             self._finish_ai_move()
             self._random_move(player)
 
-    # ── 第三方仲裁（DeepSeek） ──
+    # ── 第三方仲裁 ──
 
     def _build_candidate_facts(self, move: tuple, repetition_moves: set) -> str:
         """为仲裁候选生成客观事实包（吃子/将军/将杀/评估/重复），不标识来源。
@@ -1096,11 +1096,11 @@ class GameController:
         return ''.join(facts) if facts else "（未提供分析）"
 
     def _start_arbitration(self, player: int) -> None:
-        """启动 DeepSeek 第三方仲裁。
+        """启动第三方仲裁（仲裁模型，可为本地或在线）。
 
         当 LLM 与引擎走法不一致时调用。
-        异步请求 DeepSeek 裁决，结果由 on_arbitration_finished 处理。
-        DeepSeek 不可用时直接采用 LLM 走法。
+        异步请求仲裁模型裁决，结果由 on_arbitration_finished 处理。
+        未配置仲裁模型时直接采用 LLM 走法。
         """
         # 查找仲裁模型：优先 id='arbitration'，其次 type='deepseek'
         arbitrator_model = None
@@ -1116,7 +1116,7 @@ class GameController:
                         break
 
         if not arbitrator_model:
-            self.log("⚠️ 未找到 DeepSeek 模型配置，仲裁跳过 → 采用 LLM 走法", 'WARNING')
+            self.log("⚠️ 未找到仲裁模型配置（需 id='arbitration' 或 type='deepseek'），仲裁跳过 → 采用 LLM 走法", 'WARNING')
             self._finish_ai_move()
             if self._arbitration_llm_move:
                 self._execute_guarded_move(self._arbitration_llm_move,
@@ -1254,7 +1254,7 @@ class GameController:
 
         # ── 仲裁失败 → 采用 LLM 走法兜底（不计分）──
         if error or not from_coord or not to_coord:
-            self.log(f"⚠️ DeepSeek 仲裁失败 ({error or '无有效走法'})，采用 LLM 走法（不计分）", 'WARNING')
+            self.log(f"⚠️ 仲裁失败 ({error or '无有效走法'})，采用 LLM 走法（不计分）", 'WARNING')
             self._finish_ai_move()
             if self._arbitration_llm_move:
                 self._execute_guarded_move(self._arbitration_llm_move,

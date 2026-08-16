@@ -10,11 +10,11 @@ from PyQt6.QtWidgets import (
 from domain.constants import SEARCH_MAX_DEPTH, DEFAULT_SEARCH_DEPTH
 
 
-def _section_label(text: str) -> QLabel:
-    """统一的小节标题样式。"""
+def _section_label(text: str, color: str = "#8ec8e8") -> QLabel:
+    """统一的小节标题样式（红/黑方标题可传不同颜色）。"""
     label = QLabel(text)
     label.setStyleSheet(
-        "font-size: 13px; font-weight: bold; color: #8ec8e8; "
+        f"font-size: 13px; font-weight: bold; color: {color}; "
         "padding: 4px 0 1px 6px;"
     )
     return label
@@ -228,7 +228,8 @@ def setup_left_expanded(parent) -> None:
     # ══════════════════════════════════════════════════════════════
     # ⚫ 黑方
     # ══════════════════════════════════════════════════════════════
-    layout.addWidget(_section_label("⚫ 黑方（后手）"))
+    # ⚫ 黑方（标题色与思考日志黑方一致 #61afef）
+    layout.addWidget(_section_label("⚫ 黑方（后手）", "#61afef"))
     parent.model2_combo = QComboBox()
     parent.model2_combo.setMinimumHeight(26)
     parent.model2_combo.setStyleSheet(_combo_style())
@@ -238,14 +239,14 @@ def setup_left_expanded(parent) -> None:
     layout.addWidget(_spacer(2))
 
     black_engine = QGroupBox("黑方引擎")
-    black_engine.setStyleSheet(_group_style("#6060e0"))
+    black_engine.setStyleSheet(_group_style("#61afef"))
     black_layout = QGridLayout(black_engine)
     black_layout.setVerticalSpacing(5)
     black_layout.setHorizontalSpacing(6)
     black_layout.setContentsMargins(8, 10, 8, 6)
 
     blbl = QLabel("模式:")
-    blbl.setStyleSheet("color: #a0a0c0; font-size: 13px;")
+    blbl.setStyleSheet("color: #61afef; font-size: 13px;")
     black_layout.addWidget(blbl, 0, 0)
     parent.black_ai_mode_combo = QComboBox()
     parent.black_ai_mode_combo.addItem("AI + 搜索", "hybrid")
@@ -258,7 +259,7 @@ def setup_left_expanded(parent) -> None:
     black_layout.addWidget(parent.black_ai_mode_combo, 0, 1)
 
     bdlbl = QLabel("深度:")
-    bdlbl.setStyleSheet("color: #a0a0c0; font-size: 13px;")
+    bdlbl.setStyleSheet("color: #61afef; font-size: 13px;")
     black_layout.addWidget(bdlbl, 1, 0)
     parent.black_search_depth_spin = QSpinBox()
     parent.black_search_depth_spin.setRange(1, SEARCH_MAX_DEPTH)
@@ -378,7 +379,7 @@ def setup_left_expanded(parent) -> None:
     row1.addWidget(parent.red_material_label)
     parent.black_material_label = QLabel("黑: —")
     parent.black_material_label.setStyleSheet(
-        "color: #6060e0; font-size: 13px; font-weight: bold;")
+        "color: #61afef; font-size: 13px; font-weight: bold;")
     row1.addWidget(parent.black_material_label)
     status_layout.addLayout(row1)
 
@@ -388,7 +389,7 @@ def setup_left_expanded(parent) -> None:
     parent.red_pieces_label.setStyleSheet("color: #d06060; font-size: 13px;")
     row2.addWidget(parent.red_pieces_label)
     parent.black_pieces_label = QLabel("黑子: —")
-    parent.black_pieces_label.setStyleSheet("color: #6060d0; font-size: 13px;")
+    parent.black_pieces_label.setStyleSheet("color: #61afef; font-size: 13px;")
     row2.addWidget(parent.black_pieces_label)
     status_layout.addLayout(row2)
 

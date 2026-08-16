@@ -97,8 +97,9 @@ class MainWindow(QMainWindow):
         self.black_status = QLabel("⚫ 黑方 等待...")
         self.black_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.black_status.setFrameShape(QFrame.Shape.Box)
+        # 颜色与思考日志黑方一致（#61afef）
         self.black_status.setStyleSheet(
-            "color: #808080; padding: 12px 5px; font-size: 16px; font-weight: bold;")
+            "color: #61afef; padding: 12px 5px; font-size: 16px; font-weight: bold;")
         self.black_status.setContentsMargins(0, 50, 0, 0)
         middle_layout.addWidget(self.black_status)
 
