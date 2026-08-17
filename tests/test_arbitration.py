@@ -47,6 +47,11 @@ class _FakeWidget:
         pass
 
 
+class _FakeLabel:
+    def setText(self, text):
+        pass
+
+
 class FakeMain:
     """最小 mock：提供仲裁模型查找与 controller 用到的 UI 面。"""
 
@@ -61,6 +66,7 @@ class FakeMain:
     def __init__(self):
         self.model_manager = self._MM()
         self.board_widget = _FakeWidget()
+        self.think_timer_label = _FakeLabel()
 
     def update_ai_score(self):
         pass
@@ -72,9 +78,6 @@ class FakeMain:
         pass
 
     def update_player_status(self):
-        pass
-
-    def start_thinking_timer(self, player):
         pass
 
 
@@ -135,7 +138,7 @@ def test_branches():
     llm_move, engine_move, _ = setup_disagreement(c)
     score_before = c.ai_score
     fc, tc = coord_of(llm_move)
-    c.on_arbitration_finished(fc, tc, '仲裁分析：A 更优。', '', 0, v, cv)
+    c.on_arbitration_finished(fc, tc, '仲裁分析：A 更优。', '', v, cv)
     check('A1 执行了 LLM 候选', last_move_of(c) == llm_move,
           f'实际={last_move_of(c)}')
     check('A1 计分 +1', c.ai_score == score_before + 1,
@@ -148,7 +151,7 @@ def test_branches():
     llm_move, engine_move, _ = setup_disagreement(c)
     score_before = c.ai_score
     fc, tc = coord_of(engine_move)
-    c.on_arbitration_finished(fc, tc, '仲裁分析：B 更优。', '', 0, v, cv)
+    c.on_arbitration_finished(fc, tc, '仲裁分析：B 更优。', '', v, cv)
     check('A2 执行了引擎候选', last_move_of(c) == engine_move,
           f'实际={last_move_of(c)}')
     check('A2 计分 +0', c.ai_score == score_before,
@@ -159,7 +162,7 @@ def test_branches():
     llm_move, engine_move, third = setup_disagreement(c)
     score_before = c.ai_score
     fc, tc = coord_of(third)
-    c.on_arbitration_finished(fc, tc, '仲裁分析：我选 C。', '', 0, v, cv)
+    c.on_arbitration_finished(fc, tc, '仲裁分析：我选 C。', '', v, cv)
     check('A3 采纳引擎走法', last_move_of(c) == engine_move,
           f'实际={last_move_of(c)}')
     check('A3 计分 +0（第三走法不算一致）', c.ai_score == score_before,
@@ -169,7 +172,7 @@ def test_branches():
     reset_round(c)
     llm_move, engine_move, _ = setup_disagreement(c)
     score_before = c.ai_score
-    c.on_arbitration_finished('', '', '分析', '客户端错误: xxx', 0, v, cv)
+    c.on_arbitration_finished('', '', '分析', '客户端错误: xxx', v, cv)
     check('A4 仲裁失败 → LLM 回退', last_move_of(c) == llm_move,
           f'实际={last_move_of(c)}')
     check('A4 失败不计分', c.ai_score == score_before,
@@ -179,7 +182,7 @@ def test_branches():
     reset_round(c)
     llm_move, engine_move, _ = setup_disagreement(c)
     score_before = c.ai_score
-    c.on_arbitration_finished('Z9', 'Q8', '分析', '', 0, v, cv)
+    c.on_arbitration_finished('Z9', 'Q8', '分析', '', v, cv)
     check('A5 坐标解析失败 → LLM 回退', last_move_of(c) == llm_move,
           f'实际={last_move_of(c)}')
     check('A5 失败不计分', c.ai_score == score_before,
@@ -190,7 +193,7 @@ def test_branches():
     llm_move, engine_move, _ = setup_disagreement(c)
     moves_before = len(c.game.moves)
     fc, tc = coord_of(llm_move)
-    c.on_arbitration_finished(fc, tc, '分析', '', 0, v + 99, cv)
+    c.on_arbitration_finished(fc, tc, '分析', '', v + 99, cv)
     check('A6 陈旧回调被丢弃', len(c.game.moves) == moves_before,
           f'{moves_before} -> {len(c.game.moves)}')
 
@@ -209,7 +212,7 @@ def test_live():
             load_dotenv(env_path)
         except ImportError:
             pass
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     c = make_controller()
     reset_round(c)
     llm_move, engine_move, _ = setup_disagreement(c)
@@ -226,13 +229,7 @@ def test_live():
 
     loop = QEventLoop()
 
-    def _watch(*_args):
-        # 仲裁回调执行完（on_arbitration_finished 已先于本槽执行走子）
-        QTimer.singleShot(50, loop.quit)
-
-    # 先连接收集槽（在 _start_arbitration 内部 connect 之后执行）
-    class _Probe:
-        pass
+    # 轮询等待仲裁回调完成（on_arbitration_finished 已先于本槽执行走子）
 
     # 我们无法在 _start_arbitration 之前拿到 worker，改用轮询完成标志：
     # on_arbitration_finished 落子后 game.moves 会增加（注意不能用

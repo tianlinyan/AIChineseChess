@@ -24,18 +24,20 @@
 - PVS 零窗口搜索减少约 20% 搜索节点
 """
 
+import os
+import sys
 import time
 from collections import OrderedDict
 from enum import IntEnum
-from typing import Optional, Callable, NamedTuple
+from typing import Optional, NamedTuple
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, SEARCH_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
+from domain.constants import SEARCH_TIME_LIMIT, ENDGAME_PIECE_THRESHOLD
 from domain.evaluation import (
-    evaluate, evaluate_fast, evaluate_move_ordering,
+    evaluate_fast, evaluate_move_ordering,
     PIECE_VALUE, PIECE_VALUE_ENDGAME,
-    RED_PST,
 )
-from domain.game import ZOBRIST_TABLE
+from domain.egtb import probe
+from domain.game import _sync_move_caches
 
 
 class TTFlag(IntEnum):
@@ -66,13 +68,6 @@ class TranspositionTable:
 
     def __init__(self) -> None:
         self._table: OrderedDict = OrderedDict()
-        self._hits: int = 0
-        self._probes: int = 0
-
-    def clear(self) -> None:
-        self._table.clear()
-        self._hits = 0
-        self._probes = 0
 
     def probe(self, hash_key: int, depth: int,
               alpha: float, beta: float) -> tuple:
@@ -84,7 +79,6 @@ class TranspositionTable:
         Returns:
             (hit: bool, score: float, best_move: tuple | None)
         """
-        self._probes += 1
         entry = self._table.get(hash_key)
         if entry is None:
             return False, 0.0, None
@@ -93,7 +87,6 @@ class TranspositionTable:
         if entry.depth < depth:
             return False, 0.0, entry.best_move  # 深度不够，但 best_move 可用于排序
 
-        self._hits += 1
         score = entry.score
         if entry.flag == TTFlag.EXACT:
             return True, score, entry.best_move
@@ -122,17 +115,6 @@ class TranspositionTable:
         if len(self._table) >= TT_MAX_SIZE:
             self._table.popitem(last=False)  # O(1) FIFO → 实际即为 LRU
         self._table[hash_key] = TTEntry(depth, score, flag, best_move)
-
-    @property
-    def hit_rate(self) -> float:
-        """命中率 (0.0 ~ 1.0)"""
-        if self._probes == 0:
-            return 0.0
-        return self._hits / self._probes
-
-    @property
-    def size(self) -> int:
-        return len(self._table)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 搜索配置
@@ -180,18 +162,61 @@ def _tt_score_to_relative(score: float, ply: int) -> float:
     return score
 
 
+def _engine_time_up(engine) -> bool:
+    """SearchEngine / MCTSEngine 共用的超时判定（停止标志优先，其次时间上限）。"""
+    if engine._stop_flag:
+        return True
+    return (time.time() - engine._start_time) > engine.time_limit
+
+
+def _engine_stop(engine) -> None:
+    engine._stop_flag = True
+
+
+def _sort_by_mvv_lva(board: list, moves: list) -> list:
+    """按 MVV-LVA 评分降序排序走法（静态搜索的应将/吃子排序共用）。
+
+    evaluate_move_ordering 的 piece/captured 参数缺省时自行从棋盘读取，
+    因此直接展开走法元组即可，无需显式传子。
+    """
+    return sorted(
+        moves,
+        key=lambda m: evaluate_move_ordering(board, *m),
+        reverse=True,
+    )
+
+
+def _sync_nnue_acc(game, fr: int, fc: int, tr: int, tc: int,
+                   piece: str, captured: str, undo: bool = False) -> None:
+    """NNUE 累加器增量维护（make/unmake 共用，异常静默保持搜索健壮）。
+
+    正常路径不抛异常；若累加器增量漂移（走法未配对等），评估会无声
+    出错——AI_DEBUG=1 时打印诊断，便于定位（生产保持静默不拖慢搜索）。
+    """
+    if hasattr(game, '_nnue_acc') and game._nnue_acc is not None:
+        try:
+            from domain.nnue import get_nnue
+            nnue = get_nnue()
+            if nnue is not None:
+                apply = (nnue.unmake_accumulator if undo
+                         else nnue.update_accumulator)
+                apply(game._nnue_acc, fr, fc, tr, tc, piece, captured)
+        except Exception as e:
+            if os.environ.get('AI_DEBUG') == '1':
+                print(f'[NNUE] 累加器增量异常: {e}',
+                      file=sys.stderr, flush=True)
+
+
 class SearchEngine:
     """中国象棋 Alpha-Beta 搜索引擎（Negamax + PVS）"""
 
     def __init__(self,
                  max_depth: int = DEFAULT_MAX_DEPTH,
                  time_limit: float = DEFAULT_TIME_LIMIT,
-                 quiescence_depth: int = DEFAULT_QUIESCENCE_DEPTH,
-                 progress_callback: Optional[Callable] = None):
+                 quiescence_depth: int = DEFAULT_QUIESCENCE_DEPTH):
         self.max_depth = max_depth
         self.time_limit = time_limit
         self.quiescence_depth = quiescence_depth
-        self.progress_callback = progress_callback
 
         # 状态
         self._start_time: float = 0.0
@@ -222,8 +247,7 @@ class SearchEngine:
 
     def search(self,
                game,
-               player: int,
-               on_progress: Optional[Callable] = None) -> Optional[tuple]:
+               player: int) -> Optional[tuple]:
         """主搜索入口 — 返回最佳走法 (fr, fc, tr, tc)。
 
         Negamax 统一根节点：无论红方黑方，均用同一套最大化逻辑。
@@ -255,8 +279,6 @@ class SearchEngine:
                 game._nnue_acc = self._nnue.create_accumulator(game.board)
             except Exception:
                 game._nnue_acc = None
-
-        ordered_moves = None
 
         try:
             # 迭代加深（Negamax 统一框架——不再区分红/黑）
@@ -308,12 +330,6 @@ class SearchEngine:
                     # _best_score 对外保持红方视角（正值=红优）
                     self._best_score = best_score if player == 1 else -best_score
 
-                if on_progress:
-                    on_progress(depth, self._best_score, self._best_move,
-                               self._nodes_searched)
-                if self.progress_callback:
-                    self.progress_callback(depth, self._best_score, self._best_move,
-                                          self._nodes_searched)
         finally:
             # 恢复 game.current_player，清理累加器
             game.current_player = saved_current_player
@@ -364,9 +380,7 @@ class SearchEngine:
         if (not in_check_before_nmp
                 and depth >= NULL_MOVE_MIN_DEPTH
                 and not extended):
-            piece_count = sum(1 for r in range(BOARD_HEIGHT)
-                            for c in range(BOARD_WIDTH)
-                            if game.board[r][c] != '.')
+            piece_count = game._red_piece_count + game._black_piece_count
             if piece_count >= ZUGZWANG_PIECE_LIMIT:
                 saved_player = game.current_player
                 game.current_player = 3 - player
@@ -507,13 +521,7 @@ class SearchEngine:
                 # 将军链过长（长将类线路）：截断递归，退化为静态评估，
                 # 防止连续将军导致 qs 无限延伸
                 return stand_pat
-            ordered_moves = sorted(
-                evasions,
-                key=lambda m: evaluate_move_ordering(
-                    game.board, m[0], m[1], m[2], m[3],
-                    game.board[m[0]][m[1]], game.board[m[2]][m[3]]),
-                reverse=True,
-            )
+            ordered_moves = _sort_by_mvv_lva(game.board, evasions)
             best = float('-inf')
             for i, (fr, fc, tr, tc) in enumerate(ordered_moves):
                 if i % 50 == 0 and self._is_time_up():
@@ -543,13 +551,7 @@ class SearchEngine:
             return stand_pat
 
         # 排序吃子走法（MVV-LVA）
-        ordered_captures = sorted(
-            captures,
-            key=lambda m: evaluate_move_ordering(
-                game.board, m[0], m[1], m[2], m[3],
-                game.board[m[0]][m[1]], game.board[m[2]][m[3]]),
-            reverse=True,
-        )
+        ordered_captures = _sort_by_mvv_lva(game.board, captures)
 
         for i, (fr, fc, tr, tc) in enumerate(ordered_captures):
             # 超时截断（每 50 次检查一次）
@@ -586,16 +588,15 @@ class SearchEngine:
         board = game.board
         total_pieces = game._red_piece_count + game._black_piece_count
 
-        # ── 残局库查询（仅本地库：搜索叶节点禁止同步联网）──
-        if total_pieces <= EGTB_MAX_PIECES:
-            try:
-                from domain.egtb import probe
-                egtb_result = probe(board, player, total_pieces,
-                                    allow_cloud=False)
-                if egtb_result is not None:
-                    return egtb_result[0]
-            except Exception:
-                pass
+        # ── 残局库查询（仅本地库；probe 内部自守卫子力上限）──
+        # 传增量子力计数：双方都有攻击子时 O(1) 快速否定，省全盘扫描
+        try:
+            egtb_result = probe(board, player, total_pieces,
+                                game._material_counts)
+            if egtb_result is not None:
+                return egtb_result[0]
+        except Exception:
+            pass
 
         # ── NNUE 增量神经网络评估 ──
         if self._nnue is not None and hasattr(game, '_nnue_acc') and game._nnue_acc is not None:
@@ -693,63 +694,15 @@ class SearchEngine:
         注意：不修改 current_player、不走合法性校验，仅供搜索内部
         （及 MCTS / worker 的临时局面）配合 _unmake_move 成对使用。
         自动维护 NNUE 累加器（如 game 上有 _nnue_acc）。
+        增量缓存（Zobrist/将位/PST/子力计数）由 game._sync_move_caches 统一维护。
         """
         board = game.board
         piece = board[fr][fc]
         captured = board[tr][tc]
-        board[tr][tc] = piece
-        board[fr][fc] = '.'
-        # 动将时同步缓存，避免后续 _is_in_check 全部回退全盘扫描
-        if piece == 'K':
-            game._king_pos[1] = (tr, tc)
-        elif piece == 'k':
-            game._king_pos[2] = (tr, tc)
-        zi_from = fr * game.size_cols + fc
-        zi_to = tr * game.size_cols + tc
-        game._zobrist ^= (ZOBRIST_TABLE[piece][zi_from]
-                          ^ ZOBRIST_TABLE[piece][zi_to])
-        if captured != '.':
-            game._zobrist ^= ZOBRIST_TABLE[captured][zi_to]
-
-        # ── 增量评估缓存：PST + _material_counts + piece_count ──
-        _pu = piece.upper()
-        if _pu in RED_PST:
-            # 移动方 PST：减去旧位置，加上新位置
-            if piece.isupper():
-                game._red_pst_score -= RED_PST[_pu][fr][fc]
-                game._red_pst_score += RED_PST[_pu][tr][tc]
-            else:
-                game._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - fr][fc]
-                game._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - tr][tc]
-        if captured != '.':
-            # 被吃子计数/PST（递减后清除 0 值键，与 _recompute_incremental
-            # 只含在场棋子的结构一致，见 game.py move_piece 同款逻辑）
-            _mc = game._material_counts.get(captured, 0) - 1
-            if _mc > 0:
-                game._material_counts[captured] = _mc
-            else:
-                game._material_counts.pop(captured, None)
-            if captured.isupper():
-                game._red_piece_count -= 1
-            else:
-                game._black_piece_count -= 1
-            _cu = captured.upper()
-            if _cu in RED_PST:
-                if captured.isupper():
-                    game._red_pst_score -= RED_PST[_cu][tr][tc]
-                else:
-                    game._black_pst_score -= RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
+        _sync_move_caches(game, fr, fc, tr, tc, captured)
 
         # ── NNUE 累加器增量更新 ──
-        if hasattr(game, '_nnue_acc') and game._nnue_acc is not None:
-            try:
-                from domain.nnue import get_nnue
-                nnue = get_nnue()
-                if nnue is not None:
-                    nnue.update_accumulator(
-                        game._nnue_acc, fr, fc, tr, tc, piece, captured)
-            except Exception:
-                pass
+        _sync_nnue_acc(game, fr, fc, tr, tc, piece, captured)
 
         return captured
 
@@ -757,65 +710,19 @@ class SearchEngine:
     def _unmake_move(game, fr: int, fc: int,
                      tr: int, tc: int, captured: str):
         """撤销 _make_move 的走法并恢复 _king_pos 缓存与 Zobrist 哈希。"""
-        board = game.board
-        piece = board[tr][tc]
-        board[fr][fc] = piece
-        board[tr][tc] = captured
-        if piece == 'K':
-            game._king_pos[1] = (fr, fc)
-        elif piece == 'k':
-            game._king_pos[2] = (fr, fc)
-        zi_from = fr * game.size_cols + fc
-        zi_to = tr * game.size_cols + tc
-        game._zobrist ^= (ZOBRIST_TABLE[piece][zi_from]
-                          ^ ZOBRIST_TABLE[piece][zi_to])
-        if captured != '.':
-            game._zobrist ^= ZOBRIST_TABLE[captured][zi_to]
-
-        # ── 增量评估缓存：逆操作 —— 恢复被吃子，移动子回原位 ──
-        _pu = piece.upper()
-        if _pu in RED_PST:
-            # PST：减去新位置，加回旧位置（与 _make_move 相反）
-            if piece.isupper():
-                game._red_pst_score -= RED_PST[_pu][tr][tc]
-                game._red_pst_score += RED_PST[_pu][fr][fc]
-            else:
-                game._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - tr][tc]
-                game._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - fr][fc]
-        if captured != '.':
-            # 恢复被吃子
-            game._material_counts[captured] = game._material_counts.get(captured, 0) + 1
-            if captured.isupper():
-                game._red_piece_count += 1
-            else:
-                game._black_piece_count += 1
-            _cu = captured.upper()
-            if _cu in RED_PST:
-                if captured.isupper():
-                    game._red_pst_score += RED_PST[_cu][tr][tc]
-                else:
-                    game._black_pst_score += RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
+        piece = game.board[tr][tc]
+        _sync_move_caches(game, fr, fc, tr, tc, captured, undo=True)
 
         # ── NNUE 累加器撤销 ──
-        if hasattr(game, '_nnue_acc') and game._nnue_acc is not None:
-            try:
-                from domain.nnue import get_nnue
-                nnue = get_nnue()
-                if nnue is not None:
-                    nnue.unmake_accumulator(
-                        game._nnue_acc, fr, fc, tr, tc, piece, captured)
-            except Exception:
-                pass
+        _sync_nnue_acc(game, fr, fc, tr, tc, piece, captured, undo=True)
 
     # ── 时间控制 ──
 
     def _is_time_up(self) -> bool:
-        if self._stop_flag:
-            return True
-        return (time.time() - self._start_time) > self.time_limit
+        return _engine_time_up(self)
 
     def stop(self):
-        self._stop_flag = True
+        _engine_stop(self)
 
     @property
     def nodes_searched(self) -> int:
@@ -825,13 +732,3 @@ class SearchEngine:
     def best_score(self) -> float:
         """搜索最终评分（正值=红优，负值=黑优）。"""
         return self._best_score
-
-    @property
-    def tt_hit_rate(self) -> float:
-        """置换表命中率 (0.0 ~ 1.0)。"""
-        return self._tt.hit_rate
-
-    @property
-    def tt_size(self) -> int:
-        """置换表条目数。"""
-        return self._tt.size

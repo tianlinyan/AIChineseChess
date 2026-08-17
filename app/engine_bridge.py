@@ -14,10 +14,10 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from domain.constants import (
     MCTS_TIME_LIMIT, MCTS_FALLBACK_SIMULATIONS, MCTS_FALLBACK_TIME_LIMIT,
-    PIECE_SYMBOLS, format_move,
+    format_move, format_chinese_notation,
 )
 from domain.game import ChineseChessGame
-from domain.mcts import MCTSEngine
+from domain.mcts import MCTSEngine, DEFAULT_SIMULATIONS
 
 try:
     from domain.pikafish import PikafishEngine
@@ -91,6 +91,10 @@ class EngineBridge(QObject):
         避免主窗口启动期假死；结果经 init_done 信号排队回主线程写日志、
         更新状态（不跨线程触碰 QTextEdit）。
         """
+        if self._shutdown:
+            # 竞态守卫：QTimer.singleShot(0) 可能在 closeEvent 的
+            # shutdown() 之后才触发，此时不得再拉起引擎子进程
+            return
         if self._pikafish_ready:
             return
         self._pikafish_ready = True
@@ -172,21 +176,8 @@ class EngineBridge(QObject):
         # Pikafish 异步路径（健康检查 + 自动重启：进程可能在上次搜索后
         # 静默死亡——假可用或已标记不可用；尝试重启恢复，失败才回退 MCTS，
         # 避免"引擎中途死亡后整局棋力骤降为 MCTS 兜底"）
-        if on_done is not None and self._pikafish is not None:
-            pf = self._pikafish
-            if pf._proc is None or pf._proc.poll() is not None:
-                if pf._proc is not None:
-                    self._log(
-                        f"  ⚠️ Pikafish 进程已意外退出（code={pf._proc.returncode}），"
-                        f"尝试重启...", 'WARNING')
-                if pf.restart():
-                    self._log("  ✅ Pikafish 重启成功，继续搜索", 'INFO')
-                else:
-                    self._log(
-                        f"  ⚠️ Pikafish 重启失败（{pf.error_msg}），回退 MCTS",
-                        'WARNING')
-            if (pf.available and pf._proc is not None
-                    and pf._proc.poll() is None):
+        if self._pikafish is not None:
+            if self._ensure_pikafish_alive('搜索'):
                 time_ms = self._pikafish_time_s(depth) * 1000
                 self._log(f"  🐟 Pikafish 搜索中（时限 {time_ms // 1000}s）...", 'INFO')
                 self._pikafish.search_async(
@@ -196,39 +187,25 @@ class EngineBridge(QObject):
                 return
 
         # MCTS 后台线程路径
-        if on_done is not None:
-            sims = self._depth_to_sims(depth)
-            self._start_mcts_async(game, player, sims, on_done,
-                                   game_version, cancel_version)
+        sims = self._DEPTH_SIMS_MAP.get(depth, DEFAULT_SIMULATIONS)
+        self._start_mcts_async(game, player, sims, on_done,
+                               game_version, cancel_version)
 
     def start_mcts_fallback(self, game: ChineseChessGame, player: int,
                             on_done: Callable) -> None:
         """MCTS 快速回退搜索（后台线程，短时限）。"""
         game_version = self._get_game_ver()
         cancel_version = self._get_cancel()
-        sims = MCTS_FALLBACK_SIMULATIONS
-        self._log(f"  🌳 MCTS 回退 ({sims}次模拟)", 'INFO')
-        result = {}
         g = game.snapshot()
         g.current_player = player
-        engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_FALLBACK_TIME_LIMIT)
 
-        def _run():
-            move = None
-            try:
-                move = engine.search(g, player)
-                result['sims'] = engine.simulations
-            except Exception as e:
-                result['error'] = f'MCTS 回退异常: {e}'
-            finally:
-                # 只移除自己的条目，避免清空并发启动的新搜索引用
-                self._active_mcts.pop(threading.current_thread(), None)
-                self.search_done.emit(
-                    (move, player, on_done, game_version, cancel_version, ''))
+        def _emit(move) -> None:
+            self.search_done.emit(
+                (move, player, on_done, game_version, cancel_version, ''))
 
-        thread = threading.Thread(target=_run, daemon=True)
-        self._active_mcts[thread] = engine
-        thread.start()
+        self._start_fallback_mcts(
+            g, player, _emit,
+            f"  🌳 MCTS 回退 ({MCTS_FALLBACK_SIMULATIONS}次模拟)")
 
     def stop_all(self) -> None:
         """停止在飞的后台搜索（reset/pause/shutdown 时调用）。"""
@@ -275,65 +252,30 @@ class EngineBridge(QObject):
 
         # ── Pikafish 路径（健康检查 + 自动重启，与 start_search 一致）──
         if self._pikafish is not None:
-            pf = self._pikafish
-            if pf._proc is None or pf._proc.poll() is not None:
-                if pf._proc is not None:
-                    self._log(
-                        f"  ⚠️ Pikafish 进程已意外退出（code={pf._proc.returncode}），"
-                        f"尝试重启...", 'WARNING')
-                if pf.restart():
-                    self._log("  ✅ Pikafish 重启成功，继续提示搜索", 'INFO')
-                else:
-                    self._log(
-                        f"  ⚠️ Pikafish 重启失败（{pf.error_msg}），回退 MCTS",
-                        'WARNING')
-            if (pf.available and pf._proc is not None
-                    and pf._proc.poll() is None):
+            if self._ensure_pikafish_alive('提示搜索'):
                 self._log(f"  🐟 Pikafish 提示搜索中（{int(MCTS_TIME_LIMIT)}s）...", 'INFO')
-                self._start_pf_hint(g, game_version, cancel_version, on_done)
+
+                def _on_result(move, error: str) -> None:
+                    if error:
+                        self._log(f"  ⚠️ Pikafish 提示搜索失败: {error}", 'WARNING')
+                    # 用 pyqtSignal 中继到主线程
+                    self.hint_done.emit(
+                        (move, game_version, cancel_version, on_done))
+
+                self._pikafish.search_async(
+                    g, g.current_player,
+                    time_ms=self._pikafish_time_s(self._get_depth()) * 1000,
+                    callback=_on_result)
                 return
 
         # ── MCTS 兜底路径（引擎在线程外创建并注册，stop_all 可中断）──
-        sims = MCTS_FALLBACK_SIMULATIONS
-        self._log(f"  🌳 Pikafish 不可用，MCTS 提示搜索中（{sims}次模拟）...", 'INFO')
-        engine = MCTSEngine(max_simulations=sims,
-                            time_limit=MCTS_FALLBACK_TIME_LIMIT)
-
-        def _run_mcts() -> None:
-            move = None
-            try:
-                move = engine.search(g, player)
-            except Exception:
-                pass
-            finally:
-                # 只移除自己的条目，避免清空并发启动的新搜索引用
-                self._active_mcts.pop(threading.current_thread(), None)
-                self.hint_done.emit((move, game_version, cancel_version, on_done))
-
-        thread = threading.Thread(target=_run_mcts, daemon=True)
-        self._active_mcts[thread] = engine
-        thread.start()
-
-    # ── 提示搜索内部实现 ──
-
-    def _start_pf_hint(self, g: ChineseChessGame, game_version: int,
-                       cancel_version: int, on_done: Callable) -> None:
-        """启动 Pikafish 提示搜索，复用 search_async（与 AI 搜索同路径）。
-
-        时限按搜索深度映射（depth×3s，上限 MCTS_TIME_LIMIT），
-        与 controller._trigger_hint 的文档承诺一致。
-        """
-
-        def _on_result(move, error: str) -> None:
-            if error:
-                self._log(f"  ⚠️ Pikafish 提示搜索失败: {error}", 'WARNING')
-            # 用 pyqtSignal 中继到主线程
+        def _emit(move) -> None:
             self.hint_done.emit((move, game_version, cancel_version, on_done))
 
-        self._pikafish.search_async(
-            g, g.current_player,
-            time_ms=self._pikafish_time_s(self._get_depth()) * 1000,
-            callback=_on_result)
+        self._start_fallback_mcts(
+            g, player, _emit,
+            f"  🌳 Pikafish 不可用，MCTS 提示搜索中"
+            f"（{MCTS_FALLBACK_SIMULATIONS}次模拟）...")
 
     def shutdown(self) -> None:
         """清理引擎资源。"""
@@ -358,8 +300,71 @@ class EngineBridge(QObject):
 
     # ── 内部 ──
 
-    def _depth_to_sims(self, depth: int) -> int:
-        return self._DEPTH_SIMS_MAP.get(depth, 2000)
+    def _ensure_pikafish_alive(self, action: str) -> bool:
+        """Pikafish 健康检查 + 自动重启（start_search / start_hint_search 共用）。
+
+        进程可能在上次搜索后静默死亡（假可用或已标记不可用）；
+        尝试重启恢复，返回是否可继续使用（重启成功或进程本就存活）。
+        """
+        pf = self._pikafish
+        if pf is None:
+            return False
+        if pf._proc is None or pf._proc.poll() is not None:
+            if pf._proc is not None:
+                self._log(
+                    f"  ⚠️ Pikafish 进程已意外退出（code={pf._proc.returncode}），"
+                    f"尝试重启...", 'WARNING')
+            if pf.restart():
+                self._log(f"  ✅ Pikafish 重启成功，继续{action}", 'INFO')
+            else:
+                self._log(
+                    f"  ⚠️ Pikafish 重启失败（{pf.error_msg}），回退 MCTS",
+                    'WARNING')
+        return (pf.available and pf._proc is not None
+                and pf._proc.poll() is None)
+
+    def _spawn_mcts(self, engine: MCTSEngine, g: ChineseChessGame,
+                    player: int, emit_fn: Callable,
+                    on_result: Optional[Callable] = None,
+                    on_error: Optional[Callable] = None) -> None:
+        """后台线程跑 MCTS 并回传结果（MCTS 线程样板共用）。
+
+        emit_fn(move) 负责信号中继（search_done/hint_done）；on_result(move)/
+        on_error(e) 可选，在 try 内搜索结果后/异常时调用（_start_mcts_async
+        的诊断收集用）；finally 中只移除自己的条目，避免清空并发启动的
+        新搜索引用（D1 修复语义）。
+        """
+        def _run() -> None:
+            move = None
+            try:
+                move = engine.search(g, player)
+                if on_result:
+                    on_result(move)
+            except Exception as e:
+                if on_error:
+                    on_error(e)
+            finally:
+                self._active_mcts.pop(threading.current_thread(), None)
+                # shutdown 后信号已 disconnect / QObject 可能销毁，
+                # emit 会抛 RuntimeError——daemon 线程静默死亡即可，
+                # 不能让它冒泡（避免干扰退出时序）
+                try:
+                    emit_fn(move)
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=_run, daemon=True)
+        self._active_mcts[thread] = engine
+        thread.start()
+
+    def _start_fallback_mcts(self, g: ChineseChessGame, player: int,
+                             emit_fn: Callable, log_msg: str) -> None:
+        """MCTS 短时限回退搜索（回退/提示路径共用样板）。"""
+        sims = MCTS_FALLBACK_SIMULATIONS
+        self._log(log_msg, 'INFO')
+        engine = MCTSEngine(max_simulations=sims,
+                            time_limit=MCTS_FALLBACK_TIME_LIMIT)
+        self._spawn_mcts(engine, g, player, emit_fn)
 
     def _pikafish_time_s(self, depth: int) -> int:
         return min(depth * 3, int(MCTS_TIME_LIMIT))
@@ -376,33 +381,36 @@ class EngineBridge(QObject):
         result = {}
         engine = MCTSEngine(max_simulations=sims, time_limit=MCTS_TIME_LIMIT)
 
-        def _run():
-            move = None
-            try:
-                move = engine.search(g, player)
-                result['sims'] = engine.simulations
-                result['top'] = engine.get_top_moves(3)
-            except Exception as e:
-                result['error'] = f'MCTS 搜索异常: {e}'
-            finally:
-                # 只移除自己的条目，避免清空并发启动的新搜索引用
-                self._active_mcts.pop(threading.current_thread(), None)
-                self.search_done.emit(
-                    (move, player, _logged_on_done,
-                     game_version, cancel_version, ''))
+        def _collect(move) -> None:
+            result['sims'] = engine.simulations
+            result['top'] = engine.get_top_moves(3)
+
+        def _collect_error(e) -> None:
+            result['error'] = f'MCTS 搜索异常: {e}'
+
+        def _emit(move) -> None:
+            self.search_done.emit(
+                (move, player, _logged_on_done,
+                 game_version, cancel_version, ''))
 
         def _logged_on_done(move, player):
             if move:
                 fr, fc, tr, tc = move
-                pn = PIECE_SYMBOLS.get(game.board[fr][fc], '?')
-                self._log(f"  ✅ MCTS选择: {pn} "
-                          f"{format_move(fr, fc, tr, tc)} "
+                try:
+                    notation = format_chinese_notation(
+                        game.board, fr, fc, tr, tc)
+                except (ValueError, IndexError):
+                    notation = format_move(fr, fc, tr, tc)
+                self._log(f"  ✅ MCTS选择: {notation} "
                           f"({result.get('sims', 0)}次模拟)", 'INFO')
                 for i, (m, visits, val) in enumerate(result.get('top', [])):
                     mfr, mfc, mtr, mtc = m
-                    mpn = PIECE_SYMBOLS.get(game.board[mfr][mfc], '?')
-                    self._log(f"    {i+1}. {mpn} "
-                              f"{format_move(mfr, mfc, mtr, mtc)} "
+                    try:
+                        mn = format_chinese_notation(
+                            game.board, mfr, mfc, mtr, mtc)
+                    except (ValueError, IndexError):
+                        mn = format_move(mfr, mfc, mtr, mtc)
+                    self._log(f"    {i+1}. {mn} "
                               f"[访问{visits}次, 价值{val:.3f}]", 'INFO')
             else:
                 detail = (f"（{result['error']}）"
@@ -410,6 +418,5 @@ class EngineBridge(QObject):
                 self._log(f"  ⚠️ MCTS未找到走法{detail}", 'WARNING')
             on_done(move, player)
 
-        thread = threading.Thread(target=_run, daemon=True)
-        self._active_mcts[thread] = engine
-        thread.start()
+        self._spawn_mcts(engine, g, player, _emit,
+                         on_result=_collect, on_error=_collect_error)

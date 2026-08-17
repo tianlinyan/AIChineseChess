@@ -12,8 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from domain.game import ChineseChessGame
 from domain.evaluation import (
-    evaluate, evaluate_fast, PIECE_VALUE, PIECE_VALUE_ENDGAME, RED_PST,
-    compute_material,
+    evaluate, evaluate_fast, PIECE_VALUE, PIECE_VALUE_ENDGAME, WEIGHTS,
 )
 from domain.constants import BOARD_HEIGHT, BOARD_WIDTH, ENDGAME_PIECE_THRESHOLD
 
@@ -89,7 +88,7 @@ def test_symmetry():
 
     # 50 个随机中局局面
     for i in range(50):
-        board, player = random_board(rng, moves_range=(2, 20))
+        board, _ = random_board(rng, moves_range=(2, 20))
         fb = flip_board(board)
         # 原局面用原 player、翻面后用另一 player 的视角
         # 在原局面红方视角的评分 == -翻面后黑方视角的评分
@@ -149,6 +148,40 @@ def test_fast_consistency():
     check('evaluate_fast 一致性（100个随机局面）', True)
 
 
+def test_check_mobility_features():
+    """check/mobility 特征的真实方向性断言。
+
+    背景：旧对称性测试用默认参数（in_check=False、mobility=0）评估两侧，
+    将军奖励/机动性权重的回归会被"两侧同样错误"掩盖。此处用定点断言
+    钉死特征本身的方向与数值（依赖 WEIGHTS.check_bonus / mobility）。
+    """
+    # ── check 特征：黑被将军 → 红方视角加分；红被将军 → 减分 ──
+    board = [['.' for _ in range(9)] for _ in range(10)]
+    board[0][4] = 'k'    # 黑将 (0,4)
+    board[9][3] = 'K'    # 红帅 (9,3)（异列，避开照面）
+    board[5][4] = 'R'    # 红車 (5,4) 同列无阻挡将军黑将
+    base = evaluate(board, endgame=False)
+    black_checked = evaluate(board, black_in_check=True, endgame=False)
+    check('黑被将军 → 红方视角 +check_bonus',
+          abs((black_checked - base) - WEIGHTS.check_bonus) < 1e-6,
+          f'base={base:.1f} checked={black_checked:.1f}')
+    red_checked = evaluate(board, red_in_check=True, endgame=False)
+    check('红被将军 → 红方视角 -check_bonus',
+          abs((red_checked - base) + WEIGHTS.check_bonus) < 1e-6,
+          f'base={base:.1f} red_checked={red_checked:.1f}')
+
+    # ── mobility 特征：走法数每 +1 → +mobility 分（min(·,80) 内）──
+    rng = _rnd.Random(123)
+    mid_board, _ = random_board(rng, moves_range=(8, 18))
+    s0 = evaluate(mid_board, legal_moves_red=0, legal_moves_black=0,
+                  endgame=False)
+    s20 = evaluate(mid_board, legal_moves_red=20, legal_moves_black=0,
+                   endgame=False)
+    check('红走法数 +20 → +20×mobility',
+          abs((s20 - s0) - WEIGHTS.mobility * 20) < 1e-6,
+          f's0={s0:.1f} s20={s20:.1f}')
+
+
 def test_known_endgames():
     """已知残局评估方向正确。"""
     # 单车必胜孤将
@@ -156,7 +189,6 @@ def test_known_endgames():
     board[0][4] = 'k'    # 黑将在 (0,4)
     board[5][4] = 'R'    # 红车在 (5,4)
     board[9][4] = 'K'    # 红帅在 (9,4)
-    g = ChineseChessGame.from_snapshot(board, 1, {1: (9, 4), 2: (0, 4)})
     s = evaluate(board, endgame=True)
     check('单车必胜：红优', s > 500, f'score={s:.1f}')
 
@@ -179,6 +211,7 @@ if __name__ == '__main__':
     test_symmetry()
     test_initial_zero()
     test_fast_consistency()
+    test_check_mobility_features()
     test_known_endgames()
 
     if failures:

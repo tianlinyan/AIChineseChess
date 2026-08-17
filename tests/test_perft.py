@@ -81,6 +81,44 @@ def test_initial_perft():
           f'actual={n3} time={t3:.2f}s')
 
 
+def test_black_first_perft():
+    """黑先初始局面（与红先完全对称）：perft(1)=44, perft(2)=1920。
+
+    红/黑两侧走法生成走同一条代码路径，但坐标/方向镜像（黑卒前进=
+    行号增大、黑馬/炮/車方向、九宫位置），黑先黄金值能捕获只在
+    黑方视角触发的方向性 bug（红先测试测不到）。
+    """
+    g = ChineseChessGame()
+    n1 = perft(g, 2, 1)
+    check('黑先初始 perft(1) = 44', n1 == 44,
+          f'actual={n1}')
+    n2 = perft(g, 2, 2)
+    check('黑先初始 perft(2) = 1920', n2 == 1920,
+          f'actual={n2}')
+
+
+def test_check_evasions_perft():
+    """被将军局面：走法列表必须只剩应将走法（局面与期望值手算）。
+
+    局面：黑将(0,4) 红帅(9,4) 黑車(5,4)——黑車同列无阻挡将军红帅。
+    红方应将：帅 (9,4)→(9,3)/(9,5) 两个逃逸；→(8,4) 仍在車线被将军
+    （非法，被 _would_be_illegal 过滤）。期望 perft(1)=2。
+    """
+    board = [['.'] * 9 for _ in range(10)]
+    board[0][4] = 'k'
+    board[9][4] = 'K'
+    board[5][4] = 'r'   # 黑車将军红帅（(5,4)-(9,4) 直线无阻挡）
+    g = ChineseChessGame()
+    g.board = board
+    g.current_player = 1
+    g._king_pos = {1: (9, 4), 2: (0, 4)}
+    g.recompute_hash()
+    g._recompute_incremental()
+    n = perft(g, 1, 1)
+    check('被将军局面 perft(1) = 2（只剩应将）', n == 2,
+          f'actual={n}')
+
+
 def test_capture_moves_subset():
     """get_capture_moves 返回结果 ⊆ get_all_legal_moves。"""
     g = ChineseChessGame()
@@ -104,6 +142,8 @@ def test_capture_moves_subset():
 
 if __name__ == '__main__':
     test_initial_perft()
+    test_black_first_perft()
+    test_check_evasions_perft()
     test_capture_moves_subset()
 
     if failures:

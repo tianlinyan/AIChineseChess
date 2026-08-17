@@ -5,6 +5,9 @@ WINDOW_HEIGHT = 900
 MIDDLE_PANEL_MIN_WIDTH = 600
 SPLITTER_SIZES = [300, 620, 280]
 
+PANEL_BG = '#1a1a1e'
+PANEL_BG_STYLE = f"background-color: {PANEL_BG};"
+
 DARK_THEME_QSS = """
     QMainWindow { background-color: #1a1a1a; color: #e0e0e0; }
     QWidget { background-color: #2d2d2d; color: #e0e0e0; }

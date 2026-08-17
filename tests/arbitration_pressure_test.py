@@ -104,8 +104,7 @@ def build_arb_worker():
         material_str=material_str,
         candidate_order=order,
     )
-    worker = AIWorker(model, prompt, None, '仲裁',
-                      version=0, cancel_version=0,
+    worker = AIWorker(model, prompt, None, version=0, cancel_version=0,
                       system_prompt=get_arbitration_system_prompt(),
                       tools=TOOLS_BASIC, game=g, current_player=player,
                       allowed_moves={llm_move, engine_move},

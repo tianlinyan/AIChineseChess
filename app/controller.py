@@ -12,8 +12,8 @@ from domain.constants import (
     OPENING_DELAY_MS,
     AI_DEFAULT_MODE, ARBITRATION_TIMEOUT_SECONDS,
     MCTS_TIME_LIMIT,
-    PIECE_SYMBOLS, format_duration, format_coord,
-    parse_coord, format_move,
+    PIECE_SYMBOLS, format_duration,
+    parse_coord, format_move, format_chinese_notation,
     PROMPT_HISTORY_MAX_ITEMS,
 )
 from domain.prompts import (
@@ -164,8 +164,8 @@ class GameController:
 
         # 先手方走子
         first_player = self.game.current_player
-        first_model = self.model1 if first_player == 1 else self.model2
-        self.main.start_thinking_timer(first_player)
+        first_model = self._model_for(first_player)
+        self.start_thinking_timer(first_player)
         if first_model != HUMAN_MODEL:
             self._defer_ai_move(1000)
 
@@ -174,8 +174,8 @@ class GameController:
         self.stop_thinking_timer()
 
         # 取消运行中的 AI 任务，防止残留 Worker 阻塞新游戏
+        # （clear_queue 已复位 ai_move_in_progress，无需再 set_busy(False)）
         self.ai_manager.clear_queue()
-        self.ai_manager.set_busy(False)
         self._engine.stop_all()
 
         self.is_active = False
@@ -221,21 +221,22 @@ class GameController:
         self.is_paused = not self.is_paused
         if self.is_paused:
             self.main.pause_btn.setText("恢复")
-            self.main.pause_thinking_timer()
+            # 暂停即结束当前思考计时段（与 stop_thinking_timer 等价）
+            self.stop_thinking_timer()
+            # clear_queue 已复位 ai_move_in_progress，无需再 set_busy(False)
             self.ai_manager.clear_queue()
-            self.ai_manager.set_busy(False)
             self._engine.stop_all()
             self.retry_count = 0
         else:
             self.main.pause_btn.setText("暂停")
-            self.main.resume_thinking_timer()
+            self.resume_thinking_timer()
             if not self.game.game_over and not self.ai_manager.is_busy():
                 current_player = self.game.current_player
-                current_model = self.model1 if current_player == 1 else self.model2
+                current_model = self._model_for(current_player)
                 if current_model != HUMAN_MODEL:
                     self._defer_ai_move(AI_DELAY_MS)
                 else:
-                    self.main.start_thinking_timer(current_player)
+                    self.start_thinking_timer(current_player)
 
     # ── 人类落子 ──
 
@@ -248,23 +249,26 @@ class GameController:
             self.log("AI 正在思考中，暂无法走子", 'WARNING')
             return
         current_player = self.game.current_player
-        current_model = self.model1 if current_player == 1 else self.model2
+        current_model = self._model_for(current_player)
         if current_model != HUMAN_MODEL:
             return
 
         result = self.game.move_piece(from_row, from_col, to_row, to_col)
         if result['success']:
             self._hint_active = False  # 取消进行中的提示搜索
+            # 停止在飞的提示搜索：人类落子时 AI 必不忙（上方 busy 检查），
+            # 在飞搜索只可能是提示搜索；不停止的话 Pikafish/MCTS 会继续
+            # 烧 CPU 至自然结束（最长 30s），结果还要被版本门控丢弃
+            self._engine.stop_all()
             # 结算人类思考计时（红/黑总用时数据无消费者，仅复位计时段）
             self.thinking_start_time = None
 
-            from_coord = f"{chr(65 + from_col)}{from_row + 1}"
-            to_coord = f"{chr(65 + to_col)}{to_row + 1}"
+            notation = self.game.move_notation(self.game.moves[-1])
             if current_player == 1:
-                self.last_red_raw = f"人类走子: {from_coord}→{to_coord}"
+                self.last_red_raw = f"人类走子: {notation}"
             else:
-                self.last_black_raw = f"人类走子: {from_coord}→{to_coord}"
-            self.log(f"{'红方' if current_player == 1 else '黑方'} 人类走子: {from_coord}→{to_coord}",
+                self.last_black_raw = f"人类走子: {notation}"
+            self.log(f"{self._player_name(current_player)} 人类走子: {notation}",
                      'red' if current_player == 1 else 'black')
 
             self.main.board_widget.update()
@@ -275,13 +279,8 @@ class GameController:
             if result['game_over']:
                 self.handle_game_over(result)
             else:
-                next_player = self.game.current_player
-                next_model = self.model1 if next_player == 1 else self.model2
-                if next_model != HUMAN_MODEL:
-                    self.main.start_thinking_timer(next_player)
-                    self._defer_ai_move(AI_DELAY_MS)
-                else:
-                    self.main.start_thinking_timer(next_player)
+                # 与 AI 走子后的调度一致：启动下一方计时 + 必要时延迟 AI 走子
+                self._schedule_next_ai_move()
         else:
             self.log(f"移动非法: {result['message']}", 'ERROR')
 
@@ -302,24 +301,21 @@ class GameController:
         if self._hint_active:
             return
         current_player = self.game.current_player
-        current_model = self.model1 if current_player == 1 else self.model2
+        current_model = self._model_for(current_player)
         if current_model != HUMAN_MODEL:
             return
 
-        player_name = '红方' if current_player == 1 else '黑方'
+        player_name = self._player_name(current_player)
 
         # ── 阶段 1：开局库提示 ──
         if self._use_opening_book_for(current_player) and len(self.game.moves) < OPENING_BOOK_MAX_MOVES:
             candidates = get_opening_candidates(self.game.moves)
             if candidates:
                 # 显示匹配的开局名称
-                names = get_opening_names(self.game.moves)
-                if names:
-                    self.log(f"📚 当前开局: {', '.join(names)}", 'INFO')
+                self._log_opening_names()
                 lines = []
                 for (fr, fc, tr, tc), _ in candidates[:5]:
-                    pn = PIECE_SYMBOLS.get(self.game.board[fr][fc], '?')
-                    lines.append(f"{pn} {format_move(fr, fc, tr, tc)}")
+                    lines.append(self._move_desc((fr, fc, tr, tc)))
                 self.log(
                     f"📖 {player_name} 开局库参考: {' | '.join(lines)}",
                     'INFO')
@@ -338,11 +334,8 @@ class GameController:
             if self.game.current_player != current_player:
                 return  # 人类已经落子了
             if move:
-                fr, fc, tr, tc = move
-                pn = PIECE_SYMBOLS.get(self.game.board[fr][fc], '?')
                 self.log(
-                    f"🔍 {player_name} Pikafish 参考: "
-                    f"{pn} {format_move(fr, fc, tr, tc)}",
+                    f"🔍 {player_name} Pikafish 参考: {self._move_desc(move)}",
                     'INFO')
             else:
                 self.log(f"💡 {player_name} 引擎暂无建议，请自行走子", 'INFO')
@@ -372,7 +365,7 @@ class GameController:
         # 重置上轮引擎走法——防止开局库路径跳过引擎搜索后
         # 旧走法被本轮仲裁/兜底误用
         self._hybrid_engine_move = None
-        model = self.model1 if current_player == 1 else self.model2
+        model = self._model_for(current_player)
         if model == HUMAN_MODEL:
             return
 
@@ -381,7 +374,7 @@ class GameController:
         # 回合分隔标记（重试/兜底链再入时不重复打印）
         if self.retry_count == 0:
             ply = len(self.game.moves) + 1
-            player_name = '红方' if current_player == 1 else '黑方'
+            player_name = self._player_name(current_player)
             self.log(f"━━ 第 {ply} 手 · {player_name}（{model.name}）━━", 'INFO')
 
         # ── 1. 开局库查询 ──
@@ -393,17 +386,10 @@ class GameController:
                 fr, fc, tr, tc = book_move
                 result = self.game.move_piece(fr, fc, tr, tc)
                 if result['success']:
-                    self._on_move_success(fr, fc, tr, tc, current_player,
-                                          source='开局库')
-                    # 显示匹配的开局名称
-                    names = get_opening_names(self.game.moves)
-                    if names:
-                        self.log(f"📚 当前开局: {', '.join(names)}", 'INFO')
-                    self._refresh_ui()
-                    if result.get('game_over'):
-                        self.handle_game_over(result)
-                        return
-                    self._schedule_next_ai_move(delay=OPENING_DELAY_MS)
+                    self._complete_move(fr, fc, tr, tc, result,
+                                        current_player, '开局库',
+                                        delay=OPENING_DELAY_MS, finish=False,
+                                        extra_log=self._log_opening_names)
                     return
 
         # ── 2. 纯搜索模式（Pikafish/MCTS 异步，不阻塞UI）──
@@ -412,8 +398,7 @@ class GameController:
 
             def _on_search(move, p):
                 # 检查暂停/关闭状态，防止异步回调在暂停后执行走子
-                if self.is_paused or not self.is_active or self.game.game_over:
-                    self._finish_ai_move()
+                if self._engine_round_guard():
                     return
                 # Pikafish 失败 → MCTS 快速回退（同样后台线程）
                 if not move:
@@ -424,10 +409,7 @@ class GameController:
                     return
                 # search_only 模式下 Pikafish 结果即最终走法，在此记日志
                 # （hybrid 模式由 _on_hybrid_engine_done 另行记录）
-                fr, fc, tr, tc = move
-                pn = PIECE_SYMBOLS.get(self.game.board[fr][fc], '?')
-                self.log(f"🔍 Pikafish 推荐: {pn} "
-                         f"{format_move(fr, fc, tr, tc)}", 'INFO')
+                self.log(f"🔍 Pikafish 推荐: {self._move_desc(move)}", 'INFO')
                 self._execute_engine_move_or_random(move, p, '搜索')
 
             self._engine.start_search(self.game, current_player, _on_search)
@@ -438,8 +420,7 @@ class GameController:
             self.ai_manager.set_busy(True)
 
             def _on_engine_ready(move, p):
-                if not self.is_active or self.is_paused or self.game.game_over:
-                    self._finish_ai_move()
+                if self._engine_round_guard():
                     return
                 if move and self._engine.pikafish and self._engine.pikafish_available:
                     engine_name = 'Pikafish'
@@ -450,8 +431,7 @@ class GameController:
                 else:
                     # Pikafish 无结果 → MCTS 兜底
                     def _on_fb(m2, p2):
-                        if not self.is_active or self.is_paused or self.game.game_over:
-                            self._finish_ai_move()
+                        if self._engine_round_guard():
                             return
                         self._on_hybrid_engine_done(m2, p2, 'MCTS(回退)',
                                                     'Pikafish 失败，MCTS 兜底')
@@ -508,41 +488,24 @@ class GameController:
 
         # 零合法走法 = 将杀或困毙 → 直接判定游戏结束，跳过 LLM 调用
         if legal_move_count == 0:
-            self.game.game_over = True
-            self.game.winner = opponent
-            self.handle_game_over({
-                'game_over': True, 'winner': opponent,
-                'message': f"{'红方' if opponent == 1 else '黑方'}获胜（{'将杀' if self.game.is_in_check(player) else '困毙'}）"
-            })
+            self._declare_no_legal_moves(player)
             self._finish_ai_move()
             return
 
         # 格式化合法走法列表（×吃子 / +将军 / ⚠️重复标注）
-        repetition_moves = self.game.find_repetition_moves(legal_moves)
-        legal_moves_str = format_legal_moves(
-            legal_moves, self.game.board, player,
-            repetition_moves=repetition_moves)
+        legal_moves_str = self._legal_moves_str(player, legal_moves)
 
         # 子力对比（视角相对：帮助 LLM 落实"优势简化、劣势复杂"策略）
-        red_mat, black_mat, _, _ = compute_material(self.game.board)
-        mine, theirs = (red_mat, black_mat) if player == 1 else (black_mat, red_mat)
-        mat_diff = mine - theirs
-        if mat_diff > 0:
-            mat_trend = f"你领先 +{mat_diff:g}，可主动兑子简化"
-        elif mat_diff < 0:
-            mat_trend = f"你落后 {-mat_diff:g}，避免无补偿兑子"
-        else:
-            mat_trend = "子力均势"
-        material_str = f"子力对比（单位=兵）：你 {mine:g} : {theirs:g} 对手 —— {mat_trend}"
+        material_str = self._material_str(player)
 
-        # 上一步走子描述
+        # 上一步走子描述（传统棋谱着法，取自落子时存档）
         last_move_str = ''
         if self.game.last_move:
-            fr, fc, tr, tc, lp = self.game.last_move
-            piece = self.game.board[tr][tc]
-            piece_name = PIECE_SYMBOLS.get(piece, piece)
+            lp = self.game.last_move[4]
             captured = self.game.moves[-1][5] if self.game.moves else '.'
-            action = f"{'红方' if lp == 1 else '黑方'} {piece_name} {format_move(fr, fc, tr, tc)}"
+            notation = (self.game.move_notation(self.game.moves[-1])
+                        if self.game.moves else '')
+            action = f"{self._player_name(lp)} {notation}"
             tags = []
             if captured != '.':
                 target_name = PIECE_SYMBOLS.get(captured, captured)
@@ -571,21 +534,18 @@ class GameController:
         if engine_hint:
             self.log("📤 引擎推荐已注入 LLM 提示词", 'INFO')
 
-        player_name = '红方' if player == 1 else '黑方'
+        player_name = self._player_name(player)
         current_version = self.game_version
 
-        # 系统提示词 — 统一使用完整版（含完整棋规：棋子走法表/九宫/约束），
-        # 不依赖"模型已掌握棋规"的假设；DeepSeek 等强模型同样接收完整规则。
-        # models.json 中配置了 system_prompt 的模型优先使用自定义提示词。
+        # 系统提示词 — 精简版：模型已具备中国象棋通用规则与知识，
+        # 只注入应用特有信息（坐标系统/工具协议/引擎机制/策略框架）。
         # llm_only 模式下不描述不可用的分析工具。
-        include_tools = self._ai_mode_for(player) != 'llm_only'
-        if model.system_prompt:
-            system_prompt = model.system_prompt
-        else:
-            system_prompt = get_system_prompt(include_analysis_tools=include_tools)
+        is_llm_only = self._ai_mode_for(player) == 'llm_only'
+        include_tools = not is_llm_only
+        system_prompt = get_system_prompt(include_analysis_tools=include_tools)
 
         # 工具选择：仅 LLM 模式只用 move_piece；其他模式用全部工具
-        worker_tools = TOOLS_BASIC if self._ai_mode_for(player) == 'llm_only' else DEFAULT_TOOLS
+        worker_tools = TOOLS_BASIC if is_llm_only else DEFAULT_TOOLS
 
         # LLM 启动日志：显示模型名与关键上下文（视觉/引擎参考）
         extras = []
@@ -600,7 +560,7 @@ class GameController:
         self.ai_manager.set_busy(True)
 
         worker = AIWorker(
-            model, prompt, image, player_name,
+            model, prompt, image,
             version=current_version,
             cancel_version=self.ai_manager.cancel_version,
             system_prompt=system_prompt,
@@ -610,34 +570,29 @@ class GameController:
             # evaluate_position 工具用 Pikafish 大师级评估（None 时回退手工）
             pikafish=self._engine.pikafish,
         )
-        worker.signals.finished.connect(self.on_ai_finished)
-        self.ai_manager.set_active_worker(worker)
-        t = threading.Thread(target=worker.run, daemon=True)
-        t.start()
-        self.ai_manager.set_active_thread(t)
+        self._launch_worker(worker, self.on_ai_finished)
 
     def _on_hybrid_engine_done(self, engine_move: Optional[tuple],
-                                player: int, engine_name: str = '引擎',
-                                engine_desc: str = '') -> None:
+                               player: int, engine_name: str,
+                               engine_desc: str) -> None:
         """Hybrid 模式：引擎搜索完成 → 日志 + 格式化提示 → 启动 LLM。"""
-        if not self.is_active or self.is_paused or self.game.game_over:
-            self._finish_ai_move()
+        if self._engine_round_guard():
             return
 
-        player_name = '红方' if player == 1 else '黑方'
+        player_name = self._player_name(player)
 
         # 格式化引擎参考走法 + 日志输出
         engine_hint = ''
         if engine_move:
             efr, efc, etr, etc = engine_move
-            # 验证走法在合法列表中（防止引擎因坐标系问题返回非法走法）
+            # 验证走法在合法列表中（防止引擎因坐标系问题返回非法走法；
+            # 合法走法起点必有己方子，无需再单独检查起始空位）
             legal = self.game.get_all_legal_moves(player)
             if (efr, efc, etr, etc) not in legal:
-                self.log(f"引擎走法 {format_move(efr, efc, etr, etc)} 不在合法列表中，丢弃", 'WARNING')
+                self.log(f"引擎走法 {self._move_desc((efr, efc, etr, etc))} 不在合法列表中，丢弃", 'WARNING')
                 engine_move = None
-            elif self.game.board[efr][efc] != '.':
-                epn = PIECE_SYMBOLS.get(self.game.board[efr][efc], '?')
-                emove_str = f"{epn} {format_move(efr, efc, etr, etc)}"
+            else:
+                emove_str = self._move_desc((efr, efc, etr, etc))
                 self.log(f"🔍 {engine_name} 推荐: {emove_str}", 'INFO')
                 # 信任分级：Pikafish 推荐是重要参考——不强制采信，也不轻慢；
                 # MCTS 兜底为本地轻量引擎，仅作参考。
@@ -675,21 +630,18 @@ class GameController:
                     f"**{emove_str}**\n\n"
                     f"{trust_note}"
                 )
-            else:
-                self.log(f"引擎走法起始空位，丢弃", 'WARNING')
-                engine_move = None
         else:
             self.log(f"⚠️ {player_name} 引擎搜索无结果，LLM 独立决策", 'WARNING')
 
         # 暂存引擎结果（LLM 失败时兜底）
         self._hybrid_engine_move = engine_move
 
-        model = self.model1 if player == 1 else self.model2
+        model = self._model_for(player)
         self._start_llm_request(player, model, engine_hint=engine_hint)
 
     def on_ai_finished(self, from_coord: str, to_coord: str,
                        full_text: str, error: str,
-                       tokens: int, version: int,
+                       version: int,
                        cancel_version: int = 0,
                        content_text: str = '') -> None:
         if not self._check_callback_valid(version, cancel_version, 'AI',
@@ -697,13 +649,11 @@ class GameController:
             return
 
         current_player = self.game.current_player
-        player_name = '红方' if current_player == 1 else '黑方'
+        player_name = self._player_name(current_player)
 
         # 左侧面板"显示 AI 思考过程"开关：勾选 → 显示完整文本（含推理）；
         # 默认关闭 → 只显示正式回复
-        show_think = bool(
-            self.main and getattr(self.main, 'show_think_check', None)
-            and self.main.show_think_check.isChecked())
+        show_think = self._show_think_enabled()
 
         if full_text or content_text:
             # 标题行保留红/黑颜色区分（红方日志红、黑方日志黑）；
@@ -721,14 +671,11 @@ class GameController:
 
         # ── LLM 失败 → 直接采用引擎结果，不仲裁 ──
         if error or not from_coord or not to_coord:
-            if self._ai_mode_for(current_player) == 'hybrid':
-                self.log(f"{player_name} LLM 调用失败 ({error or '无有效走法'})，直接采用引擎走法", 'WARNING')
-                self._fallback_hybrid_engine(current_player)
-                return
-            else:
-                # llm_only 模式：原有重试逻辑
-                self._retry_move(error)
-                return
+            self._handle_llm_failure(
+                current_player,
+                f"{player_name} LLM 调用失败 ({error or '无有效走法'})，直接采用引擎走法",
+                error=error)
+            return
 
         # ── 解析坐标 ──
         try:
@@ -739,21 +686,10 @@ class GameController:
                 f"坐标 '{from_coord}'→'{to_coord}' 无法解析。"
                 f"请确保坐标格式正确：列字母 A~I，行数字 1~10。"
             )
-            if self._ai_mode_for(current_player) == 'hybrid':
-                self.log(f"{player_name} 坐标解析失败，直接采用引擎走法", 'WARNING')
-                self._fallback_hybrid_engine(current_player)
-                return
-            else:
-                self.retry_count += 1
-                if self.retry_count <= AI_RETRY_LIMIT:
-                    self.ai_manager.set_busy(False)
-                    self.ai_manager.clear_active_worker()
-                    self._defer_ai_move(self.retry_count * AI_RETRY_DELAY_MS)
-                    return
-                else:
-                    self._finish_ai_move()
-                    self._fallback_to_search(current_player)
-                    return
+            self._handle_llm_failure(
+                current_player,
+                f"{player_name} 坐标解析失败，直接采用引擎走法")
+            return
 
         # ── LLM 走法即为最终决定（hybrid 模式下引擎仅作参考）──
         final_move = (from_row, from_col, to_row, to_col)
@@ -779,12 +715,8 @@ class GameController:
             efr, efc, etr, etc = self._hybrid_engine_move
 
             # 格式化日志
-            epiece = self.game.board[efr][efc] if self.game.board[efr][efc] != '.' else '?'
-            epn = PIECE_SYMBOLS.get(epiece, epiece)
-            erec = f"{epn} {format_move(efr, efc, etr, etc)}"
-            lpiece = self.game.board[from_row][from_col] if self.game.board[from_row][from_col] != '.' else '?'
-            lpn = PIECE_SYMBOLS.get(lpiece, lpiece)
-            lrec = f"{lpn} {format_move(from_row, from_col, to_row, to_col)}"
+            erec = self._move_desc((efr, efc, etr, etc))
+            lrec = self._move_desc((from_row, from_col, to_row, to_col))
             self.log(
                 f"⚖️ 分歧检测 | LLM选择: {lrec} | 引擎推荐: {erec} | 启动仲裁...",
                 'WARNING')
@@ -803,47 +735,23 @@ class GameController:
         if not result['success']:
             reason = result.get('message', '未知原因')
             self.last_move_error = f"{from_coord}→{to_coord}（原因：{reason}）"
-
-            if self._ai_mode_for(current_player) == 'hybrid':
-                self.log(f"{player_name} 走子非法 ({reason})，直接采用引擎走法", 'WARNING')
-                self._fallback_hybrid_engine(current_player, final_move)
-                return
-            else:
-                # llm_only：重试
-                self.retry_count += 1
-                if self.retry_count <= AI_RETRY_LIMIT:
-                    self.ai_manager.set_busy(False)
-                    self.ai_manager.clear_active_worker()
-                    self._defer_ai_move(self.retry_count * AI_RETRY_DELAY_MS)
-                    return
-                else:
-                    self._finish_ai_move()
-                    self._fallback_to_search(current_player)
-                    return
+            self._handle_llm_failure(
+                current_player,
+                f"{player_name} 走子非法 ({reason})，直接采用引擎走法",
+                final_move=final_move)
+            return
 
         # ── 移动成功 ──
-        self._on_move_success(from_row, from_col, to_row, to_col,
-                              current_player, source='LLM')
-        self._refresh_ui()
-        self._finish_ai_move()
-
-        if result.get('game_over'):
-            self.handle_game_over(result)
-            return
-
-        # ── 下一步 ──
-        self._schedule_next_ai_move()
+        self._complete_move(from_row, from_col, to_row, to_col, result,
+                            current_player, 'LLM')
 
     def _execute_engine_move_or_random(self, move: Optional[tuple],
-                                       player: int, source: str,
-                                       reset_random_count: bool = False) -> None:
+                                       player: int, source: str) -> None:
         """主线程：执行引擎走法；无走法/走子失败时回退随机走子。"""
-        if self.is_paused or not self.is_active or self.game.game_over:
-            self._finish_ai_move()
+        if self._engine_round_guard():
             return
         if move:
-            self._execute_guarded_move(move, player, source,
-                                       reset_random=reset_random_count)
+            self._execute_guarded_move(move, player, source)
         else:
             self._finish_ai_move()
             self._random_move(player)
@@ -851,10 +759,7 @@ class GameController:
     def _fallback_to_search(self, player: int) -> None:
         """LLM 失败时回退到搜索引擎（替代随机走子）"""
         self._current_ai_player = player  # 确保引擎桥接读到正确深度
-        if self._random_action_count > 3:
-            self.log("连续回退过多 — 停止游戏", 'ERROR')
-            self.handle_game_over(
-                {'game_over': True, 'winner': 0, 'message': '连续异常，游戏终止'})
+        if self._repeated_failure_guard("连续回退过多 — 停止游戏"):
             return
 
         # Pikafish/MCTS 异步回退
@@ -862,29 +767,23 @@ class GameController:
 
         def _on_fb(move, p):
             # 检查暂停/关闭状态，防止异步回调在暂停后执行走子
-            if self.is_paused or not self.is_active or self.game.game_over:
-                self._finish_ai_move()
+            if self._engine_round_guard():
                 return
             # Pikafish 失败 → MCTS 快速回退（后台线程）
             if not move:
                 self._engine.start_mcts_fallback(
                     self.game, p,
                     lambda m2, p2: self._execute_engine_move_or_random(
-                        m2, p2, '搜索回退', reset_random_count=True))
+                        m2, p2, '搜索回退'))
                 return
-            self._execute_engine_move_or_random(
-                move, p, '搜索回退', reset_random_count=True)
+            self._execute_engine_move_or_random(move, p, '搜索回退')
 
         self._engine.start_search(self.game, player, _on_fb)
-        return
 
     def _random_move(self, current_player: int) -> None:
         """随机走子（最后的fallback）"""
         self._random_action_count += 1
-        if self._random_action_count > 3:
-            self.log("连续随机走子过多 — 停止游戏", 'ERROR')
-            self.handle_game_over(
-                {'game_over': True, 'winner': 0, 'message': '连续异常，游戏终止'})
+        if self._repeated_failure_guard("连续随机走子过多 — 停止游戏"):
             return
 
         moves = self.game.get_all_legal_moves(current_player)
@@ -892,14 +791,9 @@ class GameController:
             fr, fc, tr, tc = random.choice(moves)
             result = self.game.move_piece(fr, fc, tr, tc)
             if result['success']:
-                self._on_move_success(fr, fc, tr, tc, current_player,
-                                      source='随机')
                 # 注意：随机走子成功不重置计数——防止无限[随机]循环
-                self._refresh_ui()
-                if result['game_over']:
-                    self.handle_game_over(result)
-                    return
-                self._schedule_next_ai_move()
+                self._complete_move(fr, fc, tr, tc, result, current_player,
+                                    '随机', finish=False)
                 return
             else:
                 self.log(f"随机走子失败: {result.get('message', '未知')}", 'ERROR')
@@ -907,13 +801,7 @@ class GameController:
                 return
 
         # 确实无合法走法 — 困毙/将杀判负（中国象棋规则：无棋可走者负）
-        self.game.game_over = True
-        opponent = 3 - current_player
-        self.game.winner = opponent
-        kind = '将杀' if self.game.is_in_check(current_player) else '困毙'
-        self.handle_game_over({
-            'game_over': True, 'winner': opponent,
-            'message': f"{'红方' if opponent == 1 else '黑方'}获胜（{kind}）"})
+        self._declare_no_legal_moves(current_player)
 
     def _retry_move(self, error: str = '') -> None:
         """LLM 错误时的重试逻辑（仅 llm_only 模式使用）"""
@@ -929,18 +817,8 @@ class GameController:
                 self._fallback_to_search(self.game.current_player)
                 return
 
-        self.retry_count += 1
-        if self.retry_count <= AI_RETRY_LIMIT:
-            delay = self.retry_count * AI_RETRY_DELAY_MS
-            self.log(f"重试 ({self.retry_count}/{AI_RETRY_LIMIT}) 延迟 {delay}ms", 'ERROR')
-            self.ai_manager.set_busy(False)
-            self.ai_manager.clear_active_worker()
-            self._defer_ai_move(delay)
-            return
-
-        self.log("超过重试次数，回退搜索", 'ERROR')
-        self._finish_ai_move()
-        self._fallback_to_search(self.game.current_player)
+        # 重试/超限回退统一由 _retry_or_fallback 处理（带日志）
+        self._retry_or_fallback(self.game.current_player, log=True)
 
     # ── 走子成功处理 ──
 
@@ -955,10 +833,12 @@ class GameController:
         # 更新统计
         self.last_move_error = ''
 
-        # 记录走子
-        from_coord = format_coord(from_row, from_col)
-        to_coord = format_coord(to_row, to_col)
-        move_desc = f"{source}:{from_coord}→{to_coord}" if source else f"{from_coord}→{to_coord}"
+        # 记录走子（传统棋谱着法，取自落子时存档；走子后棋盘已变，
+        # 不能再用当前棋盘反推前/后消歧）
+        notation = (self.game.move_notation(self.game.moves[-1])
+                    if self.game.moves else format_move(
+                        from_row, from_col, to_row, to_col))
+        move_desc = f"{source}:{notation}" if source else notation
 
         if current_player == 1:
             self.last_red_raw = move_desc
@@ -971,10 +851,7 @@ class GameController:
         if source != '随机':
             self._random_action_count = 0
 
-        piece_name = PIECE_SYMBOLS.get(
-            self.game.board[to_row][to_col], '?')
-        self.log(f"{'红方' if current_player == 1 else '黑方'} [{source}] "
-                 f"{piece_name} {from_coord}→{to_coord}",
+        self.log(f"{self._player_name(current_player)} [{source}] {notation}",
                  'red' if current_player == 1 else 'black')
 
     # ── 走子后 UI 刷新辅助方法 ──
@@ -997,9 +874,9 @@ class GameController:
         if not self.is_active or self.is_paused or self.game.game_over:
             return
         if self.main:
-            self.main.start_thinking_timer(self.game.current_player)
+            self.start_thinking_timer(self.game.current_player)
         next_player = self.game.current_player
-        next_model = self.model1 if next_player == 1 else self.model2
+        next_model = self._model_for(next_player)
         if next_model != HUMAN_MODEL:
             self._defer_ai_move(delay)
 
@@ -1026,7 +903,7 @@ class GameController:
         if cancel_version != self.ai_manager.cancel_version:
             self.log(f"[诊断] {label}回调取消版本不匹配({cancel_version}!={self.ai_manager.cancel_version})，丢弃", 'INFO')
             return False
-        if self.is_paused or not self.is_active or self.game.game_over:
+        if self._round_blocked():
             if needs_cleanup:
                 self._finish_ai_move()
             return False
@@ -1034,32 +911,193 @@ class GameController:
 
     def _fallback_hybrid_engine(self, player: int, final_move=None) -> None:
         """Hybrid 模式引擎兜底：LLM 失败时采用引擎走法或随机。"""
-        self._finish_ai_move()
         engine_move = self._hybrid_engine_move
         if engine_move and (final_move is None or engine_move != final_move):
-            self._execute_guarded_move(engine_move, player, '引擎兜底')
+            self._fallback_move(player, engine_move, '引擎兜底')
+        else:
+            self._fallback_move(player, None, '引擎兜底')
+
+    def _fallback_move(self, player: int, candidate, source: str) -> None:
+        """统一兜底：优先执行候选走法，否则随机（不计分/不重试）。"""
+        self._finish_ai_move()
+        if candidate:
+            self._execute_guarded_move(candidate, player, source)
         else:
             self._random_move(player)
 
-    def _execute_guarded_move(self, move: tuple, player: int, source: str,
-                              reset_random: bool = True) -> None:
+    def _handle_llm_failure(self, player: int, log_msg: str,
+                            final_move=None, error: str = '') -> None:
+        """LLM 失败统一分支：hybrid → 引擎兜底；llm_only → 重试/回退搜索。"""
+        if self._ai_mode_for(player) == 'hybrid':
+            self.log(log_msg, 'WARNING')
+            self._fallback_hybrid_engine(player, final_move)
+        elif error:
+            self._retry_move(error)
+        else:
+            self._retry_or_fallback(player)
+
+    def _launch_worker(self, worker, on_finished) -> None:
+        """启动 AIWorker 线程并登记（LLM / 仲裁共用样板）。"""
+        worker.signals.finished.connect(on_finished)
+        self.ai_manager.set_active_worker(worker)
+        t = threading.Thread(target=worker.run, daemon=True)
+        t.start()
+        self.ai_manager.set_active_thread(t)
+
+    def _complete_move(self, fr, fc, tr, tc, result, player, source,
+                       delay: int = AI_DELAY_MS, finish: bool = True,
+                       extra_log=None) -> None:
+        """走子成功收尾统一处理：簿记 → 可选附加日志 → 刷新 → [结束 AI 回合]
+        → 终局？ → 调度下一步。
+
+        5 处走子路径（开局库/LLM/随机/引擎兜底/仲裁）共用；finish=False 供
+        不在 AI busy 上下文、无需 _finish_ai_move 的路径（开局库/随机）。
+        """
+        self._on_move_success(fr, fc, tr, tc, player, source=source)
+        if extra_log:
+            extra_log()
+        self._refresh_ui()
+        if finish:
+            self._finish_ai_move()
+        if result.get('game_over'):
+            self.handle_game_over(result)
+            return
+        self._schedule_next_ai_move(delay)
+
+    # ── 共用助手（消除多份逐字重复的回退/守卫/格式化样板）──
+
+    def _declare_no_legal_moves(self, player: int) -> None:
+        """当前走子方无合法走法 → 对方获胜（将杀/困毙判负）。
+
+        LLM 预检 / 随机兜底共用；调用方按各自上下文决定是否再调
+        _finish_ai_move 或附加日志。
+        """
+        self.game.game_over = True
+        opponent = 3 - player
+        self.game.winner = opponent
+        kind = '将杀' if self.game.is_in_check(player) else '困毙'
+        self.handle_game_over({
+            'game_over': True, 'winner': opponent,
+            'message': f"{self._player_name(opponent)}获胜（{kind}）"})
+
+    def _retry_or_fallback(self, player: int, log: bool = False) -> None:
+        """LLM 失败重试（llm_only）；超过上限回退搜索。
+
+        log=True 时输出重试/超限日志（_retry_move 路径用，on_ai_finished
+        内联重试路径保持静默）。
+        """
+        self.retry_count += 1
+        if self.retry_count <= AI_RETRY_LIMIT:
+            delay = self.retry_count * AI_RETRY_DELAY_MS
+            if log:
+                self.log(f"重试 ({self.retry_count}/{AI_RETRY_LIMIT}) 延迟 {delay}ms", 'ERROR')
+            self.ai_manager.set_busy(False)
+            self.ai_manager.clear_active_worker()
+            self._defer_ai_move(delay)
+        else:
+            if log:
+                self.log("超过重试次数，回退搜索", 'ERROR')
+            self._finish_ai_move()
+            self._fallback_to_search(player)
+
+    def _fallback_llm_move(self, player: int) -> None:
+        """仲裁失败/异常时回退：优先采用 LLM 候选，否则随机（不计分）。"""
+        self._fallback_move(player, self._arbitration_llm_move, 'LLM(仲裁回退)')
+
+    def _engine_round_guard(self) -> bool:
+        """异步引擎回调的回合守卫：暂停/关闭/已结束 → 结束 AI 回合并返回 True。
+
+        与 _check_callback_valid 的主线程门控位于同一同步链（状态不可能在
+        两次检查间变化），此处为可读性显式化，避免六份逐字重复。
+        """
+        if self._round_blocked():
+            self._finish_ai_move()
+            return True
+        return False
+
+    def _round_blocked(self) -> bool:
+        """对局回合是否已结束（暂停/关闭/终局）——纯查询，不加清理副作用。"""
+        return self.is_paused or not self.is_active or self.game.game_over
+
+    def _player_name(self, player: int) -> str:
+        return '红方' if player == 1 else '黑方'
+
+    def _model_for(self, player: int):
+        return self.model1 if player == 1 else self.model2
+
+    def _repeated_failure_guard(self, log_msg: str) -> bool:
+        """连续异常（随机/回退过多）→ 终止游戏，返回是否已终止。"""
+        if self._random_action_count <= 3:
+            return False
+        self.log(log_msg, 'ERROR')
+        self.handle_game_over(
+            {'game_over': True, 'winner': 0, 'message': '连续异常，游戏终止'})
+        return True
+
+    def _show_think_enabled(self) -> bool:
+        """左侧面板"显示 AI 思考过程"开关状态（勾选 → 显示完整思考文本）。"""
+        return bool(
+            self.main and getattr(self.main, 'show_think_check', None)
+            and self.main.show_think_check.isChecked())
+
+    def _log_opening_names(self) -> None:
+        """记录当前命中的开局线名称（提示搜索/AI 开局库路径共用）。"""
+        names = get_opening_names(self.game.moves)
+        if names:
+            self.log(f"📚 当前开局: {', '.join(names)}", 'INFO')
+
+    def _move_desc(self, move: tuple) -> str:
+        """传统棋谱着法 + 坐标（如 '炮二平五(A7→E7)'），供日志统一使用。
+
+        基于当前棋盘（调用点均处于走子前局面）；走子后需用
+        game.move_notation() 取落子时存档的着法。
+        """
+        fr, fc, tr, tc = move
+        try:
+            notation = format_chinese_notation(
+                self.game.board, fr, fc, tr, tc)
+        except (ValueError, IndexError):
+            return format_move(fr, fc, tr, tc)
+        return f"{notation}({format_move(fr, fc, tr, tc)})"
+
+    def _legal_moves_str(self, player: int,
+                         legal_moves: Optional[list] = None) -> str:
+        """格式化合法走法列表（含 ⚠️重复标注），LLM/仲裁提示词共用。"""
+        if legal_moves is None:
+            legal_moves = self.game.get_all_legal_moves(player)
+        repetition_moves = self.game.find_repetition_moves(legal_moves)
+        return format_legal_moves(
+            legal_moves, self.game.board, player,
+            repetition_moves=repetition_moves)
+
+    def _material_str(self, player: int, perspective: bool = True) -> str:
+        """子力对比文本：perspective=True 用"你/对手"（LLM 走子视角），
+        False 用"红/黑"（仲裁对称视角）。"""
+        red_mat, black_mat, _, _ = compute_material(self.game.board)
+        if perspective:
+            mine, theirs = ((red_mat, black_mat) if player == 1
+                            else (black_mat, red_mat))
+            mat_diff = mine - theirs
+            if mat_diff > 0:
+                mat_trend = f"你领先 +{mat_diff:g}，可主动兑子简化"
+            elif mat_diff < 0:
+                mat_trend = f"你落后 {-mat_diff:g}，避免无补偿兑子"
+            else:
+                mat_trend = "子力均势"
+            return (f"子力对比（单位=兵）：你 {mine:g} : {theirs:g} "
+                    f"对手 —— {mat_trend}")
+        return f"子力对比（单位=兵）：红 {red_mat:g} : {black_mat:g}"
+
+    def _execute_guarded_move(self, move: tuple, player: int, source: str) -> None:
         """统一兜底走法：执行走法并处理后走子流程。
 
-        失败时回退 _random_move（原 on_failure 参数无任何调用方传值，已移除）。
+        失败时回退 _random_move（原 on_failure/reset_random 参数无调用方
+        差异化传值，已移除；非随机 source 由 _on_move_success 统一重置计数）。
         """
         fr, fc, tr, tc = move
         result = self.game.move_piece(fr, fc, tr, tc)
         if result['success']:
-            self._on_move_success(fr, fc, tr, tc, player, source=source)
-            if reset_random:
-                self._random_action_count = 0
-            self._refresh_ui()
-            if result.get('game_over'):
-                self._finish_ai_move()
-                self.handle_game_over(result)
-                return
-            self._schedule_next_ai_move()
-            self._finish_ai_move()
+            self._complete_move(fr, fc, tr, tc, result, player, source)
         else:
             self.log(f"{source}走子失败: {result.get('message', '未知')}", 'ERROR')
             self._finish_ai_move()
@@ -1117,15 +1155,8 @@ class GameController:
 
         if not arbitrator_model:
             self.log("⚠️ 未找到仲裁模型配置（需 id='arbitration' 或 type='deepseek'），仲裁跳过 → 采用 LLM 走法", 'WARNING')
-            self._finish_ai_move()
-            if self._arbitration_llm_move:
-                self._execute_guarded_move(self._arbitration_llm_move,
-                                           player, 'LLM(仲裁回退)')
-            else:
-                self._random_move(player)
+            self._fallback_llm_move(player)
             return
-
-        player_name = '红方' if player == 1 else '黑方'
 
         # 构建仲裁提示词
         board_str = self.game.get_board_state_string()
@@ -1137,36 +1168,24 @@ class GameController:
 
         # 零合法走法 = 不应到达这里（LLM 和引擎都已返回走法），但防御性检查
         if len(legal_moves) == 0:
-            self.game.game_over = True
-            self.game.winner = opponent
             self.log("仲裁时检测到零合法走法，游戏结束", 'ERROR')
             self._finish_ai_move()
-            self.handle_game_over({
-                'game_over': True, 'winner': opponent,
-                'message': f"{'红方' if opponent == 1 else '黑方'}获胜"
-            })
+            self._declare_no_legal_moves(player)
             return
 
+        legal_moves_str = self._legal_moves_str(player, legal_moves)
+
+        # 重复局面集合：候选依据与走法列表共用同一口径的 ⚠️ 重复标注
         repetition_moves = self.game.find_repetition_moves(legal_moves)
-        legal_moves_str = format_legal_moves(
-            legal_moves, self.game.board, player,
-            repetition_moves=repetition_moves)
 
         # 子力对比（红黑对称的客观事实，供"形势匹配"维度裁决）
-        red_mat, black_mat, _, _ = compute_material(self.game.board)
-        material_str = f"子力对比（单位=兵）：红 {red_mat:g} : {black_mat:g}"
+        material_str = self._material_str(player, perspective=False)
 
-        # LLM 走法描述
+        # LLM / 引擎走法描述
         lfr, lfc, ltr, ltc = self._arbitration_llm_move
-        lpiece = self.game.board[lfr][lfc]
-        lpn = PIECE_SYMBOLS.get(lpiece, '?')
-        llm_move_str = f"{lpn} {format_move(lfr, lfc, ltr, ltc)}"
-
-        # 引擎走法描述
+        llm_move_str = self._move_desc((lfr, lfc, ltr, ltc))
         efr, efc, etr, etc = self._arbitration_engine_move
-        epiece = self.game.board[efr][efc]
-        epn = PIECE_SYMBOLS.get(epiece, '?')
-        engine_move_str = f"{epn} {format_move(efr, efc, etr, etc)}"
+        engine_move_str = self._move_desc((efr, efc, etr, etc))
 
         # 候选依据：为两个候选对称生成客观事实（吃子/将军/将杀/评估/重复），
         # 不出现"引擎/搜索"等来源标识——与仲裁提示词"不要揣测候选来源"一致，
@@ -1211,6 +1230,7 @@ class GameController:
             candidate_order=order,
         )
 
+        # 仲裁系统提示词 — 精简版
         system_prompt = get_arbitration_system_prompt()
         current_version = self.game_version
 
@@ -1222,7 +1242,7 @@ class GameController:
             self.main.update_ai_score()
 
         worker = AIWorker(
-            arbitrator_model, prompt, None, f"{player_name}仲裁",
+            arbitrator_model, prompt, None,
             version=current_version,
             cancel_version=self.ai_manager.cancel_version,
             system_prompt=system_prompt,
@@ -1234,15 +1254,11 @@ class GameController:
             allowed_moves={llm_move, engine_move},
             label_to_move=label_to_move,
         )
-        worker.signals.finished.connect(self.on_arbitration_finished)
-        self.ai_manager.set_active_worker(worker)
-        t = threading.Thread(target=worker.run, daemon=True)
-        t.start()
-        self.ai_manager.set_active_thread(t)
+        self._launch_worker(worker, self.on_arbitration_finished)
 
     def on_arbitration_finished(self, from_coord: str, to_coord: str,
                                  full_text: str, error: str,
-                                 tokens: int, version: int,
+                                 version: int,
                                  cancel_version: int = 0,
                                  content_text: str = '') -> None:
         """仲裁完成回调：评分 + 执行仲裁结果。"""
@@ -1255,12 +1271,7 @@ class GameController:
         # ── 仲裁失败 → 采用 LLM 走法兜底（不计分）──
         if error or not from_coord or not to_coord:
             self.log(f"⚠️ 仲裁失败 ({error or '无有效走法'})，采用 LLM 走法（不计分）", 'WARNING')
-            self._finish_ai_move()
-            if self._arbitration_llm_move:
-                self._execute_guarded_move(self._arbitration_llm_move,
-                                           current_player, 'LLM(仲裁回退)')
-            else:
-                self._random_move(current_player)
+            self._fallback_llm_move(current_player)
             return
 
         # ── 解析仲裁坐标 ──
@@ -1269,12 +1280,7 @@ class GameController:
             arb_to_row, arb_to_col = parse_coord(to_coord)
         except (ValueError, IndexError, TypeError, AttributeError):
             self.log(f"仲裁坐标解析失败 '{from_coord}'→'{to_coord}'，采用 LLM 走法（不计分）", 'WARNING')
-            self._finish_ai_move()
-            if self._arbitration_llm_move:
-                self._execute_guarded_move(self._arbitration_llm_move,
-                                           current_player, 'LLM(仲裁回退)')
-            else:
-                self._random_move(current_player)
+            self._fallback_llm_move(current_player)
             return
 
         arb_move = (arb_row, arb_col, arb_to_row, arb_to_col)
@@ -1284,14 +1290,11 @@ class GameController:
         # ── 仲裁结果必须是候选走法之一（提示词要求二选一，但不强制时
         #    模型可能给出第三走法；此时按约定采纳引擎并记 WARNING）──
         if arb_move != llm_move and arb_move != engine_move:
-            efr0, efc0, etr0, etc0 = engine_move
-            ep0 = PIECE_SYMBOLS.get(self.game.board[efr0][efc0], '?')
             self.log(
-                f"⚠️ 仲裁结果 {chr(65+arb_col)}{arb_row+1}→{chr(65+arb_to_col)}{arb_to_row+1} "
+                f"⚠️ 仲裁结果 {self._move_desc(arb_move)} "
                 f"不是候选走法之一，按约定采纳引擎走法 "
-                f"{ep0} {chr(65+efc0)}{efr0+1}→{chr(65+etc0)}{etr0+1}", 'WARNING')
+                f"{self._move_desc(engine_move)}", 'WARNING')
             arb_move = engine_move
-            arb_row, arb_col, arb_to_row, arb_to_col = engine_move
 
         # ── 计分 ──
         if arb_move == llm_move:
@@ -1312,9 +1315,7 @@ class GameController:
 
         # ── 日志仲裁分析（按"显示 AI 思考过程"开关：勾选含推理全文，
         #    默认只显示正式回复）──
-        show_think = bool(
-            self.main and getattr(self.main, 'show_think_check', None)
-            and self.main.show_think_check.isChecked())
+        show_think = self._show_think_enabled()
         if full_text or content_text:
             self.log(
                 f"  🔨 仲裁分析:\n"
@@ -1322,19 +1323,9 @@ class GameController:
                 'INFO')
 
         # 格式化双方走法用于日志
-        arb_piece = self.game.board[arb_row][arb_col]
-        arb_pn = PIECE_SYMBOLS.get(arb_piece, '?')
-        arb_rec = f"{arb_pn} {chr(65+arb_col)}{arb_row+1}→{chr(65+arb_to_col)}{arb_to_row+1}"
-
-        lfr, lfc, ltr, ltc = llm_move
-        lpiece = self.game.board[lfr][lfc]
-        lpn = PIECE_SYMBOLS.get(lpiece, '?')
-        llm_rec = f"{lpn} {chr(65+lfc)}{lfr+1}→{chr(65+ltc)}{ltr+1}"
-
-        efr, efc, etr, etc = self._arbitration_engine_move
-        epiece = self.game.board[efr][efc]
-        epn = PIECE_SYMBOLS.get(epiece, '?')
-        eng_rec = f"{epn} {chr(65+efc)}{efr+1}→{chr(65+etc)}{etr+1}"
+        arb_rec = self._move_desc(arb_move)
+        llm_rec = self._move_desc(llm_move)
+        eng_rec = self._move_desc(self._arbitration_engine_move)
 
         self.log(
             f"⚖️ 仲裁结果: {arb_rec} | LLM: {llm_rec} | 引擎: {eng_rec} | "
@@ -1342,30 +1333,15 @@ class GameController:
             'WARNING')
 
         # ── 执行仲裁走法 ──
-        result = self.game.move_piece(arb_row, arb_col, arb_to_row, arb_to_col)
+        result = self.game.move_piece(*arb_move)
         if not result['success']:
             reason = result.get('message', '未知原因')
             self.log(f"仲裁走法非法 ({reason})，回退 LLM 走法（不计分）", 'ERROR')
-            self._finish_ai_move()
-            if self._arbitration_llm_move:
-                self._execute_guarded_move(self._arbitration_llm_move,
-                                           current_player, 'LLM(仲裁回退)')
-            else:
-                self._random_move(current_player)
+            self._fallback_llm_move(current_player)
             return
 
-        self._on_move_success(arb_row, arb_col, arb_to_row, arb_to_col,
-                              current_player,
-                              source=f'仲裁({"LLM" if arb_move == llm_move else "引擎"})')
-        self._refresh_ui()
-        self._finish_ai_move()
-
-        if result.get('game_over'):
-            self.handle_game_over(result)
-            return
-
-        # ── 下一步 ──
-        self._schedule_next_ai_move()
+        self._complete_move(*arb_move, result, current_player,
+                            source=f'仲裁({"LLM" if arb_move == llm_move else "引擎"})')
 
     def _finish_ai_move(self) -> None:
         self.ai_manager.set_busy(False)
@@ -1397,7 +1373,7 @@ class GameController:
 
     def start_thinking_timer(self, player: int) -> None:
         self.stop_thinking_timer()
-        model = self.model1 if player == 1 else self.model2
+        model = self._model_for(player)
         self.thinking_start_time = QDateTime.currentDateTime()
         if model == HUMAN_MODEL:
             self.main.think_timer_label.setText("等待人类走子...")
@@ -1417,18 +1393,10 @@ class GameController:
         if self.main:
             self.main.think_timer_label.setText("思考用时: -")
 
-    def pause_thinking_timer(self) -> None:
-        if self.thinking_timer:
-            self.thinking_timer.stop()
-        # 暂停即结束当前思考计时段（总用时无消费者）
-        self.thinking_start_time = None
-        if self.main:
-            self.main.think_timer_label.setText("思考用时: -")
-
     def resume_thinking_timer(self) -> None:
         if self.is_active and not self.is_paused and not self.game.game_over:
             current_player = self.game.current_player
-            model = self.model1 if current_player == 1 else self.model2
+            model = self._model_for(current_player)
             if model != HUMAN_MODEL:
                 self.start_thinking_timer(current_player)
 

@@ -21,6 +21,7 @@ Usage:
 
 import os
 import struct
+import sys
 import numpy as np
 from typing import Optional
 
@@ -73,16 +74,13 @@ class NnueNet:
             try:
                 self._load_weights(weight_path)
                 self._loaded = True
-                import sys
                 size_kb = os.path.getsize(weight_path) / 1024
                 print(f'[NNUE] 权重已加载: {os.path.basename(weight_path)} '
                       f'({size_kb:.0f}KB, {HIDDEN1_DIM}→{HIDDEN2_DIM}→1)',
                       file=sys.stderr, flush=True)
             except Exception as e:
-                import sys
                 print(f'[NNUE] 权重加载失败: {e}', file=sys.stderr, flush=True)
         else:
-            import sys
             print(f'[NNUE] 权重文件未找到 ({weight_path})，回退到手评',
                   file=sys.stderr, flush=True)
 
@@ -227,6 +225,26 @@ class NnueNet:
         acc.values += self._b1
         return acc
 
+    def _apply_accumulator_delta(self, acc: 'Accumulator',
+                                 sq_old: int, sq_new: int,
+                                 piece: str, captured: str,
+                                 sign: int) -> None:
+        """累加器增量统一实现：sign=+1 前进（update），-1 撤销（unmake）。
+
+        update/unmake 逐项互为符号相反（含吃子扣除与撤销恢复），合并后
+        保持逐字节等价：整数 ±1 乘 float32 只翻转符号，无精度损失。
+        """
+        type_idx = _PIECE_TYPE_INDEX.get(piece, -1)
+        if type_idx >= 0:
+            # 移除旧位置特征，添加新位置特征（撤销时反向）
+            acc.values -= sign * self._w1[type_idx * 90 + sq_old]
+            acc.values += sign * self._w1[type_idx * 90 + sq_new]
+
+        if captured != '.':
+            cap_idx = _PIECE_TYPE_INDEX.get(captured, -1)
+            if cap_idx >= 0:
+                acc.values -= sign * self._w1[cap_idx * 90 + sq_new]
+
     def update_accumulator(self, acc: 'Accumulator',
                            fr: int, fc: int, tr: int, tc: int,
                            piece: str, captured: str) -> None:
@@ -237,20 +255,8 @@ class NnueNet:
         """
         if acc is None or not self._loaded:
             return
-
-        sq_old = fr * BOARD_WIDTH + fc
-        sq_new = tr * BOARD_WIDTH + tc
-
-        type_idx = _PIECE_TYPE_INDEX.get(piece, -1)
-        if type_idx >= 0:
-            # 移除旧位置特征，添加新位置特征
-            acc.values -= self._w1[type_idx * 90 + sq_old]
-            acc.values += self._w1[type_idx * 90 + sq_new]
-
-        if captured != '.':
-            cap_idx = _PIECE_TYPE_INDEX.get(captured, -1)
-            if cap_idx >= 0:
-                acc.values -= self._w1[cap_idx * 90 + sq_new]
+        self._apply_accumulator_delta(
+            acc, fr * BOARD_WIDTH + fc, tr * BOARD_WIDTH + tc, piece, captured, 1)
 
     def unmake_accumulator(self, acc: 'Accumulator',
                            fr: int, fc: int, tr: int, tc: int,
@@ -258,20 +264,8 @@ class NnueNet:
         """撤销累加器更新（与 update_accumulator 对称）。"""
         if acc is None or not self._loaded:
             return
-
-        sq_old = fr * BOARD_WIDTH + fc
-        sq_new = tr * BOARD_WIDTH + tc
-
-        type_idx = _PIECE_TYPE_INDEX.get(piece, -1)
-        if type_idx >= 0:
-            # 恢复：加回旧位置，移除新位置
-            acc.values += self._w1[type_idx * 90 + sq_old]
-            acc.values -= self._w1[type_idx * 90 + sq_new]
-
-        if captured != '.':
-            cap_idx = _PIECE_TYPE_INDEX.get(captured, -1)
-            if cap_idx >= 0:
-                acc.values += self._w1[cap_idx * 90 + sq_new]
+        self._apply_accumulator_delta(
+            acc, fr * BOARD_WIDTH + fc, tr * BOARD_WIDTH + tc, piece, captured, -1)
 
 
 class Accumulator:

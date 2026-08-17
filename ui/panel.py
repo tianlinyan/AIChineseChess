@@ -1,5 +1,7 @@
 """左侧面板 UI 构建"""
 
+import functools
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -7,7 +9,8 @@ from PyQt6.QtWidgets import (
     QLabel, QGroupBox, QSpinBox, QFrame,
 )
 
-from domain.constants import SEARCH_MAX_DEPTH, DEFAULT_SEARCH_DEPTH
+from domain.constants import SEARCH_MAX_DEPTH, DEFAULT_SEARCH_DEPTH, OPENING_BOOK_ENABLED
+from ui.theme import PANEL_BG_STYLE
 
 
 def _section_label(text: str, color: str = "#8ec8e8") -> QLabel:
@@ -30,12 +33,29 @@ def _h_separator() -> QFrame:
     return line
 
 
-def _spacer(height: int = 4) -> QFrame:
+def _spacer(height: int) -> QFrame:
     """垂直空白间距。"""
     sp = QFrame()
     sp.setFixedHeight(height)
     sp.setStyleSheet("background: transparent; border: none;")
     return sp
+
+
+def _section_gap(layout, top: int = 2) -> None:
+    """小节间隔：上间距 + 分隔线 + 下间距（多处布局共用）。"""
+    layout.addWidget(_spacer(top))
+    layout.addWidget(_h_separator())
+    layout.addWidget(_spacer(4))
+
+
+def _build_model_combo(parent, layout, attr: str) -> None:
+    """构建模型下拉（红/黑各一），控件对象名 parent.{attr}。"""
+    combo = QComboBox()
+    combo.setMinimumHeight(26)
+    combo.setStyleSheet(_combo_style())
+    combo.currentIndexChanged.connect(parent._on_model_changed)
+    setattr(parent, attr, combo)
+    layout.addWidget(combo)
 
 
 def _group_style(title_color: str = "#7eb8da") -> str:
@@ -94,43 +114,93 @@ def _check_style() -> str:
     )
 
 
-def _btn_primary_style() -> str:
-    """主按钮（开始）。"""
-    return (
-        "QPushButton {"
-        "  background-color: #3a7a4a; color: white; border: none;"
-        "  border-radius: 4px; padding: 6px; font-size: 13px; font-weight: bold;"
-        "}"
-        "QPushButton:hover { background-color: #4a9a5a; }"
-        "QPushButton:pressed { background-color: #2a6a3a; }"
-        "QPushButton:disabled { background-color: #333; color: #666; }"
-    )
+BTN_PRIMARY_STYLE = (
+    "QPushButton {"
+    "  background-color: #3a7a4a; color: white; border: none;"
+    "  border-radius: 4px; padding: 6px; font-size: 13px; font-weight: bold;"
+    "}"
+    "QPushButton:hover { background-color: #4a9a5a; }"
+    "QPushButton:pressed { background-color: #2a6a3a; }"
+    "QPushButton:disabled { background-color: #333; color: #666; }"
+)
+
+BTN_DANGER_STYLE = (
+    "QPushButton {"
+    "  background-color: #8a3a3a; color: white; border: none;"
+    "  border-radius: 4px; padding: 5px; font-size: 13px;"
+    "}"
+    "QPushButton:hover { background-color: #a54a4a; }"
+    "QPushButton:pressed { background-color: #6a2a2a; }"
+    "QPushButton:disabled { background-color: #333; color: #666; }"
+)
+
+BTN_DEFAULT_STYLE = (
+    "QPushButton {"
+    "  background-color: #3a3a40; color: #c0c0c0; border: 1px solid #555;"
+    "  border-radius: 4px; padding: 5px; font-size: 13px;"
+    "}"
+    "QPushButton:hover { background-color: #4a4a50; border-color: #777; }"
+    "QPushButton:pressed { background-color: #2a2a30; }"
+    "QPushButton:disabled { background-color: #333; color: #666; border-color: #333; }"
+)
 
 
-def _btn_danger_style() -> str:
-    """危险按钮（停止）。"""
-    return (
-        "QPushButton {"
-        "  background-color: #8a3a3a; color: white; border: none;"
-        "  border-radius: 4px; padding: 5px; font-size: 13px;"
-        "}"
-        "QPushButton:hover { background-color: #a54a4a; }"
-        "QPushButton:pressed { background-color: #6a2a2a; }"
-        "QPushButton:disabled { background-color: #333; color: #666; }"
-    )
+def _build_engine_group(parent, side: str, label_color: str,
+                        title_color: str) -> QGroupBox:
+    """构建一方引擎组：模式下拉、搜索深度、开局库。
 
+    控件对象名按 side 生成（parent.{side}_ai_mode_combo 等），
+    信号经 functools.partial 绑定 side 传给 MainWindow 的合并槽。
+    """
+    engine = QGroupBox(f"{'红方' if side == 'red' else '黑方'}引擎")
+    engine.setStyleSheet(_group_style(title_color))
+    grid = QGridLayout(engine)
+    grid.setVerticalSpacing(5)
+    grid.setHorizontalSpacing(6)
+    grid.setContentsMargins(8, 10, 8, 6)
 
-def _btn_default_style() -> str:
-    """普通按钮（暂停）。"""
-    return (
-        "QPushButton {"
-        "  background-color: #3a3a40; color: #c0c0c0; border: 1px solid #555;"
-        "  border-radius: 4px; padding: 5px; font-size: 13px;"
-        "}"
-        "QPushButton:hover { background-color: #4a4a50; border-color: #777; }"
-        "QPushButton:pressed { background-color: #2a2a30; }"
-        "QPushButton:disabled { background-color: #333; color: #666; border-color: #333; }"
-    )
+    lbl = QLabel("模式:")
+    lbl.setStyleSheet(f"color: {label_color}; font-size: 13px;")
+    grid.addWidget(lbl, 0, 0)
+    ai_mode_combo = QComboBox()
+    ai_mode_combo.addItem("AI + 搜索", "hybrid")
+    ai_mode_combo.addItem("仅搜索", "search_only")
+    ai_mode_combo.addItem("仅 AI", "llm_only")
+    ai_mode_combo.setCurrentIndex(0)
+    ai_mode_combo.setMinimumHeight(26)
+    ai_mode_combo.setStyleSheet(_combo_style())
+    ai_mode_combo.currentIndexChanged.connect(
+        functools.partial(parent._on_ai_mode_changed, side=side))
+    setattr(parent, f'{side}_ai_mode_combo', ai_mode_combo)
+    grid.addWidget(ai_mode_combo, 0, 1)
+
+    dlbl = QLabel("深度:")
+    dlbl.setStyleSheet(f"color: {label_color}; font-size: 13px;")
+    grid.addWidget(dlbl, 1, 0)
+    search_depth_spin = QSpinBox()
+    search_depth_spin.setRange(1, SEARCH_MAX_DEPTH)
+    search_depth_spin.setMinimumHeight(26)
+    search_depth_spin.setStyleSheet(_spinbox_style())
+    search_depth_spin.setToolTip(
+        f"{'红方' if side == 'red' else '黑方'}搜索强度 1~{SEARCH_MAX_DEPTH}")
+    search_depth_spin.valueChanged.connect(
+        functools.partial(parent._on_search_depth_changed, side=side))
+    search_depth_spin.setValue(DEFAULT_SEARCH_DEPTH)  # connect 之后设值，确保信号送达
+    setattr(parent, f'{side}_search_depth_spin', search_depth_spin)
+    grid.addWidget(search_depth_spin, 1, 1)
+
+    opening_book_check = QCheckBox("开局库")
+    opening_book_check.setStyleSheet(_check_style())
+    opening_book_check.stateChanged.connect(
+        functools.partial(parent._on_opening_book_changed, side=side))
+    # connect 之后设值：初始状态经信号同步到 controller（与 spinbox 的
+    # 做法一致），并跟随 OPENING_BOOK_ENABLED 常量，避免 UI 默认勾选与
+    # controller 默认关闭不一致
+    opening_book_check.setChecked(OPENING_BOOK_ENABLED)
+    setattr(parent, f'{side}_opening_book_check', opening_book_check)
+    grid.addWidget(opening_book_check, 1, 2)
+
+    return engine
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -140,7 +210,7 @@ def _btn_default_style() -> str:
 
 def setup_left_expanded(parent) -> None:
     """在 parent (MainWindow) 上构建左侧展开面板的所有控件"""
-    parent.left_expanded.setStyleSheet("background-color: #1a1a1e;")
+    parent.left_expanded.setStyleSheet(PANEL_BG_STYLE)
 
     layout = QVBoxLayout(parent.left_expanded)
     layout.setContentsMargins(8, 0, 8, 6)
@@ -165,122 +235,34 @@ def setup_left_expanded(parent) -> None:
     parent.expand_collapse_btn.clicked.connect(parent.toggle_left_panel)
     title_layout.addWidget(parent.expand_collapse_btn, 0, Qt.AlignmentFlag.AlignTop)
     layout.addLayout(title_layout)
-    layout.addWidget(_spacer(2))
-    layout.addWidget(_h_separator())
-    layout.addWidget(_spacer(4))
+    _section_gap(layout)
 
     # ══════════════════════════════════════════════════════════════
     # 🔴 红方
     # ══════════════════════════════════════════════════════════════
     layout.addWidget(_section_label("🔴 红方（先手）"))
-    parent.model1_combo = QComboBox()
-    parent.model1_combo.setMinimumHeight(26)
-    parent.model1_combo.setStyleSheet(_combo_style())
-    parent.model1_combo.currentIndexChanged.connect(parent.on_model1_changed)
-    layout.addWidget(parent.model1_combo)
+    _build_model_combo(parent, layout, 'model1_combo')
 
     layout.addWidget(_spacer(2))
 
-    red_engine = QGroupBox("红方引擎")
-    red_engine.setStyleSheet(_group_style("#e06060"))
-    red_layout = QGridLayout(red_engine)
-    red_layout.setVerticalSpacing(5)
-    red_layout.setHorizontalSpacing(6)
-    red_layout.setContentsMargins(8, 10, 8, 6)
+    layout.addWidget(_build_engine_group(
+        parent, 'red', '#c0a0a0', '#e06060'))
 
-    rlbl = QLabel("模式:")
-    rlbl.setStyleSheet("color: #c0a0a0; font-size: 13px;")
-    red_layout.addWidget(rlbl, 0, 0)
-    parent.red_ai_mode_combo = QComboBox()
-    parent.red_ai_mode_combo.addItem("AI + 搜索", "hybrid")
-    parent.red_ai_mode_combo.addItem("仅搜索", "search_only")
-    parent.red_ai_mode_combo.addItem("仅 AI", "llm_only")
-    parent.red_ai_mode_combo.setCurrentIndex(0)
-    parent.red_ai_mode_combo.setMinimumHeight(26)
-    parent.red_ai_mode_combo.setStyleSheet(_combo_style())
-    parent.red_ai_mode_combo.currentIndexChanged.connect(parent.on_red_ai_mode_changed)
-    red_layout.addWidget(parent.red_ai_mode_combo, 0, 1)
-
-    rdlbl = QLabel("深度:")
-    rdlbl.setStyleSheet("color: #c0a0a0; font-size: 13px;")
-    red_layout.addWidget(rdlbl, 1, 0)
-    parent.red_search_depth_spin = QSpinBox()
-    parent.red_search_depth_spin.setRange(1, SEARCH_MAX_DEPTH)
-    parent.red_search_depth_spin.setMinimumHeight(26)
-    parent.red_search_depth_spin.setStyleSheet(_spinbox_style())
-    parent.red_search_depth_spin.setToolTip(f"红方搜索强度 1~{SEARCH_MAX_DEPTH}")
-    parent.red_search_depth_spin.valueChanged.connect(parent.on_red_search_depth_changed)
-    parent.red_search_depth_spin.setValue(DEFAULT_SEARCH_DEPTH)  # connect 之后设值，确保信号送达
-    red_layout.addWidget(parent.red_search_depth_spin, 1, 1)
-
-    parent.red_opening_book_check = QCheckBox("开局库")
-    parent.red_opening_book_check.setChecked(True)
-    parent.red_opening_book_check.setStyleSheet(_check_style())
-    parent.red_opening_book_check.stateChanged.connect(parent.on_red_opening_book_changed)
-    red_layout.addWidget(parent.red_opening_book_check, 1, 2)
-
-    layout.addWidget(red_engine)
-
-    layout.addWidget(_spacer(6))
-    layout.addWidget(_h_separator())
-    layout.addWidget(_spacer(4))
+    _section_gap(layout)
 
     # ══════════════════════════════════════════════════════════════
     # ⚫ 黑方
     # ══════════════════════════════════════════════════════════════
     # ⚫ 黑方（标题色与思考日志黑方一致 #61afef）
     layout.addWidget(_section_label("⚫ 黑方（后手）", "#61afef"))
-    parent.model2_combo = QComboBox()
-    parent.model2_combo.setMinimumHeight(26)
-    parent.model2_combo.setStyleSheet(_combo_style())
-    parent.model2_combo.currentIndexChanged.connect(parent.on_model2_changed)
-    layout.addWidget(parent.model2_combo)
+    _build_model_combo(parent, layout, 'model2_combo')
 
     layout.addWidget(_spacer(2))
 
-    black_engine = QGroupBox("黑方引擎")
-    black_engine.setStyleSheet(_group_style("#61afef"))
-    black_layout = QGridLayout(black_engine)
-    black_layout.setVerticalSpacing(5)
-    black_layout.setHorizontalSpacing(6)
-    black_layout.setContentsMargins(8, 10, 8, 6)
+    layout.addWidget(_build_engine_group(
+        parent, 'black', '#61afef', '#61afef'))
 
-    blbl = QLabel("模式:")
-    blbl.setStyleSheet("color: #61afef; font-size: 13px;")
-    black_layout.addWidget(blbl, 0, 0)
-    parent.black_ai_mode_combo = QComboBox()
-    parent.black_ai_mode_combo.addItem("AI + 搜索", "hybrid")
-    parent.black_ai_mode_combo.addItem("仅搜索", "search_only")
-    parent.black_ai_mode_combo.addItem("仅 AI", "llm_only")
-    parent.black_ai_mode_combo.setCurrentIndex(0)
-    parent.black_ai_mode_combo.setMinimumHeight(26)
-    parent.black_ai_mode_combo.setStyleSheet(_combo_style())
-    parent.black_ai_mode_combo.currentIndexChanged.connect(parent.on_black_ai_mode_changed)
-    black_layout.addWidget(parent.black_ai_mode_combo, 0, 1)
-
-    bdlbl = QLabel("深度:")
-    bdlbl.setStyleSheet("color: #61afef; font-size: 13px;")
-    black_layout.addWidget(bdlbl, 1, 0)
-    parent.black_search_depth_spin = QSpinBox()
-    parent.black_search_depth_spin.setRange(1, SEARCH_MAX_DEPTH)
-    parent.black_search_depth_spin.setMinimumHeight(26)
-    parent.black_search_depth_spin.setStyleSheet(_spinbox_style())
-    parent.black_search_depth_spin.setToolTip(f"黑方搜索强度 1~{SEARCH_MAX_DEPTH}")
-    parent.black_search_depth_spin.valueChanged.connect(parent.on_black_search_depth_changed)
-    parent.black_search_depth_spin.setValue(DEFAULT_SEARCH_DEPTH)
-    black_layout.addWidget(parent.black_search_depth_spin, 1, 1)
-
-    parent.black_opening_book_check = QCheckBox("开局库")
-    parent.black_opening_book_check.setChecked(True)
-    parent.black_opening_book_check.setStyleSheet(_check_style())
-    parent.black_opening_book_check.stateChanged.connect(parent.on_black_opening_book_changed)
-    black_layout.addWidget(parent.black_opening_book_check, 1, 2)
-
-    layout.addWidget(black_engine)
-
-    layout.addWidget(_spacer(6))
-    layout.addWidget(_h_separator())
-    layout.addWidget(_spacer(4))
+    _section_gap(layout, 6)
 
     # ══════════════════════════════════════════════════════════════
     # AI 控制
@@ -318,7 +300,7 @@ def setup_left_expanded(parent) -> None:
 
     parent.start_btn = QPushButton("▶  开始对弈")
     parent.start_btn.setMinimumHeight(30)
-    parent.start_btn.setStyleSheet(_btn_primary_style())
+    parent.start_btn.setStyleSheet(BTN_PRIMARY_STYLE)
     # clicked(bool) 会给槽传一个多余参数；用 lambda 屏蔽，避免未来
     # start_game 加参时因签名不匹配直接 TypeError
     parent.start_btn.clicked.connect(
@@ -328,22 +310,20 @@ def setup_left_expanded(parent) -> None:
     parent.pause_btn = QPushButton("⏸  暂停")
     parent.pause_btn.setMinimumHeight(28)
     parent.pause_btn.setEnabled(False)
-    parent.pause_btn.setStyleSheet(_btn_default_style())
+    parent.pause_btn.setStyleSheet(BTN_DEFAULT_STYLE)
     parent.pause_btn.clicked.connect(parent._on_pause_clicked)
     btn_layout.addWidget(parent.pause_btn)
 
     parent.reset_btn = QPushButton("⏹  停止游戏")
     parent.reset_btn.setMinimumHeight(28)
     parent.reset_btn.setEnabled(False)
-    parent.reset_btn.setStyleSheet(_btn_danger_style())
+    parent.reset_btn.setStyleSheet(BTN_DANGER_STYLE)
     parent.reset_btn.clicked.connect(parent._on_reset_clicked)
     btn_layout.addWidget(parent.reset_btn)
 
     layout.addLayout(btn_layout)
 
-    layout.addWidget(_spacer(6))
-    layout.addWidget(_h_separator())
-    layout.addWidget(_spacer(4))
+    _section_gap(layout, 6)
 
     # ══════════════════════════════════════════════════════════════
     # 游戏状态

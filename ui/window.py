@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import (
 from domain.game import ChineseChessGame
 from domain.evaluation import compute_material
 from domain.prompts import HUMAN_MODEL
-from domain.constants import format_move
 from services.logging import LogManager
 from services.models import ModelManager
 from ai.manager import AIManager
@@ -19,7 +18,7 @@ from app.controller import GameController
 from ui.board import BoardWidget
 from ui.theme import (
     WINDOW_WIDTH, WINDOW_HEIGHT, MIDDLE_PANEL_MIN_WIDTH,
-    SPLITTER_SIZES, DARK_THEME_QSS,
+    SPLITTER_SIZES, DARK_THEME_QSS, PANEL_BG_STYLE,
 )
 from ui.panel import setup_left_expanded
 
@@ -55,6 +54,17 @@ class MainWindow(QMainWindow):
 
     # ── UI 构建 ──
 
+    def _make_status_label(self, text: str, color: str, top_pad: int,
+                           bottom_margin: int) -> QLabel:
+        """构造上下状态标签（仅颜色与边距不同）。"""
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setFrameShape(QFrame.Shape.Box)
+        label.setStyleSheet(
+            f"color: {color}; padding: 12px 5px; font-size: 16px; font-weight: bold;")
+        label.setContentsMargins(0, top_pad, 0, bottom_margin)
+        return label
+
     def setup_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
@@ -89,18 +99,14 @@ class MainWindow(QMainWindow):
 
         # ── 中间面板（棋盘） ──
         self.middle_panel = QWidget()
-        self.middle_panel.setStyleSheet("background-color: #1a1a1e;")
+        self.middle_panel.setStyleSheet(PANEL_BG_STYLE)
         self.middle_panel.setMinimumWidth(MIDDLE_PANEL_MIN_WIDTH)
         middle_layout = QVBoxLayout(self.middle_panel)
         middle_layout.setSpacing(0)
 
-        self.black_status = QLabel("⚫ 黑方 等待...")
-        self.black_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.black_status.setFrameShape(QFrame.Shape.Box)
         # 颜色与思考日志黑方一致（#61afef）
-        self.black_status.setStyleSheet(
-            "color: #61afef; padding: 12px 5px; font-size: 16px; font-weight: bold;")
-        self.black_status.setContentsMargins(0, 50, 0, 0)
+        self.black_status = self._make_status_label(
+            "⚫ 黑方 等待...", "#61afef", 50, 0)
         middle_layout.addWidget(self.black_status)
 
         self.board_widget = BoardWidget()
@@ -108,12 +114,8 @@ class MainWindow(QMainWindow):
         self.board_widget.move_made.connect(self.game_controller.on_human_move)
         middle_layout.addWidget(self.board_widget, 1, Qt.AlignmentFlag.AlignCenter)
 
-        self.red_status = QLabel("🔴 红方 等待...")
-        self.red_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.red_status.setFrameShape(QFrame.Shape.Box)
-        self.red_status.setStyleSheet(
-            "color: #b74c3c; padding: 12px 5px; font-size: 16px; font-weight: bold;")
-        self.red_status.setContentsMargins(0, 0, 0, 27)
+        self.red_status = self._make_status_label(
+            "🔴 红方 等待...", "#b74c3c", 0, 27)
         middle_layout.addWidget(self.red_status)
 
         middle_layout.addSpacing(10)
@@ -132,7 +134,7 @@ class MainWindow(QMainWindow):
 
         # ── 右侧面板（日志） ──
         self.right_panel = QWidget()
-        self.right_panel.setStyleSheet("background-color: #1a1a1e;")
+        self.right_panel.setStyleSheet(PANEL_BG_STYLE)
         right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(5, 0, 5, 15)
 
@@ -183,32 +185,28 @@ class MainWindow(QMainWindow):
 
     # ── 模型加载 ──
 
+    def _populate_combo(self, combo, models) -> None:
+        """填充模型下拉框：人类选项 + 模型列表。"""
+        combo.clear()
+        combo.addItem("人类", 'human')
+        for m in models:
+            combo.addItem(m.name, m.id)
+
     def load_models(self) -> None:
         def on_error(msg):
             self.log_manager.log(msg, 'WARNING')
 
         self.model_manager.load(on_error=on_error)
 
-        human_label = "人类"
-        self.model1_combo.clear()
-        self.model1_combo.addItem(human_label, 'human')
-        for m in self.model_manager.player1_models:
-            self.model1_combo.addItem(m.name, m.id)
-
-        self.model2_combo.clear()
-        self.model2_combo.addItem(human_label, 'human')
-        for m in self.model_manager.player2_models:
-            self.model2_combo.addItem(m.name, m.id)
+        self._populate_combo(self.model1_combo, self.model_manager.player1_models)
+        self._populate_combo(self.model2_combo, self.model_manager.player2_models)
 
         if self.model1_combo.count() > 1:
             self.model1_combo.setCurrentIndex(1)
         if self.model2_combo.count() > 1:
             self.model2_combo.setCurrentIndex(1)
 
-    def on_model1_changed(self, idx: int) -> None:
-        self.update_start_button()
-
-    def on_model2_changed(self, idx: int) -> None:
+    def _on_model_changed(self, idx: int) -> None:
         self.update_start_button()
 
     def update_start_button(self) -> None:
@@ -216,37 +214,21 @@ class MainWindow(QMainWindow):
                    self.model2_combo.currentData() is not None)
         self.start_btn.setEnabled(enabled)
 
-    # ── 红方 AI 引擎控制 ──
+    # ── AI 引擎控制（红/黑共用槽，side 区分） ──
 
-    def on_red_ai_mode_changed(self, idx: int) -> None:
-        mode = self.red_ai_mode_combo.currentData()
+    def _on_ai_mode_changed(self, _idx: int, side: str) -> None:
+        mode = getattr(self, f'{side}_ai_mode_combo').currentData()
         if mode:
-            self.game_controller.red_ai_mode = mode
+            setattr(self.game_controller, f'{side}_ai_mode', mode)
             search_enabled = mode != 'llm_only'
-            self.red_search_depth_spin.setEnabled(search_enabled)
+            getattr(self, f'{side}_search_depth_spin').setEnabled(search_enabled)
 
-    def on_red_search_depth_changed(self, value: int) -> None:
-        self.game_controller.red_search_depth = value
+    def _on_search_depth_changed(self, value: int, side: str) -> None:
+        setattr(self.game_controller, f'{side}_search_depth', value)
 
-    def on_red_opening_book_changed(self, state: int) -> None:
-        self.game_controller.red_use_opening_book = (
-            state == Qt.CheckState.Checked.value)
-
-    # ── 黑方 AI 引擎控制 ──
-
-    def on_black_ai_mode_changed(self, idx: int) -> None:
-        mode = self.black_ai_mode_combo.currentData()
-        if mode:
-            self.game_controller.black_ai_mode = mode
-            search_enabled = mode != 'llm_only'
-            self.black_search_depth_spin.setEnabled(search_enabled)
-
-    def on_black_search_depth_changed(self, value: int) -> None:
-        self.game_controller.black_search_depth = value
-
-    def on_black_opening_book_changed(self, state: int) -> None:
-        self.game_controller.black_use_opening_book = (
-            state == Qt.CheckState.Checked.value)
+    def _on_opening_book_changed(self, state: int, side: str) -> None:
+        setattr(self.game_controller, f'{side}_use_opening_book',
+                state == Qt.CheckState.Checked.value)
 
     # ── 按钮事件 ──
 
@@ -255,20 +237,6 @@ class MainWindow(QMainWindow):
 
     def _on_reset_clicked(self) -> None:
         self.game_controller.reset_game()
-
-    # ── 计时器方法（委托给 Controller） ──
-
-    def start_thinking_timer(self, player: int) -> None:
-        self.game_controller.start_thinking_timer(player)
-
-    def stop_thinking_timer(self) -> None:
-        self.game_controller.stop_thinking_timer()
-
-    def pause_thinking_timer(self) -> None:
-        self.game_controller.pause_thinking_timer()
-
-    def resume_thinking_timer(self) -> None:
-        self.game_controller.resume_thinking_timer()
 
     # ── UI 更新方法 ──
 
@@ -303,9 +271,9 @@ class MainWindow(QMainWindow):
         # 最近 8 手拼成纯文本一次 setText（无走子时清空），不再反复增删 QLabel
         parts = []
         for move in self.game.moves[-8:]:
-            fr, fc, tr, tc, player = move[0:5]
+            player = move[4]
             parts.append(
-                f"{'🔴' if player == 1 else '⚫'} {format_move(fr, fc, tr, tc)}")
+                f"{'🔴' if player == 1 else '⚫'} {self.game.move_notation(move)}")
         self.history_moves_label.setText('  '.join(parts))
 
     def update_ai_score(self) -> None:
@@ -327,6 +295,11 @@ class MainWindow(QMainWindow):
         self.ai_arbitration_count_label.setText(
             f"仲裁次数: {self.game_controller.arbitration_count}")
 
+    def _set_status_pair(self, red_text: str, black_text: str) -> None:
+        """成对更新红/黑状态标签。"""
+        self.red_status.setText(red_text)
+        self.black_status.setText(black_text)
+
     def update_player_status(self) -> None:
         g = self.game
         gc = self.game_controller
@@ -337,38 +310,30 @@ class MainWindow(QMainWindow):
 
         if g.game_over:
             if g.winner == 1:
-                self.red_status.setText("🔴 红方 🏆 获胜！")
-                self.black_status.setText("⚫ 黑方")
+                self._set_status_pair("🔴 红方 🏆 获胜！", "⚫ 黑方")
             elif g.winner == 2:
-                self.black_status.setText("⚫ 黑方 🏆 获胜！")
-                self.red_status.setText("🔴 红方")
+                self._set_status_pair("🔴 红方", "⚫ 黑方 🏆 获胜！")
             else:
-                self.red_status.setText("🔴 红方 平局")
-                self.black_status.setText("⚫ 黑方 平局")
+                self._set_status_pair("🔴 红方 平局", "⚫ 黑方 平局")
             return
 
         if busy and not is_human:
             if current == 1:
-                self.red_status.setText("🔴 红方 思考中...")
-                self.black_status.setText("⚫ 黑方 等待...")
+                self._set_status_pair("🔴 红方 思考中...", "⚫ 黑方 等待...")
             else:
-                self.black_status.setText("⚫ 黑方 思考中...")
-                self.red_status.setText("🔴 红方 等待...")
+                self._set_status_pair("🔴 红方 等待...", "⚫ 黑方 思考中...")
         elif is_human and not busy:
             if current == 1:
-                self.red_status.setText("🔴 红方 请走子")
-                self.black_status.setText("⚫ 黑方 等待...")
+                self._set_status_pair("🔴 红方 请走子", "⚫ 黑方 等待...")
             else:
-                self.black_status.setText("⚫ 黑方 请走子")
-                self.red_status.setText("🔴 红方 等待...")
+                self._set_status_pair("🔴 红方 等待...", "⚫ 黑方 请走子")
         else:
-            self.red_status.setText(
-                f"🔴 红方 {gc.last_red_raw if gc.last_red_raw else '等待...'}")
-            self.black_status.setText(
+            self._set_status_pair(
+                f"🔴 红方 {gc.last_red_raw if gc.last_red_raw else '等待...'}",
                 f"⚫ 黑方 {gc.last_black_raw if gc.last_black_raw else '等待...'}")
 
     def closeEvent(self, event) -> None:
-        self.game_controller.stop_thinking_timer()
-        # GameController.shutdown() 内部已调用 ai_manager.shutdown()，此处不再重复
+        # GameController.shutdown() 内部已调用 stop_thinking_timer() 与
+        # ai_manager.shutdown()，此处不再重复
         self.game_controller.shutdown()
         event.accept()

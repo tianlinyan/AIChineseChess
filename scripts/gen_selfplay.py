@@ -39,24 +39,14 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+from domain.egtb_local import _rotate_board as rotate180_swap
 from domain.game import ChineseChessGame
 from domain.pikafish import PikafishEngine
 from domain.nnue import NnueNet
-from domain.fen import board_to_fen
+from domain.fen import board_to_fen, fen_to_board
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                          'data', 'selfplay_data.npz')
-
-
-def rotate180_swap(board: list) -> list:
-    """180° 旋转 + 大小写互换（红黑角色对调）——与 egtb_local 同款镜像。"""
-    rot = [['.'] * 9 for _ in range(10)]
-    for r in range(10):
-        for c in range(9):
-            p = board[r][c]
-            if p != '.':
-                rot[9 - r][8 - c] = p.swapcase()
-    return rot
 
 
 def play_game(pf, rng: random.Random, movetime_ms: int,
@@ -165,7 +155,7 @@ def main():
     if args.mirror:
         x2, y2, f2, r2, g2 = [], [], [], [], []
         for i, fen in enumerate(fens):
-            board, _player = _fen_to_board(fen)
+            board, _player = fen_to_board(fen)
             mirrored = rotate180_swap(board)
             x2.append(NnueNet.extract_features(mirrored))
             y2.append(-ys[i])
@@ -209,7 +199,7 @@ def main():
         # 镜像对称性：抽前 10 个原局重查 eval，与镜像标签符号相反
         bad = 0
         for i in range(min(10, n_orig)):
-            board, player = _fen_to_board(fens[i])
+            board, player = fen_to_board(fens[i])
             s_orig = pf.evaluate_fen(board, player)
             if s_orig is None:
                 continue
@@ -224,11 +214,10 @@ def main():
               f'{10 - bad}/10 通过')
     # 标签一致性：抽样 5 个重查 evaluate_fen
     if args.label == 'eval':
-        import random as _r
-        _r.seed(1)
+        random.seed(1)
         ok = 0
-        for i in _r.sample(range(n_orig), min(5, n_orig)):
-            board, player = _fen_to_board(fens[i])
+        for i in random.sample(range(n_orig), min(5, n_orig)):
+            board, player = fen_to_board(fens[i])
             s = pf.evaluate_fen(board, player)
             if s is not None and abs(s / 100.0 - ys[i]) < 1e-6:
                 ok += 1
@@ -238,24 +227,6 @@ def main():
     pf.close()
     print('完成。数据可直接供阶段 3 训练使用 '
           '（train_nnue.py 扩展 --data 加载）。')
-
-
-def _fen_to_board(fen: str):
-    """解析 FEN → (board, player)。行宽/行数不合法直接报错（防截断 FEN
-    静默产出错位棋盘）。"""
-    rows_part, side = fen.split(' ')
-    board = []
-    for row_str in rows_part.split('/'):
-        row = []
-        for ch in row_str:
-            if ch.isdigit():
-                row.extend(['.'] * int(ch))
-            else:
-                row.append(ch)
-        assert len(row) == 9, f'FEN 行宽错误: {row_str!r}'
-        board.append(row)
-    assert len(board) == 10, f'FEN 行数错误: {len(board)}'
-    return board, (1 if side == 'w' else 2)
 
 
 if __name__ == '__main__':

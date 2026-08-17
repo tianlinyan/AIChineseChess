@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from domain.game import ChineseChessGame
+from domain.fen import fen_to_board as board_from_fen, board_to_fen
 from domain.search import SearchEngine
 from domain.pikafish import PikafishEngine
 from domain.nnue import get_nnue
@@ -66,23 +67,6 @@ FIXED_POSITIONS = [
     ("2bakab2/9/9/4P4/9/9/9/R8/9/4K4 w", "車+过河兵vs士象全(必胜)"),
     ("2bakab2/9/9/9/9/4P4/9/R8/9/4K4 w", "車+未过河兵vs士象全(官和)"),
 ]
-
-
-def board_from_fen(fen: str):
-    """解析 'rows/rows... side' FEN → (board, player)。"""
-    rows_part, side = fen.split(' ')
-    board = []
-    for row_str in rows_part.split('/'):
-        row = []
-        for ch in row_str:
-            if ch.isdigit():
-                row.extend(['.'] * int(ch))
-            else:
-                row.append(ch)
-        assert len(row) == 9, f'FEN 行宽错误: {row_str}'
-        board.append(row)
-    assert len(board) == 10
-    return board, (1 if side == 'w' else 2)
 
 
 def gen_random_positions(rng: random.Random, n: int) -> list:
@@ -204,7 +188,6 @@ def run_selfplay(pf, depth: int, games: int, max_plies: int,
 
 
 def board_to_fen_short(g) -> str:
-    from domain.fen import board_to_fen
     return board_to_fen(g.board, g.current_player)[:50]
 
 
@@ -276,7 +259,6 @@ def main():
                    key=lambda t: abs(t[1] - t[3]), reverse=True)[:5]
     print('       分歧最大的 5 个局面（Pikafish vs 手工评估）：')
     for (board, player), s_pf, s_nn, s_hand in worst:
-        from domain.fen import board_to_fen
         fen = board_to_fen(board, player)
         print(f'         fen={fen[:40]}… pf={s_pf:+.0f} '
               f'nnue={s_nn:+.0f} hand={s_hand:+.0f}')

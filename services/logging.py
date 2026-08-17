@@ -11,7 +11,7 @@ LOG_COLORS = {
     'black': '#61afef',     # 黑方日志
     'ERROR': '#e06c75',
     'WARNING': '#d19a66',
-    'INFO': '#abb2bf',
+    # 'INFO' 与 'DEFAULT' 同色，冗余键已删（查找链回退 DEFAULT 仍同色）
     'DEFAULT': '#abb2bf',
 }
 
@@ -44,7 +44,10 @@ class LogManager:
         # 时间戳 span 是程序自己生成的 HTML，不受影响。
         # 换行转 <br>：insertHtml 会把 \n 折叠为空格，导致 LLM 多行思考
         # 文本变成一长行；在 escape 之后替换，不引入 HTML 注入面。
-        escaped = escape(message).replace('\n', '<br>')
+        # 先归一化 CRLF/CR → LF（LLM/引擎输出可能带 \r\n），否则 \r
+        # 会原样进入 HTML 造成渲染异常。
+        normalized = message.replace('\r\n', '\n').replace('\r', '\n')
+        escaped = escape(normalized).replace('\n', '<br>')
         html = f'<span style="color:#888">{timestamp}</span> '
         html += f'<span style="color:{color}">{escaped}</span>'
         # 用光标副本在文末插入，不移动视口；insertBlock 保证每条日志独占一个块，

@@ -11,9 +11,7 @@ from PyQt6.QtCore import QByteArray, QBuffer, QSize
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import Qt
 
-from domain.constants import (
-    VISION_IMAGE_QUALITY, VISION_IMAGE_MAX_WIDTH, VISION_IMAGE_SCALE,
-)
+from domain.constants import VISION_IMAGE_QUALITY
 from domain.game import ChineseChessGame
 from ui.board import BoardWidget
 

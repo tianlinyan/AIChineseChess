@@ -11,7 +11,6 @@ class ModelInfo:
     model: str = ''
     api_key: str = ''
     tools_choice: str = 'auto'
-    system_prompt: str = ''
     options: dict = None
 
     def __post_init__(self):
@@ -28,6 +27,5 @@ class ModelInfo:
             model=data.get('model', ''),
             api_key=data.get('api_key', ''),
             tools_choice=data.get('tools_choice', 'auto'),
-            system_prompt=data.get('system_prompt', ''),
             options=dict(data.get('options') or {}),
         )

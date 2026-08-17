@@ -41,6 +41,7 @@ Usage:
 
 import os
 import struct
+import threading
 import time
 import zlib
 from array import array
@@ -319,26 +320,25 @@ class DtmTable:
                 if side:
                     offsets[sid] = len(edges)
                 mover = side + 1
-                moves = g.get_all_legal_moves(mover)
-                if any(board[tr][tc].upper() == 'K'
-                       for _, _, tr, tc in moves):
-                    # 对方已处于将军 = 不可能局面（对局中不可能轮到走子方
-                    # 行棋）。不进种子、不建边：防止把吃王捏造成 W_1 并
-                    # 污染合法状态；probe 返回 None。
-                    #
-                    # ⚠️ 语义依赖警示（F1 修复后）：此检测依赖
-                    # get_all_legal_moves 返回"吃对方将"的走法，而
-                    # game.py 的 _append_if_legal 已按审查修复拦截吃将
-                    # 走法（F1），因此现代码下该分支**不再触发**。
-                    # 磁盘 .dtm 表由 F1 之前的旧代码生成，恰好把此类
-                    # 不可能局面正确标为 254（probe 返回 None）；若用
-                    # 现代码重新生成，这些状态将不再标 254 而获得伪值
-                    # ——它们不可达（合法走子永远不会产生"轮到己方时
-                    # 对方已在将军"的局面），对合法对局无害，但生成
-                    # 结果会与现表不同。重新生成前请恢复此依赖（在
-                    # 此显式检测"对方将处于被攻击状态"）。
+                # 不可能局面检测（F1 修复后恢复显式实现）：轮到 mover
+                # 行棋时，若对方将已处于 mover 任意子的攻击之下（将军），
+                # 说明对方上一步没有应将——对局中不可能出现此状态。
+                # 旧实现依赖 get_all_legal_moves 返回"吃对方将"的走法来
+                # 检测（F1 前 game.py 的 _append_if_legal 不拦截吃将）；
+                # F1 修复拦截吃将后该依赖失效（分支变死代码）。现改用
+                # game.is_in_check 独立检测攻击关系。语义上宽于旧实现：
+                # 旧实现只标记"存在合法吃将走法"的状态，漏标"对方将被
+                # 攻击但吃将后己方不安全"的不可能局面；is_in_check 覆盖
+                # 全部"对方将被攻击"状态——均为对局不可达，不会误标
+                # 任何可达局面，且与旧表在可达局面上的值完全一致。
+                # 将帅对面已在 _kings_facing 层面（上方）整体排除，
+                # is_in_check 不含照面检测正与此对应。重新生成的表在
+                # 不可能局面槽位上比旧表标记更完整（仍是 254，probe
+                # 返回 None），可达局面语义与现网表一致。
+                if g.is_in_check(3 - mover):
                     illegal_state[sid] = 1
                     continue
+                moves = g.get_all_legal_moves(mover)
                 if not moves:
                     # 将死 或 困毙：无合法走法 = 输棋（与对局层语义一致）
                     dtm[sid] = 0
@@ -538,7 +538,13 @@ class DtmTable:
         canon_board, canon_mover, _, sig = frame
         table = self.sub_tables.get(sig)
         if table is None:
-            return ('draw', 0)           # 未知组合：保守视为和棋
+            # 生成期依赖缺失 = 生成错误：静默判和会把所有吃子胜线
+            # 误标为和棋并可能被 save() 持久化成"权威"错表。生产路径
+            # （generate_all_4piece）有依赖序硬校验兜底，此处直接报错
+            # 把问题暴露在生成时而不是留到查询时。
+            raise ValueError(
+                f'{self.sig}: 吃子解析需要子表 {sig}，但 sub_tables 未提供'
+                f'（{sorted(self.sub_tables)}）')
         res = table.probe(canon_board, canon_mover)
         if res is None or res[0] == DTM_DRAW:
             return ('draw', 0)
@@ -618,7 +624,7 @@ class DtmTable:
         return True
 
 
-# 全部表签名（_canonicalize 的方向选择用）
+# 全部表签名（_pick_frame 的方向选择用）
 _TABLE_SIGS = frozenset(DtmTable(p).sig for p in TABLE_SETS)
 
 
@@ -683,15 +689,10 @@ def _pick_frame(board: List[List[str]], mover: int,
     return board, mover, False, sig
 
 
-def _canonicalize(board: List[List[str]],
-                  current_player: int) -> Optional[Tuple[List[List[str]], int, bool, str]]:
-    """规范化：返回 (canon_board, canon_mover, rotated, sig) 或 None（双方无攻击子力）。"""
-    return _pick_frame(board, current_player, _TABLE_SIGS)
-
-
 # ── 全局缓存 ──
 _tables: Dict[str, DtmTable] = {}
 _missing_sigs: set = set()       # 已确认磁盘无文件的签名（负缓存，防每查询打盘）
+_tables_lock = threading.Lock()  # 保护 _tables/_missing_sigs 的加载段（并发查询）
 
 
 def probe_local(board: List[List[str]], piece_count: int,
@@ -712,7 +713,8 @@ def probe_local(board: List[List[str]], piece_count: int,
     if piece_count > 4:
         return None
 
-    canon = _canonicalize(board, current_player)
+    # 规范化：选红方为攻方的规范帧（_canonicalize 已内联，单调用点）
+    canon = _pick_frame(board, current_player, _TABLE_SIGS)
     if canon is None:
         return None
     canon_board, canon_mover, rotated, sig = canon
@@ -721,13 +723,19 @@ def probe_local(board: List[List[str]], piece_count: int,
     if table is None:
         if sig not in _TABLE_SIGS or sig in _missing_sigs:
             return None                # 无此表 / 负缓存：避免每次查询都打盘
-        filepath = _dtm_filepath(sig)
-        t = DtmTable.from_sig(sig)
-        if not t.load(filepath):
-            _missing_sigs.add(sig)
-            return None
-        _tables[sig] = t
-        table = t
+        # 加载段加锁 + 双重检查：搜索/工具线程可能并发查询同一签名
+        with _tables_lock:
+            table = _tables.get(sig)
+            if table is None and sig not in _missing_sigs:
+                filepath = _dtm_filepath(sig)
+                t = DtmTable.from_sig(sig)
+                if not t.load(filepath):
+                    _missing_sigs.add(sig)
+                    return None
+                _tables[sig] = t
+                table = t
+    if table is None:
+        return None
 
     res = table.probe(canon_board, canon_mover)
     if res is None:
@@ -736,7 +744,7 @@ def probe_local(board: List[List[str]], piece_count: int,
     if d == DTM_DRAW:
         return (0.0, DTM_DRAW)
     loser = 3 - loser_canon if rotated else loser_canon
-    score = 99999 - d * 10       # 与 search.JIANGSHA_SCORE / egtb._dtm_to_score 一致
+    score = 99999 - d * 10       # 与 search.JIANGSHA_SCORE 一致（DTM 折算）
     if current_player == loser:
         score = -score
     return (float(score), d)
@@ -807,6 +815,8 @@ def generate_all_4piece(force: bool = False, only: Optional[str] = None) -> None
             t.save(filepath)
             print(f'  保存: {filepath}')
         _tables[t.sig] = t
+        # 表已可用：清掉同进程内的负缓存，后续查询直接命中
+        _missing_sigs.discard(t.sig)
         if only is not None:
             found_target = True
             break                  # --only：目标表之后不再处理

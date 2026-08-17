@@ -181,13 +181,12 @@ def test_mcts_real_search():
 
 
 def test_egtb_local():
-    # 显式 allow_cloud=False：冒烟测试不得隐式依赖网络
-    # （当前用例均走本地分支；一旦启发式改动漏到云查询，测试会变 flaky）
+    # 残局库查询均为本地实现（云路径已移除），无网络依赖
     # 双方仅将 → 和棋
     board = empty_board()
     board[0][4] = 'k'
     board[9][4] = 'K'
-    res = egtb.probe(board, 1, 2, allow_cloud=False)
+    res = egtb.probe(board, 1, 2)
     check('EGTB 双将=和', res == (0.0, 0), f'实际 {res}')
 
     # 单車 vs 孤将 → 必胜（大分）（車在 4 路隔开双将，合法局面）
@@ -195,7 +194,7 @@ def test_egtb_local():
     board2[0][4] = 'k'
     board2[9][4] = 'K'
     board2[5][4] = 'R'
-    res2 = egtb.probe(board2, 1, 3, allow_cloud=False)
+    res2 = egtb.probe(board2, 1, 3)
     check('EGTB 单車vs孤将=胜', res2 is not None and res2[0] > 50000, f'实际 {res2}')
 
     # 单馬 vs 孤将 → 单马必胜孤将（黑将移出 4 路避免照面）
@@ -203,7 +202,7 @@ def test_egtb_local():
     board3[0][3] = 'k'
     board3[9][4] = 'K'
     board3[5][5] = 'N'
-    res3 = egtb.probe(board3, 1, 3, allow_cloud=False)
+    res3 = egtb.probe(board3, 1, 3)
     check('EGTB 单馬vs孤将=胜', res3 is not None and res3[0] > 1000, f'实际 {res3}')
 
     # 单車 vs 士象全 → 官和（修复后不得判 80000 胜）
@@ -215,7 +214,7 @@ def test_egtb_local():
     board4[0][6] = 'b'
     board4[9][4] = 'K'
     board4[5][5] = 'R'
-    res4 = egtb.probe(board4, 1, 7, allow_cloud=False)
+    res4 = egtb.probe(board4, 1, 7)
     check('EGTB 单車vs士象全≠必胜',
           res4 is None or res4[0] < 50000, f'实际 {res4}')
 
@@ -225,7 +224,7 @@ def test_egtb_local():
     board5[0][3] = 'k'
     board5[9][4] = 'K'
     board5[4][4] = 'P'   # 红卒过河（r<=4）未到底
-    res5 = egtb.probe(board5, 1, 3, allow_cloud=False)
+    res5 = egtb.probe(board5, 1, 3)
     check('EGTB 过河卒vs孤将=胜', res5 is not None and res5[0] > 1000,
           f'实际 {res5}')
 
@@ -235,7 +234,7 @@ def test_egtb_local():
     board6[0][3] = 'a'
     board6[9][4] = 'K'
     board6[4][4] = 'P'
-    res6 = egtb.probe(board6, 1, 4, allow_cloud=False)
+    res6 = egtb.probe(board6, 1, 4)
     check('EGTB 过河卒vs单士=和', res6 is not None and res6[0] == 0.0,
           f'实际 {res6}')
 
@@ -244,7 +243,7 @@ def test_egtb_local():
     board7[0][4] = 'k'
     board7[9][3] = 'K'   # 双将不同列，避免白脸将
     board7[0][0] = 'P'   # 红卒沉底（r==0）
-    res7 = egtb.probe(board7, 1, 3, allow_cloud=False)
+    res7 = egtb.probe(board7, 1, 3)
     check('EGTB 底线老兵vs孤将=和', res7 is not None and res7[0] == 0.0,
           f'实际 {res7}')
 

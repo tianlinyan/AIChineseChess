@@ -10,6 +10,17 @@ from domain.models import ModelInfo
 _ENV_VAR_PATTERN = re.compile(r'\$\{(\w+)\}')
 
 
+def app_base_dir() -> str:
+    """应用基目录：打包（frozen）为 exe 所在目录，否则为项目根目录。
+
+    供 main.py（.env 定位）与本模块（models.json 定位）共用；
+    与 models.json 保持一致，打包后 .env 也在 exe 旁。
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _resolve_env_vars(value: str, warned_vars: set = None) -> str:
     """将字符串中的 ${VAR_NAME} 替换为对应的环境变量值。
 
@@ -42,12 +53,7 @@ class ModelManager:
     def load(self, models_path: Optional[str] = None,
              on_error: Optional[Callable] = None) -> None:
         if models_path is None:
-            if getattr(sys, 'frozen', False):
-                base = os.path.dirname(sys.executable)
-            else:
-                base = os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__)))
-            models_path = os.path.join(base, 'models.json')
+            models_path = os.path.join(app_base_dir(), 'models.json')
 
         try:
             # utf-8-sig：兼容带 UTF-8 BOM 的 models.json（记事本保存会加 BOM，
@@ -73,21 +79,18 @@ class ModelManager:
                     m.api_key = _resolve_env_vars(m.api_key, missing_vars)
             if missing_vars:
                 var_list = "、".join(sorted(missing_vars))
-                print(
+                # 折叠为单条多行 print（6 条 stderr 输出合并），
+                # 行序与内容与原逐条 print 逐字节一致
+                lines = [
                     f"[提示] 未检测到环境变量: {var_list}",
-                    file=sys.stderr)
-                print(
-                    f"[提示] 请在终端中设置，例如:",
-                    file=sys.stderr)
+                    "[提示] 请在终端中设置，例如:",
+                ]
                 for v in sorted(missing_vars):
-                    print(f"       set {v}=你的密钥    (Windows CMD)", file=sys.stderr)
-                    print(f"       $env:{v}='你的密钥'  (PowerShell)", file=sys.stderr)
-                print(
-                    f"[提示] 或创建 .env 文件，使用 python-dotenv 自动加载。",
-                    file=sys.stderr)
-                print(
-                    f"[提示] 未设置将导致对应模型的 API 调用失败。",
-                    file=sys.stderr)
+                    lines.append(f"       set {v}=你的密钥    (Windows CMD)")
+                    lines.append(f"       $env:{v}='你的密钥'  (PowerShell)")
+                lines.append("[提示] 或创建 .env 文件，使用 python-dotenv 自动加载。")
+                lines.append("[提示] 未设置将导致对应模型的 API 调用失败。")
+                print("\n".join(lines), file=sys.stderr)
                 # 同步到 UI 日志：打包后无控制台，仅 stderr 用户不可见
                 if on_error:
                     on_error(

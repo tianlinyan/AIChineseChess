@@ -101,7 +101,7 @@ def main():
 
     for i in range(1, N + 1):
         g, player, prompt, system_prompt = build_prompt()
-        w = AIWorker(model, prompt, None, '黑方', version=0, cancel_version=0,
+        w = AIWorker(model, prompt, None, version=0, cancel_version=0,
                      system_prompt=system_prompt, tools=DEFAULT_TOOLS,
                      game=g, current_player=player)
         t0 = time.time()

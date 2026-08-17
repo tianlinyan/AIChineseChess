@@ -53,7 +53,6 @@ def generate_training_data(n_samples: int) -> tuple:
     print(f'正在生成 {n_samples} 个训练样本（手工评估教师模型）...')
     features_list = []
     scores_list = []
-    game = ChineseChessGame()
     batch_size = 500
 
     for i in range(n_samples):
@@ -63,18 +62,18 @@ def generate_training_data(n_samples: int) -> tuple:
 
         # 模式选择：20% 纯战术，30% 纯随机，50% 混合
         mode_r = np.random.random()
-        capture_bias = 0.0  # 吃子走法被选中的概率加权
+        capture_bias = 0.0  # 吃子走法被选中的概率加权（纯随机/混合初始即 0）
 
         if mode_r < 0.2:
             # 纯战术模式：优先走吃子/将军
             capture_bias = 0.8
             n_moves = np.random.randint(4, 30)
         elif mode_r < 0.5:
-            # 纯随机（原有行为）
-            capture_bias = 0.0
+            # 纯随机（原有行为，capture_bias 保持 0.0）
+            pass
         else:
-            # 混合：前 8 步随机，后面偏好战术
-            capture_bias = 0.0
+            # 混合：前 8 步随机，后面偏好战术（capture_bias 保持 0.0）
+            pass
 
         for step in range(n_moves):
             if step >= 8 and mode_r >= 0.5:
@@ -342,8 +341,6 @@ def main():
     else:
         t0 = time.time()
         X, y = generate_training_data(n_samples)
-        if X is None:
-            return 1
         print(f'数据生成耗时 {time.time() - t0:.0f}s')
 
         # 保存数据供后续复用

@@ -3,7 +3,9 @@
 import random as _random
 
 from domain.constants import (BOARD_WIDTH, BOARD_HEIGHT, PIECE_SYMBOLS,
-                              ENDGAME_PIECE_THRESHOLD, NATURAL_LIMIT_MOVES)
+                              ENDGAME_PIECE_THRESHOLD, NATURAL_LIMIT_MOVES,
+                              format_move, format_chinese_notation)
+from domain.evaluation import RED_PST
 
 # ── Zobrist 哈希表（固定种子，进程内可复现）──
 # 旧实现是 ord(piece)*31 + r*7 + c*13 的线性组合加权，不同棋子/格子
@@ -14,6 +16,91 @@ _z_rng = _random.Random(20260723)
 ZOBRIST_TABLE = {p: [_z_rng.getrandbits(64) for _ in range(90)]
                  for p in _PIECE_TYPES}
 _ZOBRIST_SIDE = {1: _z_rng.getrandbits(64), 2: _z_rng.getrandbits(64)}
+
+
+def _sync_move_caches(game, fr: int, fc: int, tr: int, tc: int,
+                      captured: str, undo: bool = False) -> None:
+    """走子/撤销时同步增量缓存（棋盘落子 + Zobrist + 将位 + PST + 子力计数）。
+
+    唯一实现：`game.move_piece`（前向）与 `SearchEngine._make_move` /
+    `_unmake_move`（前向/撤销）共用，避免三份逐行重复的缓存维护逻辑。
+    `undo=True` 时执行精确逆操作（恢复被吃子、PST 减新位置加回旧位置）；
+    Zobrist XOR 自逆，同式即可。NNUE 累加器由调用方（搜索路径）另行维护。
+    """
+    board = game.board
+    if undo:
+        piece = board[tr][tc]       # 撤销时移动子当前位于目标格
+        board[fr][fc] = piece
+        board[tr][tc] = captured
+    else:
+        piece = board[fr][fc]
+        board[tr][tc] = piece
+        board[fr][fc] = '.'
+
+    # 将移动时增量更新缓存
+    if piece == 'K':
+        game._king_pos[1] = (fr, fc) if undo else (tr, tc)
+    elif piece == 'k':
+        game._king_pos[2] = (fr, fc) if undo else (tr, tc)
+
+    # 增量维护 Zobrist 哈希（XOR 自逆，undo/redo 同式）
+    _zi_from = fr * game.size_cols + fc
+    _zi_to = tr * game.size_cols + tc
+    game._zobrist ^= (ZOBRIST_TABLE[piece][_zi_from]
+                      ^ ZOBRIST_TABLE[piece][_zi_to])
+    if captured != '.':
+        game._zobrist ^= ZOBRIST_TABLE[captured][_zi_to]
+
+    # ── 增量评估缓存维护 ──
+    # 移动子 PST：前向减旧加新；撤销减新加旧（镜像行对黑方）
+    _pu = piece.upper()
+    if _pu in RED_PST:
+        if undo:
+            _p_from_r, _p_from_c, _p_to_r, _p_to_c = tr, tc, fr, fc
+        else:
+            _p_from_r, _p_from_c, _p_to_r, _p_to_c = fr, fc, tr, tc
+        if piece.isupper():
+            game._red_pst_score -= RED_PST[_pu][_p_from_r][_p_from_c]
+            game._red_pst_score += RED_PST[_pu][_p_to_r][_p_to_c]
+        else:
+            game._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - _p_from_r][_p_from_c]
+            game._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - _p_to_r][_p_to_c]
+    if captured != '.':
+        if undo:
+            # 恢复被吃子（只增不减，不会产生 0 值键）
+            game._material_counts[captured] = (
+                game._material_counts.get(captured, 0) + 1)
+            if captured.isupper():
+                game._red_piece_count += 1
+            else:
+                game._black_piece_count += 1
+        else:
+            # 递减并清除 0 值键：与 _recompute_incremental（只含在场棋子）
+            # 保持结构一致。否则某类棋子被吃光后残留 {piece: 0} 键，
+            # test_incremental 的严格 dict 相等断言会偶发误报
+            # （0 计数不贡献任何评分，功能无差异，纯结构一致性）
+            _mc = game._material_counts.get(captured, 0) - 1
+            if _mc > 0:
+                game._material_counts[captured] = _mc
+            else:
+                game._material_counts.pop(captured, None)
+            if captured.isupper():
+                game._red_piece_count -= 1
+            else:
+                game._black_piece_count -= 1
+        _cu = captured.upper()
+        if _cu in RED_PST:
+            # 被吃子 PST：前向从目标格减去；撤销加回目标格
+            if captured.isupper():
+                if undo:
+                    game._red_pst_score += RED_PST[_cu][tr][tc]
+                else:
+                    game._red_pst_score -= RED_PST[_cu][tr][tc]
+            else:
+                if undo:
+                    game._black_pst_score += RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
+                else:
+                    game._black_pst_score -= RED_PST[_cu][BOARD_HEIGHT - 1 - tr][tc]
 
 
 class ChineseChessGame:
@@ -36,27 +123,7 @@ class ChineseChessGame:
     def __init__(self):
         self.size_rows = BOARD_HEIGHT
         self.size_cols = BOARD_WIDTH
-        self.board = [row[:] for row in self.STANDARD_BOARD]
-        self.current_player = 1          # 1 红方（先手），2 黑方（后手）
-        self.moves = []
-        self.game_over = False
-        self.winner = None     # None=进行中, 1=红胜, 2=黑胜, 0=和棋
-        self.last_move = None
-        self._position_history: list = []  # 走子历史哈希，用于着法重复检测
-        self._move_checks: list = []       # 并行记录：（走子方, 走后对方是否被将军），用于长将检测
-        self.total_moves_count = 0        # 总步数（自游戏开始计，reset 清零）
-        self.moves_since_capture = 0      # 自然限着计数（连续未吃子步数，120 步判和）
-        # 将位置缓存（O(1) 将军检测，move_piece 时增量更新）
-        self._king_pos = {1: (9, 4), 2: (0, 4)}
-        # Zobrist 哈希（move_piece / 搜索 make/unmake 增量维护）
-        self._zobrist = self._compute_zobrist()
-        # ── 增量评估缓存（搜索 make/unmake 增量维护，叶子节点直接读取跳过扫描）──
-        self._material_counts: dict = {}   # {piece_char: count}，红大写/黑小写
-        self._red_piece_count: int = 0
-        self._black_piece_count: int = 0
-        self._red_pst_score: float = 0.0   # 红方 PST 总分
-        self._black_pst_score: float = 0.0  # 黑方 PST 总分
-        self._recompute_incremental()       # 从初始棋盘填充
+        self.reset()
 
     def reset(self):
         self.board = [row[:] for row in self.STANDARD_BOARD]
@@ -86,11 +153,6 @@ class ChineseChessGame:
         g._recompute_incremental()  # 从快照棋盘重建增量缓存
         return g
 
-    @property
-    def king_pos(self) -> dict:
-        """双方将/帅位置缓存 {1: (row, col), 2: (row, col)}。"""
-        return self._king_pos
-
     def snapshot(self) -> 'ChineseChessGame':
         """创建独立棋盘快照（用于后台线程搜索/分析/提示）。"""
         return ChineseChessGame.from_snapshot(
@@ -98,9 +160,6 @@ class ChineseChessGame:
 
     def is_red(self, piece):
         return piece.isupper()
-
-    def is_black(self, piece):
-        return piece.islower()
 
     def get_piece_owner(self, piece):
         if piece == '.':
@@ -140,56 +199,16 @@ class ChineseChessGame:
             return {'success': False, 'message': '移动后己方将会被将军或形成将帅对面'}
 
         captured = target_piece
-        self.board[to_row][to_col] = piece
-        self.board[from_row][from_col] = '.'
-
-        # 增量维护 Zobrist 哈希
-        _zi_from = from_row * self.size_cols + from_col
-        _zi_to = to_row * self.size_cols + to_col
-        self._zobrist ^= (ZOBRIST_TABLE[piece][_zi_from]
-                          ^ ZOBRIST_TABLE[piece][_zi_to])
-        if captured != '.':
-            self._zobrist ^= ZOBRIST_TABLE[captured][_zi_to]
-
-        # 将移动时增量更新缓存
-        if piece == 'K':
-            self._king_pos[1] = (to_row, to_col)
-        elif piece == 'k':
-            self._king_pos[2] = (to_row, to_col)
-
-        # ── 增量评估缓存维护 ──
-        from domain.evaluation import RED_PST
-        _pu = piece.upper()
-        if _pu in RED_PST:
-            if piece.isupper():
-                self._red_pst_score -= RED_PST[_pu][from_row][from_col]
-                self._red_pst_score += RED_PST[_pu][to_row][to_col]
-            else:
-                self._black_pst_score -= RED_PST[_pu][BOARD_HEIGHT - 1 - from_row][from_col]
-                self._black_pst_score += RED_PST[_pu][BOARD_HEIGHT - 1 - to_row][to_col]
-        if captured != '.':
-            # 递减并清除 0 值键：与 _recompute_incremental（只含在场棋子）
-            # 保持结构一致。否则某类棋子被吃光后残留 {piece: 0} 键，
-            # test_incremental 的严格 dict 相等断言会偶发误报
-            # （0 计数不贡献任何评分，功能无差异，纯结构一致性）
-            _mc = self._material_counts.get(captured, 0) - 1
-            if _mc > 0:
-                self._material_counts[captured] = _mc
-            else:
-                self._material_counts.pop(captured, None)
-            if captured.isupper():
-                self._red_piece_count -= 1
-            else:
-                self._black_piece_count -= 1
-            _cu = captured.upper()
-            if _cu in RED_PST:
-                if captured.isupper():
-                    self._red_pst_score -= RED_PST[_cu][to_row][to_col]
-                else:
-                    self._black_pst_score -= RED_PST[_cu][BOARD_HEIGHT - 1 - to_row][to_col]
+        # 传统棋谱着法：必须在落子前（board 仍为走子前局面）计算，
+        # 前/后、中兵等消歧依赖该时刻的布子；随走子记录一起存储，
+        # 之后即使棋盘变化也能还原当时的记法。
+        notation = format_chinese_notation(
+            self.board, from_row, from_col, to_row, to_col)
+        _sync_move_caches(self, from_row, from_col, to_row, to_col, captured)
 
         self.last_move = (from_row, from_col, to_row, to_col, self.current_player)
-        self.moves.append((from_row, from_col, to_row, to_col, self.current_player, captured, piece))
+        self.moves.append((from_row, from_col, to_row, to_col,
+                           self.current_player, captured, piece, notation))
         self.total_moves_count += 1
         # 自然限着计数：吃子清零，未吃子累进（竞赛规则：120 步未吃子判和）
         self.moves_since_capture = (0 if captured != '.'
@@ -660,8 +679,20 @@ class ChineseChessGame:
             s += f"{r+1:2d} " + " ".join(self.board[r][c] for c in range(self.size_cols)) + "\n"
         return s
 
+    @staticmethod
+    def move_notation(move: tuple) -> str:
+        """从走子记录取传统棋谱着法（如 '炮二平五'）。
+
+        走子记录第 8 字段为 move_piece 落子前计算并存档的着法；
+        旧格式记录（不足 8 字段，理论上不存在）回退为坐标串。
+        """
+        if len(move) > 7 and move[7]:
+            return move[7]
+        fr, fc, tr, tc = move[:4]
+        return format_move(fr, fc, tr, tc)
+
     def format_move_history(self, max_items: int = 0):
-        """格式化走子历史，包含棋子名称、坐标、吃子标记。
+        """格式化走子历史（传统棋谱着法），含棋子名称、吃子标记。
 
         max_items > 0 时只保留最近 N 手（编号保持原始连续），
         前缀标注省略条数 —— 用于提示词中控制 token 成本。
@@ -676,14 +707,11 @@ class ChineseChessGame:
         lines = []
         if omitted:
             lines.append(f"…（前 {omitted} 手略）…")
-        for idx, (fr, fc, tr, tc, player, captured, piece) in enumerate(
-                moves, omitted + 1):
-            piece_name = PIECE_SYMBOLS.get(piece, piece)
-            from_coord = f"{chr(65 + fc)}{fr + 1}"
-            to_coord = f"{chr(65 + tc)}{tr + 1}"
+        for idx, move in enumerate(moves, omitted + 1):
+            fr, fc, tr, tc, player, captured, piece = move[0:7]
             player_name = '红方' if player == 1 else '黑方'
 
-            line = f"{idx}. {player_name} {piece_name} {from_coord}→{to_coord}"
+            line = f"{idx}. {player_name} {self.move_notation(move)}"
             # 标注吃子
             if captured != '.':
                 captured_name = PIECE_SYMBOLS.get(captured, captured)
@@ -722,7 +750,6 @@ class ChineseChessGame:
         之后搜索的 _make_move/_unmake_move 增量维护这些字段，
         叶子节点直接读取而无需全盘扫描。
         """
-        from domain.evaluation import RED_PST
         self._material_counts = {}
         self._red_piece_count = 0
         self._black_piece_count = 0
@@ -794,7 +821,7 @@ class ChineseChessGame:
             return None
 
         # 取最近 3 次出现，分析中间的循环序列
-        i1, i2, i3 = indices[-3], indices[-2], indices[-1]
+        i1, i3 = indices[-3], indices[-1]
 
         # 长将检测：循环中每步是否将军
         # _move_checks[j] = (走子方, 走后对方是否被将军)

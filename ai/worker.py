@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import threading
+import time
 from typing import Optional
 
 import requests
@@ -12,8 +13,9 @@ from domain.models import ModelInfo
 from ai.parser import parse_coordinates_from_text
 from domain.constants import (
     AI_TIMEOUT_SECONDS, AI_CONNECT_TIMEOUT,
-    BOARD_HEIGHT, BOARD_WIDTH,
-    PIECE_SYMBOLS, parse_coord,
+    PIECE_SYMBOLS, parse_coord, format_coord, format_move,
+    format_chinese_notation,
+    ENDGAME_PIECE_THRESHOLD,
 )
 from domain.prompts import DEFAULT_TOOLS
 from domain.evaluation import evaluate, PIECE_VALUE, compute_material
@@ -55,25 +57,35 @@ def _clamp_int(value, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(value)))
 
 
+def _tool_err(msg: str) -> str:
+    """工具结果的标准错误 JSON（ensure_ascii=False，输出逐字节与旧版一致）。"""
+    return json.dumps({'error': msg}, ensure_ascii=False)
+
+
 class AIWorkerSignals(QObject):
-    finished = pyqtSignal(str, str, str, str, int, int, int, str)
-    # from_coord, to_coord, full_text, error, tokens, version,
+    finished = pyqtSignal(str, str, str, str, int, int, str)
+    # from_coord, to_coord, full_text, error, version,
     # cancel_version, content_text（正式回复，不含推理/工具结果）
 
 
 class AIWorker:
     """LLM 请求工作器 — 由 controller 在裸 threading.Thread 中运行。
 
-    （不是 QRunnable：继承它只是历史遗留，实际从未进入 QThreadPool；
-    用裸线程是为了 cancel() 时能直接中断 requests.Session。）
+    用裸线程（而非 QRunnable/QThreadPool）是为了 cancel() 时能直接
+    中断 requests.Session。
     """
     def __init__(self, model_info: ModelInfo, prompt: str,
                  image_base64: Optional[str] = None,
-                 player_name: str = '', version: int = 0,
+                 version: int = 0,
                  cancel_version: int = 0,
                  system_prompt: str = '',
                  tools: Optional[tuple] = None,
                  timeout: int = AI_TIMEOUT_SECONDS,
+                 # 每步总预算（秒，跨 MAX_TOOL_TURNS 轮共享）。
+                 # None → timeout × 2：正常思考（单轮 < timeout）不受影响，
+                 # 挂起场景把最坏 4×timeout 收紧到 2×timeout，避免端点
+                 # 无响应时整步卡死过久。仲裁（timeout=180）→ 360s。
+                 total_timeout: Optional[float] = None,
                  # ── 工具执行所需 ──
                  game: Optional[ChineseChessGame] = None,
                  current_player: int = 0,
@@ -88,16 +100,18 @@ class AIWorker:
                  # （controller 以 candidate_order 传入提示词顺序并同步构建）。
                  allowed_moves: Optional[set] = None,
                  label_to_move: Optional[dict] = None) -> None:
-        super().__init__()
         self.model_info = model_info
         self.prompt = prompt
         self.image_base64 = image_base64
-        self.player_name = player_name
         self.version = version
         self.cancel_version = cancel_version
         self.system_prompt = system_prompt
         self.tools = tools if tools is not None else DEFAULT_TOOLS
         self.timeout = timeout
+        self.total_timeout = (total_timeout if total_timeout is not None
+                              else timeout * 2.0)
+        # 本步计时起点（run() 开头重设；此处兜底防 _send_request 先于 run）
+        self._turn_start = time.time()
         self.game = game
         self.current_player = current_player
         self.pikafish = pikafish
@@ -124,6 +138,7 @@ class AIWorker:
         self._evaluate_count = 0
 
     def run(self) -> None:
+        self._turn_start = time.time()  # 每步总预算计时起点
         self._session = requests.Session()
         self._session.trust_env = False
         try:
@@ -135,11 +150,11 @@ class AIWorker:
             # content_text = 正式回复（不含推理/工具结果），供日志"只显示正式回复"
             content_text = '\n\n'.join(t for t in self._content_texts if t)
             self.signals.finished.emit(
-                from_coord, to_coord, full_text, error, 0,
+                from_coord, to_coord, full_text, error,
                 self.version, self.cancel_version, content_text)
         except Exception as e:
             self.signals.finished.emit(
-                '', '', '', str(e), 0,
+                '', '', '', str(e),
                 self.version, self.cancel_version, '')
         finally:
             self._session.close()
@@ -201,23 +216,11 @@ class AIWorker:
                 self._all_texts.append(content)
                 self._content_texts.append(content)
 
-            # ── 提取 tool_calls ──
-            tool_calls = message.get('tool_calls', [])
+            # ── 提取 tool_calls（192 行已取；此处直接使用）──
             if not tool_calls:
-                # 无 tool_calls → 尝试文本解析（仅从 LLM 正式 content 提取，
-                # 排除 [Tool: ...] 工具结果与 reasoning 里的坐标干扰）
-                fc, tc = parse_coordinates_from_text(
-                    '\n'.join(self._content_texts))
-                if fc and tc:
-                    return fc, tc, self._build_full_text()
-                # 仲裁场景：qwen3.8 思考模式吞掉工具调用（0 tool_calls +
-                # 空 content），按 '候选 A/B' 标签或候选坐标字面量兜底
-                arb_move = self._resolve_arbitration_choice()
-                if arb_move:
-                    fr, fc, tr, tc = arb_move
-                    return (f"{chr(65 + fc)}{fr + 1}", f"{chr(65 + tc)}{tr + 1}",
-                            self._build_full_text())
-                # 无法解析，继续等下一轮（或最终失败）
+                # 无 tool_calls → 跳出循环，由循环后统一做文本解析兜底
+                # （轮内解析与循环后解析输入相同、结果逐字节一致，
+                # 只保留一份实现，见 _agentic_loop 末尾）
                 break
 
             # ── 分类 tool_calls ──
@@ -245,7 +248,7 @@ class AIWorker:
                     sample = ''
                     if self._legal_cache:
                         sample = '、'.join(
-                            f'{chr(65 + c)}{r + 1}→{chr(65 + tc2)}{tr + 1}'
+                            format_move(r, c, tr, tc2)
                             for r, c, tr, tc2 in self._legal_cache[:5])
                     move_error = (f'走法 {fc}→{tc} 不合法，请从合法走法列表'
                                   f'中选择一步（可选示例：{sample}）。'
@@ -289,32 +292,28 @@ class AIWorker:
                 # 会在后续轮次重复同样的坏调用，烧光 MAX_TOOL_TURNS
                 if move_error is not None:
                     self._all_texts.append(
-                        f"[Tool: move_piece]\n"
-                        f"{json.dumps({'error': move_error}, ensure_ascii=False)}")
+                        f"[Tool: move_piece]\n{_tool_err(move_error)}")
                     messages.append({
                         'role': 'tool',
                         'tool_call_id': move_piece_call.get('id', ''),
-                        'content': json.dumps({'error': move_error},
-                                              ensure_ascii=False),
+                        'content': _tool_err(move_error),
                     })
                 # 继续下一轮，让 LLM 基于工具结果（含错误）做决策
                 continue
 
-            # tool_calls 非空时分类必然命中 move_piece_call 或 other_calls，
-            # 上方分支恒 return/continue，以下不可达（防御性 break）
-            break
-
         # ── 所有轮次结束，最后一次尝试文本解析 ──
         full = self._build_full_text()
+        # 与下方推理文本循环同一校验口径（M-AI-7）：content 里讨论过但
+        # 未选中的坐标（如引用引擎推荐/示例）必须经 _validate_move 过滤，
+        # 防止把非法或非最终选择的坐标当成走法提交。
         fc, tc = parse_coordinates_from_text('\n'.join(self._content_texts))
-        if fc and tc:
+        if fc and tc and self._validate_move(fc, tc) is not None:
             return fc, tc, full
         # 仲裁场景：从全文（含 reasoning_content）解析 '候选 A/B' 标签或
         # 候选坐标字面量（模型只需表达选了哪个候选，无需生成坐标）
         arb_move = self._resolve_arbitration_choice()
         if arb_move:
-            fr, fc, tr, tc = arb_move
-            return (f"{chr(65 + fc)}{fr + 1}", f"{chr(65 + tc)}{tr + 1}", full)
+            return self._arb_return(arb_move, full)
         # 4 轮耗尽且 content 无坐标：qwen3.8 等思考型模型把最终决定写在
         # reasoning_content。取最后一条"模型文本"（排除 [Tool: ...] 工具
         # 结果，其含引擎推荐/错误反馈坐标会污染解析），且必须通过
@@ -397,8 +396,8 @@ class AIWorker:
             best_pos = -1
             for mv in self.allowed_moves:
                 fr, fc, tr, tc = mv
-                frm = f"{chr(65 + fc)}{fr + 1}"
-                tos = f"{chr(65 + tc)}{tr + 1}"
+                frm = format_coord(fr, fc)
+                tos = format_coord(tr, tc)
                 pat = re.compile(
                     re.escape(frm) + r'\s*(?:→|->|至|\.\.|\.|,|，|—|-)?\s*'
                     + re.escape(tos))
@@ -410,28 +409,31 @@ class AIWorker:
                 return best
         return None
 
+    def _arb_return(self, arb_move: tuple,
+                    full_text: Optional[str] = None) -> tuple:
+        """仲裁兜底命中 → 返回 (from_coord, to_coord, full_text)。"""
+        fr, fc, tr, tc = arb_move
+        if full_text is None:
+            full_text = self._build_full_text()
+        return format_coord(fr, fc), format_coord(tr, tc), full_text
+
     def _execute_tool(self, name: str, args: dict) -> str:
         """在本地执行 AI 工具调用，返回 JSON 结果字符串。"""
         if self.game is None:
-            return json.dumps({'error': '游戏状态不可用，无法执行工具调用'},
-                             ensure_ascii=False)
+            return _tool_err('游戏状态不可用，无法执行工具调用')
 
         if name == 'search_best_move':
             if self._search_used:
-                return json.dumps(
-                    {'error': '本回合已调用过 search_best_move（每步最多一次），请基于已有信息选择走法'},
-                    ensure_ascii=False)
+                return _tool_err('本回合已调用过 search_best_move（每步最多一次），请基于已有信息选择走法')
             self._search_used = True
             return self._run_search(args)
         elif name == 'evaluate_position':
             if self._evaluate_count >= 2:
-                return json.dumps(
-                    {'error': '本回合已调用过 2 次 evaluate_position（每步最多 2 次），请基于已有信息选择走法'},
-                    ensure_ascii=False)
+                return _tool_err('本回合已调用过 2 次 evaluate_position（每步最多 2 次），请基于已有信息选择走法')
             self._evaluate_count += 1
             return self._run_evaluate()
         else:
-            return json.dumps({'error': f'未知工具: {name}'}, ensure_ascii=False)
+            return _tool_err(f'未知工具: {name}')
 
     def _run_search(self, args: dict) -> str:
         """执行深度搜索，返回搜索最佳走法及候选列表。
@@ -446,9 +448,7 @@ class AIWorker:
             depth = _clamp_int(args.get('depth', 3), 2, 8)
             top_n = _clamp_int(args.get('top_n', 3), 1, 5)
         except (TypeError, ValueError):
-            return json.dumps(
-                {'error': '参数类型错误：depth 应为 2~8、top_n 应为 1~5 的整数'},
-                ensure_ascii=False)
+            return _tool_err('参数类型错误：depth 应为 2~8、top_n 应为 1~5 的整数')
 
         try:
             # 用快照隔离，不修改 self.game.board
@@ -463,10 +463,10 @@ class AIWorker:
                 # 但若已被 cancel（暂停/重置），不再启动全量本地 AB：
                 # 否则取消不生效且陈旧 worker 空耗 CPU 至多 30s
                 if self._cancelled.is_set():
-                    return json.dumps({'error': '任务已取消'}, ensure_ascii=False)
+                    return _tool_err('任务已取消')
             return self._run_search_local(tmp_game, depth, top_n)
         except Exception as e:
-            return json.dumps({'error': f'搜索失败: {e}'}, ensure_ascii=False)
+            return _tool_err(f'搜索失败: {e}')
 
     def _run_search_pikafish(self, tmp_game, depth: int,
                              top_n: int):
@@ -487,11 +487,12 @@ class AIWorker:
             if result is None:
                 return None
             best_move, raw_top = result
-            # MultiPV 候选：走子方视角评分 → 统一红方视角（与其余工具口径一致）
+            # MultiPV 候选：走子方视角评分 → 统一红方视角（与其余工具口径一致）；
+            # top_moves 只保留走法元组（_format_search_result 统一按 entry[:4] 解包）
             top_moves = []
             for mv, sc in raw_top[:top_n]:
-                top_moves.append((mv, sc if player == 1 else -sc))
-            best_score = top_moves[0][1] if top_moves else 0.0
+                top_moves.append(mv)
+            best_score = (raw_top[0][1] if player == 1 else -raw_top[0][1]) if raw_top else 0.0
 
             board = tmp_game.board
             lines = []
@@ -505,31 +506,9 @@ class AIWorker:
                 lines.append(f"搜索最佳评分: {best_score:+.0f}"
                              f"（正值=红优，负值=黑优）")
             lines.append("")
-
-            bfr, bfc, btr, btc = best_move
-            bp = board[bfr][bfc]
-            bpn = PIECE_SYMBOLS.get(bp, bp)
-            bc = board[btr][btc]
-            bcap = f" 吃{PIECE_SYMBOLS.get(bc, bc)}" if bc != '.' else ''
-            lines.append(f"★ 搜索首选: {bpn} {chr(65+bfc)}{bfr+1}→"
-                         f"{chr(65+btc)}{btr+1}{bcap}")
-            lines.append("")
-
-            lines.append(f"候选走法 Top-{len(top_moves)}（MultiPV 主变，按引擎评分排序）：")
-            for i, (mv, _score) in enumerate(top_moves, 1):
-                fr, fc, tr, tc = mv
-                piece = board[fr][fc]
-                pn = PIECE_SYMBOLS.get(piece, piece)
-                from_c = f"{chr(65+fc)}{fr+1}"
-                to_c = f"{chr(65+tc)}{tr+1}"
-                cap = board[tr][tc]
-                cap_info = f" 吃{PIECE_SYMBOLS.get(cap, cap)}" if cap != '.' else ''
-                marker = ' ← 搜索首选' if mv == best_move else ''
-                lines.append(f"  {i}. {pn} {from_c}→{to_c}{cap_info}{marker}")
-
-            lines.append("")
-            lines.append("请综合考虑搜索建议和你的战略判断，选择最优走法。最终调用 move_piece 提交。")
-            return json.dumps({'result': '\n'.join(lines)}, ensure_ascii=False)
+            return self._format_search_result(
+                board, best_move, top_moves, lines,
+                f"候选走法 Top-{len(top_moves)}（MultiPV 主变，按引擎评分排序）：")
         except Exception:
             return None
         finally:
@@ -549,7 +528,7 @@ class AIWorker:
             best_move = engine.search(tmp_game, player)
 
             if not best_move:
-                return json.dumps({'error': '未找到合法走法'}, ensure_ascii=False)
+                return _tool_err('未找到合法走法')
 
             board = tmp_game.board  # 快照棋盘，不碰 live board
 
@@ -563,8 +542,6 @@ class AIWorker:
                 # 静态局面分（红方视角）
                 s = evaluate(board)
                 # 将军奖励：走子后对方被将军额外加分
-                # 使用 tmp_game 隔离，避免修改 self.game.board（防止与主线程/Pikafish 的数据竞争）
-                tmp_game.board = board
                 if tmp_game.is_in_check(opponent):
                     s += 50.0 if player == 1 else -50.0
                 SearchEngine._unmake_move(tmp_game, fr, fc, tr, tc, captured)
@@ -583,46 +560,51 @@ class AIWorker:
             # best_score 本身就是红方视角（search.py 公开接口约定），不再转换
             best_score = engine.best_score
 
-            # 格式化
+            # 格式化（"★ 搜索首选 + Top-N" 与 Pikafish 路径共用）
             lines = []
             lines.append(f"Alpha-Beta 搜索完成（深度={depth}，{engine.nodes_searched} 节点）")
             lines.append(f"搜索最佳评分: {best_score:+.0f}（正值=红优，负值=黑优）")
             lines.append("")
+            return self._format_search_result(
+                board, best_move, top_moves, lines,
+                f"候选走法 Top-{len(top_moves)}（战术优先级排序：吃大子、将军优先，其后按局面评估）：")
 
-            # 搜索最佳走法高亮
-            bfr, bfc, btr, btc = best_move
-            bp = board[bfr][bfc]
-            bpn = PIECE_SYMBOLS.get(bp, bp)
-            bc = board[btr][btc]
-            bcap = f" 吃{PIECE_SYMBOLS.get(bc, bc)}" if bc != '.' else ''
-            lines.append(f"★ 搜索首选: {bpn} {chr(65+bfc)}{bfr+1}→{chr(65+btc)}{btr+1}{bcap}")
-            lines.append("")
-
-            # 候选按战术优先级排序（吃大子>将军>局面评估），只印排名不印分数：
-            # 排序键由 MVV-LVA×10 加分与评估分混合构成，量纲不同，数值会误导 LLM 比较
-            lines.append(f"候选走法 Top-{len(top_moves)}（战术优先级排序：吃大子、将军优先，其后按局面评估）：")
-            for i, (fr, fc, tr, tc, _s) in enumerate(top_moves, 1):
-                piece = board[fr][fc]
-                piece_name = PIECE_SYMBOLS.get(piece, piece)
-                from_c = f"{chr(65+fc)}{fr+1}"
-                to_c = f"{chr(65+tc)}{tr+1}"
-                captured = board[tr][tc]
-                cap_info = ''
-                if captured != '.':
-                    cap_name = PIECE_SYMBOLS.get(captured, captured)
-                    cap_info = f" 吃{cap_name}"
-                marker = ' ← 搜索首选' if (fr, fc, tr, tc) == best_move else ''
-                lines.append(f"  {i}. {piece_name} {from_c}→{to_c}{cap_info}{marker}")
-
-            lines.append("")
-            lines.append("请综合考虑搜索建议和你的战略判断，选择最优走法。最终调用 move_piece 提交。")
-            return json.dumps({'result': '\n'.join(lines)}, ensure_ascii=False)
-
-        except Exception as e:
-            return json.dumps({'error': f'搜索失败: {e}'}, ensure_ascii=False)
         finally:
-            # 无论成功/异常/被 cancel 中止，都解除在途引擎引用
+            # 无论成功/异常/被 cancel 中止，都解除在途引擎引用；
+            # 异常上抛由 _run_search 的外层 except 统一返回同一错误文案
             self._active_search_engine = None
+
+    def _format_search_result(self, board: list, best_move: tuple,
+                              top_moves: list, head_lines: list,
+                              candidates_title: str) -> str:
+        """格式化"★ 搜索首选 + 候选 Top-N"结果（Pikafish/本地两条路径共用）。
+
+        top_moves 元素可为 (move_tuple, ...) 或 (fr, fc, tr, tc, ...)，
+        统一取前 4 个为坐标；head_lines 为引擎专属头部行（调用方负责
+        补末尾空行分隔）。输出逐字节与旧实现一致。
+        """
+        lines = list(head_lines)
+        bfr, bfc, btr, btc = best_move
+        bc = board[btr][btc]
+        bcap = f" 吃{PIECE_SYMBOLS.get(bc, bc)}" if bc != '.' else ''
+        lines.append(f"★ 搜索首选: "
+                     f"{format_chinese_notation(board, bfr, bfc, btr, btc)}"
+                     f"({format_move(bfr, bfc, btr, btc)}){bcap}")
+        lines.append("")
+
+        lines.append(candidates_title)
+        for i, entry in enumerate(top_moves, 1):
+            fr, fc, tr, tc = entry[:4]
+            cap = board[tr][tc]
+            cap_info = f" 吃{PIECE_SYMBOLS.get(cap, cap)}" if cap != '.' else ''
+            marker = ' ← 搜索首选' if (fr, fc, tr, tc) == best_move else ''
+            lines.append(f"  {i}. "
+                         f"{format_chinese_notation(board, fr, fc, tr, tc)}"
+                         f"({format_move(fr, fc, tr, tc)}){cap_info}{marker}")
+
+        lines.append("")
+        lines.append("请综合考虑搜索建议和你的战略判断，选择最优走法。最终调用 move_piece 提交。")
+        return json.dumps({'result': '\n'.join(lines)}, ensure_ascii=False)
 
     def _run_evaluate(self) -> str:
         """执行静态局面评估"""
@@ -636,9 +618,9 @@ class AIWorker:
             red_check = tmp_game.is_in_check(1)
             black_check = tmp_game.is_in_check(2)
 
-            total_pieces = sum(1 for r in range(BOARD_HEIGHT)
-                              for c in range(BOARD_WIDTH) if board[r][c] != '.')
-            endgame = total_pieces <= 14
+            total_pieces = (tmp_game._red_piece_count
+                            + tmp_game._black_piece_count)
+            endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
 
             score = None
             score_source = '手工评估'
@@ -689,7 +671,7 @@ class AIWorker:
             return json.dumps({'result': '\n'.join(lines)}, ensure_ascii=False)
 
         except Exception as e:
-            return json.dumps({'error': f'评估失败: {e}'}, ensure_ascii=False)
+            return _tool_err(f'评估失败: {e}')
 
     # ── 辅助 ──
 
@@ -725,9 +707,6 @@ class AIWorker:
 
     # ── API 请求 ──
 
-    def _is_llama_server(self) -> bool:
-        return self.model_info.type == 'llama-server'
-
     def cancel(self) -> None:
         self._cancelled.set()
         # 中止在途的 Alpha-Beta 搜索（M-AI-1）：SearchEngine.stop() 置
@@ -758,7 +737,7 @@ class AIWorker:
         # tool_calls 被截断（0 tool_calls + 空 content → "4 轮工具调用后
         # 未找到有效走法"）。models.json 的 options 仍可对个别模型显式
         # 覆盖 max_tokens。
-        is_llama_server = self._is_llama_server()
+        is_llama_server = self.model_info.type == 'llama-server'
         if self.model_info.tools_choice:
             if is_llama_server:
                 payload['tool_choice'] = 'required'
@@ -788,12 +767,18 @@ class AIWorker:
         headers = {}
         if self.model_info.api_key:
             headers['Authorization'] = f'Bearer {self.model_info.api_key}'
+        # 读取超时 = min(单轮超时, 剩余总预算)：总预算耗尽时整步失败，
+        # 防止 4 轮 × 单轮超时 的最坏挂起（端点无响应时卡死过久）
+        remaining = self.total_timeout - (time.time() - self._turn_start)
+        if remaining <= 0:
+            raise Exception("超时: 本步总预算已耗尽")
+        read_timeout = min(float(self.timeout), remaining)
         try:
             resp = session.post(
                 self.model_info.endpoint, json=payload, headers=headers,
                 # 连接/读取超时分离：端点黑洞时连接阶段快速失败，
                 # 读取阶段仍允许长思考（每轮请求独立计时）
-                timeout=(AI_CONNECT_TIMEOUT, self.timeout))
+                timeout=(AI_CONNECT_TIMEOUT, read_timeout))
             resp.raise_for_status()
             return resp
         except requests.exceptions.Timeout:

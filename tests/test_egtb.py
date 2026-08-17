@@ -275,7 +275,7 @@ def compare_solve(t, board, mover, stored, cap, budget=None):
     global _SOLVE_NODES
     _SOLVE_NODES = 0
     res = solve(board, mover, frozenset(), cap, t, budget)
-    v, d, tainted, cap_limited = res
+    v, d, _, cap_limited = res
     if cap_limited:
         return None                      # 深度/预算截断：不可比
     return (table_class(stored[0], stored[1], mover) == solver_class((v, d)),

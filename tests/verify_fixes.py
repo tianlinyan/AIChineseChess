@@ -1,10 +1,10 @@
-"""严重项修复的回归验证（需 engines/pikafish.exe；EGTB 段需联网）。
+"""严重项修复的回归验证（需 engines/pikafish.exe）。
 
 用法：PYTHONIOENCODING=utf-8 python tests/verify_fixes.py
 覆盖：
 1. Pikafish 坐标系：初始 FEN 与 startpos 逐字一致、perft 1 = 44、
    bestmove 映射后合法、兵残局走法合法
-2. EGTB 云库：probe_cloud 真实请求 chessdb.cn（单車胜/单炮和）
+2. EGTB 云库：已移除（云查询路径已从 domain/egtb.py 删除）
 3. MCTS 终端局面：一步杀局面（>10 子，EGTB 范围外）必须选出杀着
 """
 import os
@@ -107,26 +107,7 @@ move2 = _uci_to_tuple(bm2) if bm2 else None
 check("兵残局 bestmove 映射后合法", move2 in g2.get_all_legal_moves(1),
       f"uci={bm2} move={move2}")
 
-# ── 2. EGTB 云库（真实网络请求）──
-from domain.egtb import probe_cloud
-
-# 单車 vs 孤将，红先 → 红胜
-bA = [['.'] * 9 for _ in range(10)]
-bA[0][3] = 'k'
-bA[9][2] = 'R'
-bA[9][4] = 'K'
-rA = probe_cloud(bA, 1)
-check("EGTB 单車vs孤将 判红胜", rA is not None and rA['win'] == 1,
-      f"结果={rA}")
-
-# 单炮 vs 孤将，红先 → 和棋（win=0 且 score=0，不再被当成"未找到"）
-bB = [['.'] * 9 for _ in range(10)]
-bB[0][3] = 'k'
-bB[8][4] = 'C'
-bB[9][4] = 'K'
-rB = probe_cloud(bB, 1)
-check("EGTB 单炮vs孤将 判和棋", rB is not None and rB['win'] == 0
-      and rB['score'] == 0.0, f"结果={rB}")
+# ── 2. EGTB 云库测试已移除（云查询路径已从 domain/egtb.py 删除，本段依赖 probe_cloud 不再存在）──
 
 # ── 3. MCTS 一步杀 ──
 # 注意：必须用 >10 子（EGTB_MAX_PIECES）的局面——≤10 子时 _simulate

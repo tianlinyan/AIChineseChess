@@ -22,11 +22,12 @@ Expansion/Simulation 作用于到达的叶局面，回溯后撤销 —— 树中
 import time
 import math
 import random
-from typing import Optional, Callable, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple
 
-from domain.constants import BOARD_WIDTH, BOARD_HEIGHT, MCTS_TIME_LIMIT, EGTB_MAX_PIECES, ENDGAME_PIECE_THRESHOLD
+from domain.constants import MCTS_TIME_LIMIT, MCTS_EXPLORATION
 from domain.evaluation import evaluate
-from domain.search import SearchEngine
+from domain.egtb import probe
+from domain.search import SearchEngine, _engine_time_up, _engine_stop
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 配置
@@ -34,7 +35,7 @@ from domain.search import SearchEngine
 
 DEFAULT_SIMULATIONS = 2000      # 默认模拟次数
 DEFAULT_TIME_LIMIT = MCTS_TIME_LIMIT       # 时间上限（秒），从 constants.py 统一管理
-DEFAULT_EXPLORATION = 1.4       # UCB1 探索参数
+DEFAULT_EXPLORATION = MCTS_EXPLORATION     # UCB1 探索参数，从 constants.py 统一管理
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -83,12 +84,10 @@ class MCTSEngine:
     def __init__(self,
                  max_simulations: int = DEFAULT_SIMULATIONS,
                  time_limit: float = DEFAULT_TIME_LIMIT,
-                 exploration: float = DEFAULT_EXPLORATION,
-                 progress_callback: Optional[Callable] = None):
+                 exploration: float = DEFAULT_EXPLORATION):
         self.max_simulations = max_simulations
         self.time_limit = time_limit
         self.exploration = exploration
-        self.progress_callback = progress_callback
 
         self._start_time = 0.0
         self._stop_flag = False
@@ -100,15 +99,13 @@ class MCTSEngine:
     def search(self,
                game,
                player: int,
-               priors: Optional[Dict[tuple, float]] = None,
-               on_progress: Optional[Callable] = None) -> Optional[tuple]:
+               priors: Optional[Dict[tuple, float]] = None) -> Optional[tuple]:
         """MCTS 主搜索 — 返回最佳走法。
 
         Args:
             game: ChineseChessGame 实例
             player: 当前走子方 (1=红, 2=黑)
             priors: {move_tuple: prior_probability} LLM提供的先验，可选
-            on_progress: 进度回调
 
         Returns:
             最佳走法 (fr, fc, tr, tc) 或 None
@@ -174,17 +171,10 @@ class MCTSEngine:
 
             self._simulations += 1
 
-            if on_progress and self._simulations % 100 == 0:
-                on_progress(self._simulations, self._root)
-
         # 选择最优走法（访问次数最多的子节点）
         best = self._root.best_child()
         if best is None:
             return legal_moves[0]
-
-        if self.progress_callback:
-            self.progress_callback(self._simulations, best.avg_value,
-                                   best.move, self._root)
 
         return best.move
 
@@ -250,31 +240,26 @@ class MCTSEngine:
         """
         board = game.board
 
-        total_pieces = sum(1 for r in range(BOARD_HEIGHT)
-                          for c in range(BOARD_WIDTH) if board[r][c] != '.')
-        endgame = total_pieces <= ENDGAME_PIECE_THRESHOLD
+        endgame = game.is_endgame()
 
-        # ── 残局库查询（仅本地库，搜索循环内禁止同步联网）──
-        if total_pieces <= EGTB_MAX_PIECES:
-            try:
-                from domain.egtb import probe
-                egtb_result = probe(board, player, total_pieces,
-                                    allow_cloud=False)
-                if egtb_result is not None:
-                    # probe 返回的 score 已是 player 视角，直接归一化，
-                    # 不要像下面 evaluate() 那样再按 player 翻转
-                    score = egtb_result[0]
-                    return 1.0 / (1.0 + math.exp(-score / 1000.0))
-            except Exception:
-                pass
+        # ── 残局库查询（仅本地库；probe 内部自守卫子力上限）──
+        try:
+            egtb_result = probe(
+                board, player, game._red_piece_count + game._black_piece_count,
+                game._material_counts)
+            if egtb_result is not None:
+                # probe 返回的 score 已是 player 视角，直接归一化，
+                # 不要像下面 evaluate() 那样再按 player 翻转
+                score = egtb_result[0]
+                return 1.0 / (1.0 + math.exp(-score / 1000.0))
+        except Exception:
+            pass
 
         red_check = game.is_in_check(1)
         black_check = game.is_in_check(2)
 
         score = evaluate(
             board,
-            legal_moves_red=0,
-            legal_moves_black=0,
             red_in_check=red_check,
             black_in_check=black_check,
             endgame=endgame,
@@ -350,12 +335,10 @@ class MCTSEngine:
         return priors
 
     def _is_time_up(self) -> bool:
-        if self._stop_flag:
-            return True
-        return (time.time() - self._start_time) > self.time_limit
+        return _engine_time_up(self)
 
     def stop(self):
-        self._stop_flag = True
+        _engine_stop(self)
 
     @property
     def simulations(self) -> int:

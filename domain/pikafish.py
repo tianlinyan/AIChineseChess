@@ -22,7 +22,8 @@ import time
 import os
 import atexit
 import shutil
-from typing import Optional, Dict, List, Tuple
+import sys
+from typing import Optional, Tuple
 
 from domain.fen import board_to_fen
 
@@ -81,13 +82,12 @@ class PikafishEngine:
     """Pikafish UCI 引擎封装。
 
     通过子进程 + UCI 文本协议与 Pikafish 通信。
-    提供与 MCTSEngine 兼容的 search() / get_top_moves() 接口。
+    提供与 MCTSEngine 兼容的 search() 接口。
 
     Usage:
         engine = PikafishEngine()
         if engine.available:
             move = engine.search(game, player=1, time_ms=5000)
-            top3 = engine.get_top_moves(3)
         engine.close()
     """
 
@@ -115,6 +115,11 @@ class PikafishEngine:
         self._hash_mb = max(16, hash_mb)
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.RLock()  # 可重入：_kill_proc 可能在持锁时被调用
+        # stdin 写锁（独立于 _lock）：stop() 故意不取 _lock（搜索线程整个
+        # 搜索期间持锁，取锁会永远等不到），但多线程同时写 stdin 有命令
+        # 撕裂风险（如 stop_all 与搜索线程的 _send 并发）。此锁只保护
+        # 写入，持有时间极短，不阻塞 stop 的"尽快返回"语义。
+        self._stdin_lock = threading.Lock()
         self._available = False
         self._error_msg: str = ''  # 启动失败时的诊断信息
         # 引擎 stdout 由独立 reader 线程读入行队列 —— 主逻辑按截止时间
@@ -185,8 +190,8 @@ class PikafishEngine:
 
         适用：LLM evaluate_position 工具增强、训练标签源（蒸馏）、
         根节点/复盘分析。⚠️ 不可用于搜索热路径（_fast_eval）：
-        UCI 进程往返为毫秒级，会拖垮叶节点评估（与 allow_cloud=False
-        同理，搜索循环内禁止同步外部进程调用）。
+        UCI 进程往返为毫秒级，会拖垮叶节点评估（与残局库本地查询同理，
+        搜索循环内禁止同步外部进程调用）。
         """
         if not self._available or not self._proc:
             return None
@@ -244,21 +249,18 @@ class PikafishEngine:
 
         best_move_uci = self._read_bestmove(time_ms)
         if not best_move_uci:
-            import sys
             print(f"[Pikafish.search] _read_bestmove 返回空 "
                   f"(time_ms={time_ms}, fen={fen[:40]}...)",
                   file=sys.stderr, flush=True)
             return None
         move = _uci_to_tuple(best_move_uci)
         if not move:
-            import sys
             print(f"[Pikafish.search] _uci_to_tuple 失败 "
                   f"(uci={best_move_uci!r})",
                   file=sys.stderr, flush=True)
             return None
         # 验证走法合法性 — 最终防线
         if move not in game.get_all_legal_moves(player):
-            import sys
             print(f"[Pikafish.search] 走法非法 "
                   f"(uci={best_move_uci!r} move={move})",
                   file=sys.stderr, flush=True)
@@ -268,14 +270,12 @@ class PikafishEngine:
     def search(self,
                game,
                player: int,
-               priors: Optional[Dict[tuple, float]] = None,
                time_ms: Optional[int] = None) -> Optional[tuple]:
         """搜索最佳走法（同步，无锁超时——适合单线程调用方如数据生成）。
 
         Args:
             game: ChineseChessGame 实例
             player: 当前走子方 (1=红, 2=黑)
-            priors: 忽略（Pikafish 不需要先验，仅为接口兼容）
             time_ms: 搜索时间（毫秒），None 则使用默认值
 
         Returns:
@@ -315,7 +315,7 @@ class PikafishEngine:
         Returns:
             (best_move, top_snapshot) 或 None（锁超时/引擎不可用/搜索失败）
             top_snapshot: [(move, score_cp), ...] 走子方视角厘兵，
-            按 multipv 序号升序（与 get_top_moves 同源数据）。
+            按 multipv 序号升序（与 _top_moves 同源数据）。
         """
         if not self._available or not self._proc:
             return None
@@ -431,20 +431,6 @@ class PikafishEngine:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
 
-    def get_top_moves(self, n: int = 3) -> List[Tuple[tuple, int, float]]:
-        """返回前 N 个最优走法及评分（接口兼容 MCTSEngine）。
-
-        需 MultiPV 已启用。返回 [(move, visits=score_cp, avg_value=score_cp), ...]，
-        其中 visits 实际存储 centipawn 评分。
-        """
-        with self._lock:
-            top = list(self._top_moves[:n])
-        result = []
-        for move, score_cp in top:
-            # visits 存评分为整数（兼容 MCTSEngine 接口），avg_value 存归一化值
-            result.append((move, int(score_cp), score_cp / 100.0))
-        return result
-
     def _parse_multipv_line(self, line: str) -> None:
         """解析 MultiPV info 行，按 multipv 序号存最终迭代结果。
 
@@ -487,7 +473,7 @@ class PikafishEngine:
         """搜索结束（收到 bestmove）后：按 multipv 序号升序导出最终结果。
 
         _top_moves_dict 只含每个序号的最新（最深迭代）条目；
-        转成列表供 get_top_moves 读取。
+        转成列表供 search_atomic 快照读取。
         """
         self._top_moves = [self._top_moves_dict[i]
                            for i in sorted(self._top_moves_dict)]
@@ -650,7 +636,6 @@ class PikafishEngine:
                     break
                 self._out_q.put(line)
         except Exception as e:
-            import sys
             print(f"[Pikafish] reader 线程异常退出: {e}",
                   file=sys.stderr, flush=True)
         finally:
@@ -675,11 +660,16 @@ class PikafishEngine:
             return None
 
     def _send(self, command: str) -> bool:
-        """发送命令到引擎。返回 True 表示发送成功。"""
+        """发送命令到引擎。返回 True 表示发送成功。
+
+        写操作受 _stdin_lock 保护（防并发 stop() 与搜索线程的命令撕裂）；
+        不取 self._lock——stop() 依赖本方法在搜索线程持锁期间仍可调用。
+        """
         try:
             if self._proc and self._proc.stdin:
-                self._proc.stdin.write(command + '\n')
-                self._proc.stdin.flush()
+                with self._stdin_lock:
+                    self._proc.stdin.write(command + '\n')
+                    self._proc.stdin.flush()
                 return True
         except (OSError, BrokenPipeError):
             pass
@@ -743,7 +733,7 @@ class PikafishEngine:
         - 每 0.5s 轮询一次 queue，同时检查进程存活，引擎死亡后最多 0.5s 即可检测
         - 总时间上限 = 实际搜索时间 + 10s 兜底
         - 超时或进程死亡时返回 None（调用方回退 MCTS）
-        - 沿途收集 multipv info 行到 self._top_moves（供 get_top_moves 读取）
+        - 沿途收集 multipv info 行到 self._top_moves（供 search_atomic 快照读取）
         """
         if not self._proc or not self._proc.stdout:
             return None

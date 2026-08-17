@@ -4,12 +4,12 @@ from PyQt6.QtCore import (
     Qt, QRectF, QPointF, QBuffer, QByteArray, QSize, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QPainter, QPen, QBrush, QColor, QFont, QRadialGradient,
+    QPainter, QPen, QColor, QFont, QRadialGradient,
     QMouseEvent, QPixmap,
 )
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 
-from domain.constants import VISION_IMAGE_QUALITY, VISION_IMAGE_MAX_WIDTH, VISION_IMAGE_SCALE, PIECE_SYMBOLS
+from domain.constants import VISION_IMAGE_QUALITY, VISION_IMAGE_MAX_WIDTH, VISION_IMAGE_SCALE, PIECE_SYMBOLS, CN_DIGITS
 
 
 class BoardWidget(QWidget):
@@ -91,7 +91,8 @@ class BoardWidget(QWidget):
         painter.drawLine(QPointF(x_left, y_top), QPointF(x_right, y_bottom))
         painter.drawLine(QPointF(x_right, y_top), QPointF(x_left, y_bottom))
 
-        # 行列标签
+        # 行列标签：竖线按传统棋谱路号标注——
+        # 上侧=黑方视角（右→左 1~9），下侧=红方视角（右→左 一~九）
         painter.setFont(QFont('Arial', max(9, int(self.cell_size * 0.25))))
         painter.setPen(QPen(QColor('#4B5A2B')))
         for i in range(self.game.size_rows):
@@ -102,11 +103,10 @@ class BoardWidget(QWidget):
                              Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(i + 1))
         for j in range(self.game.size_cols):
             x = self.padding + j * self.cell_size
-            letter = chr(65 + j)
             painter.drawText(QRectF(x - self.cell_size / 2, 8, self.cell_size, self.padding - 16),
-                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, letter)
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, str(j + 1))
             painter.drawText(QRectF(x - self.cell_size / 2, h - self.padding + 8, self.cell_size, self.padding - 16),
-                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, letter)
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, CN_DIGITS[self.game.size_cols - 1 - j])
 
         # 棋子
         for i in range(self.game.size_rows):
@@ -199,10 +199,6 @@ class BoardWidget(QWidget):
                 if piece != '.' and self.game.get_piece_owner(piece) == self.game.current_player:
                     self.selected_row = row
                     self.selected_col = col
-                    self.update()
-                else:
-                    self.selected_row = -1
-                    self.selected_col = -1
                     self.update()
 
     def capture_board_image(self):

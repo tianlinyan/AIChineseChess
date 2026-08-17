@@ -11,25 +11,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from domain.game import ChineseChessGame
+from domain.fen import fen_to_board as board_from_fen
 
 BASELINE_PATH = os.path.join(os.path.dirname(__file__), 'baseline_movegen.jsonl')
-
-
-def board_from_fen(fen: str):
-    """解析 board_to_fen(reverse_rows=False) 生成的 FEN。"""
-    rows_part, side = fen.split(' ')
-    board = []
-    for row_str in rows_part.split('/'):
-        row = []
-        for ch in row_str:
-            if ch.isdigit():
-                row.extend(['.'] * int(ch))
-            else:
-                row.append(ch)
-        assert len(row) == 9, f'FEN 行宽错误: {row_str}'
-        board.append(row)
-    assert len(board) == 10
-    return board, (1 if side == 'w' else 2)
 
 
 def main():
