@@ -288,6 +288,17 @@ def setup_left_expanded(parent) -> None:
         "默认关闭，只显示正式回复。")
     ctrl_layout.addWidget(parent.show_think_check)
 
+    # AI点评（仅搜索/人类）：人类落子或 AI 以"仅搜索"模式落子完成后，
+    # 由 AI点评该步棋；解析完成前对局暂停等待（默认不勾选）
+    parent.ai_commentary_check = QCheckBox("AI点评（仅搜索/人类）")
+    parent.ai_commentary_check.setChecked(False)
+    parent.ai_commentary_check.setStyleSheet(_check_style())
+    parent.ai_commentary_check.setToolTip(
+        "勾选后：人类落子、或 AI 以\"仅搜索\"模式落子完成后，"
+        "AI 将解析该步棋（本步评析 / 双方棋势分析 / 其他招式）；"
+        "解析完成前，对局暂停等待，方可进行下一步。")
+    ctrl_layout.addWidget(parent.ai_commentary_check)
+
     layout.addWidget(ctrl_group)
 
     layout.addWidget(_spacer(6))

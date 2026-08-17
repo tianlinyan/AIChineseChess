@@ -1,3 +1,4 @@
+import functools
 import random
 import threading
 from typing import Any, Optional
@@ -20,6 +21,7 @@ from domain.prompts import (
     HUMAN_MODEL, get_system_prompt,
     build_move_prompt, format_legal_moves,
     get_arbitration_system_prompt, build_arbitration_prompt,
+    get_commentary_system_prompt, build_commentary_prompt,
     TOOLS_BASIC, DEFAULT_TOOLS,
 )
 from domain.game import ChineseChessGame
@@ -91,6 +93,15 @@ class GameController:
         # ── 人类玩家参考提示 ──
         self._hint_active: bool = False
         self._current_ai_player: int = 0  # 当前正在决策的 AI 方
+
+        # ── AI点评（人类 / 仅搜索落子后，阻塞式解说）──
+        # _commentary_mover 非 None 即表示解说进行中（对局阻塞等待）；
+        # 被暂停打断时保留该值，恢复后重新触发解说。
+        # _commentary_worker 用于识别在飞解说 worker：旧 worker 被暂停取消
+        # 后其回调若晚于恢复重触发到达，不得误清新 worker 的阻塞状态
+        self._commentary_mover: Optional[int] = None
+        self._commentary_delay: int = AI_DELAY_MS
+        self._commentary_worker: Optional[Any] = None
 
     # ── per-side 便捷访问 ──
 
@@ -184,6 +195,9 @@ class GameController:
         self.last_move_error = ''
         self._random_action_count = 0
         self._hint_active = False
+        self._commentary_mover = None
+        self._commentary_delay = AI_DELAY_MS
+        self._commentary_worker = None
 
         self.game.reset()
         if self.main:
@@ -229,6 +243,13 @@ class GameController:
             self.retry_count = 0
         else:
             self.main.pause_btn.setText("暂停")
+            if not self.game.game_over and not self.ai_manager.is_busy():
+                # 解说被暂停打断：恢复时重新触发解说（走子已完成，
+                # "待解说完成方可下一步"的阻塞语义不变）
+                if self._commentary_mover is not None:
+                    self._start_commentary(self._commentary_mover,
+                                           self._commentary_delay)
+                    return
             self.resume_thinking_timer()
             if not self.game.game_over and not self.ai_manager.is_busy():
                 current_player = self.game.current_player
@@ -243,6 +264,10 @@ class GameController:
     def on_human_move(self, from_row: int, from_col: int,
                       to_row: int, to_col: int) -> None:
         if not self.is_active or self.is_paused or self.game.game_over:
+            return
+        if self._commentary_mover is not None:
+            # AI点评进行中：待解说完成方可进行下一步
+            self.log("AI 正在解析上一步，请等待解析完成", 'INFO')
             return
         if self.ai_manager.is_busy():
             # 防御：AI 回合残留 busy 时禁止人类走子，避免与在飞 AI 请求竞争
@@ -276,11 +301,8 @@ class GameController:
             self.main.update_history_list()
             self.main.update_player_status()
 
-            if result['game_over']:
-                self.handle_game_over(result)
-            else:
-                # 与 AI 走子后的调度一致：启动下一方计时 + 必要时延迟 AI 走子
-                self._schedule_next_ai_move()
+            # 终局 / AI点评阻塞 / 正常调度下一手（与 AI 走子后一致）
+            self._after_move_finished(result, current_player)
         else:
             self.log(f"移动非法: {result['message']}", 'ERROR')
 
@@ -880,6 +902,186 @@ class GameController:
         if next_model != HUMAN_MODEL:
             self._defer_ai_move(delay)
 
+    def _after_move_finished(self, result: dict, mover: int,
+                             delay: int = AI_DELAY_MS, source: str = '') -> None:
+        """落子完成后的统一调度：终局 → AI点评阻塞 → 正常调度下一手。
+
+        人类走子（on_human_move）与 AI 走子（_complete_move 各路径）共用；
+        需要解说时不立即调度下一手，解说完成回调里恢复
+        （"待解说完成后方可进行下一步"）。source 为走子来源（如"开局库"），
+        用于按来源跳过解说（开局库标准谱着无需解说）。
+        """
+        if result.get('game_over'):
+            self.handle_game_over(result)
+            return
+        if self._needs_commentary(mover, source):
+            self._start_commentary(mover, delay)
+            return
+        self._schedule_next_ai_move(delay)
+
+    # ── AI点评（人类 / 仅搜索落子后） ──
+
+    @property
+    def commentary_mover(self) -> Optional[int]:
+        """正在被解说的落子方（1=红, 2=黑）；None 表示无解说进行中。
+
+        供 UI 层读取解说阻塞状态（避免直接访问 _commentary_mover 私有字段）。
+        """
+        return self._commentary_mover
+
+    def _commentary_enabled(self) -> bool:
+        """左侧面板"AI点评（仅搜索/人类）"开关状态。"""
+        return bool(
+            self.main and getattr(self.main, 'ai_commentary_check', None)
+            and self.main.ai_commentary_check.isChecked())
+
+    def _needs_commentary(self, mover: int, source: str = '') -> bool:
+        """落子方是否需要解说：人类，或 AI + 仅搜索模式。
+
+        hybrid / llm_only 模式落子时 LLM 本身已在思考日志中解释走法，
+        不重复解说。开局库走子（标准谱着）跳过解说。
+        """
+        if not self._commentary_enabled():
+            return False
+        if source == '开局库':
+            return False
+        model = self._model_for(mover)
+        if model == HUMAN_MODEL:
+            return True
+        return self._ai_mode_for(mover) == 'search_only'
+
+    def _commentary_model_for(self, mover: int):
+        """解说所用模型：AI 方用己方模型；人类方用对手 AI 模型；
+        双方均为人类时用模型列表中第一个可用模型（跳过仲裁裁判）。"""
+        model = self._model_for(mover)
+        if model != HUMAN_MODEL:
+            return model
+        opp_model = self._model_for(3 - mover)
+        if opp_model != HUMAN_MODEL:
+            return opp_model
+        if self.main and hasattr(self.main, 'model_manager'):
+            models = self.main.model_manager.models
+            for m in models:
+                if m.id != 'arbitration':
+                    return m
+            # 列表内只有仲裁模型（或为空）：无可用解说模型，跳过解说
+            return None
+        return None
+
+    def _start_commentary(self, mover: int, delay: int = AI_DELAY_MS) -> None:
+        """启动 AI点评（异步线程）：评价刚走出的一步。
+
+        解说完成（on_commentary_finished）后才恢复下一手调度；
+        被暂停打断时保留 _commentary_mover，恢复后重新触发。
+        """
+        model = self._commentary_model_for(mover)
+        if model is None:
+            # 无可用模型（如未配置 models.json）：不阻塞，直接继续
+            self.log("AI点评：无可用模型，跳过解析", 'INFO')
+            self._schedule_next_ai_move(delay)
+            return
+
+        # ── 构建解说提示词（走子后局面）──
+        move = self.game.moves[-1]
+        fr, fc, tr, tc = move[:4]
+        captured = move[5]
+        notation = self.game.move_notation(move)
+        move_str = f"{notation}({format_move(fr, fc, tr, tc)})"
+        if captured != '.':
+            move_str += f"×{PIECE_SYMBOLS.get(captured, captured)}"
+
+        opponent = 3 - mover
+        try:
+            eval_score = evaluate(self.game.board)
+        except Exception:
+            eval_score = None
+
+        prompt = build_commentary_prompt(
+            mover,
+            self.game.get_board_state_string(),
+            move_str,
+            self.game.format_move_history(max_items=PROMPT_HISTORY_MAX_ITEMS),
+            material_str=self._material_str(mover, perspective=False),
+            eval_score=eval_score,
+            mover_in_check=self.game.is_in_check(mover),
+            opponent_in_check=self.game.is_in_check(opponent),
+            ply=len(self.game.moves),
+        )
+
+        self._commentary_mover = mover
+        self._commentary_delay = delay
+
+        mover_name = self._player_name(mover)
+        self.log(
+            f"🎙️ {model.name} 正在解析{mover_name}的走法: {move_str} ...",
+            'INFO')
+        # 停止思考计时器：解说期间无需计时，避免 AI 走子后 QTimer 每秒空转
+        self.stop_thinking_timer()
+        if self.main:
+            self.main.think_timer_label.setText("🎙️ AI点评中...")
+            self.main.update_player_status()
+
+        # tools=()：纯文本解说，无 move_piece；不传 game（worker 不做
+        # 合法性校验），坐标解析结果在解说回调中不采用
+        worker = AIWorker(
+            model, prompt, None,
+            version=self.game_version,
+            cancel_version=self.ai_manager.cancel_version,
+            system_prompt=get_commentary_system_prompt(),
+            tools=(),
+        )
+        self._commentary_worker = worker
+        # 显式置 busy（与其它 AI 路径一致；_launch_worker 的 set_active_worker
+        # 也会让 is_busy() 为 True，双保险）
+        self.ai_manager.set_busy(True)
+        # 以 partial 绑定 worker 身份：被暂停取消的旧 worker 回调晚于
+        # 恢复重触发到达时，on_commentary_finished 据此丢弃（不动状态）
+        self._launch_worker(
+            worker, functools.partial(self.on_commentary_finished,
+                                      worker=worker))
+
+    def on_commentary_finished(self, from_coord: str, to_coord: str,
+                               full_text: str, error: str,
+                               version: int,
+                               cancel_version: int = 0,
+                               content_text: str = '',
+                               worker: Optional[Any] = None) -> None:
+        """解说完成回调：输出解说、解除阻塞、恢复下一手调度。
+
+        解说不使用坐标（模型不走子），忽略 from/to 只取文本。
+        过期回调（重置/关闭）同样必须先解除阻塞，否则游戏永远卡在
+        "等待解说完成"。
+        """
+        # 陈旧回调防御：worker 被暂停取消后、恢复重触发新解说前，
+        # 旧 worker 的回调若姗姗来迟，不得误清新 worker 的阻塞状态
+        if worker is not None and worker is not self._commentary_worker:
+            return
+
+        mover = self._commentary_mover
+        self._commentary_mover = None
+        self._commentary_worker = None
+        delay = self._commentary_delay
+
+        if not self._check_callback_valid(version, cancel_version, '解析',
+                                          needs_cleanup=True):
+            # 暂停打断：保留待解说状态，恢复对局时重新触发解说
+            if self.is_paused and mover is not None:
+                self._commentary_mover = mover
+            return
+
+        text = (content_text or full_text or '').strip()
+        if error or not text:
+            self.log(f"AI点评失败 ({error or '无返回文本'})，继续对弈", 'WARNING')
+        else:
+            self.log(f"  🎙️ AI点评:\n{text}", 'INFO')
+
+        # 解说 worker 经 _launch_worker 登记了 active_worker（is_busy=True），
+        # 必须清除，否则人类走子被 busy 守卫永久拒绝
+        self._finish_ai_move()
+        if self.main:
+            self.main.update_player_status()
+        self._schedule_next_ai_move(delay)
+
     def _check_callback_valid(self, version: int, cancel_version: int,
                               label: str, needs_cleanup: bool = False) -> bool:
         """检查异步回调是否仍有效（版本/取消门控 + 关闭状态）。
@@ -959,10 +1161,8 @@ class GameController:
         self._refresh_ui()
         if finish:
             self._finish_ai_move()
-        if result.get('game_over'):
-            self.handle_game_over(result)
-            return
-        self._schedule_next_ai_move(delay)
+        # 终局 / AI点评阻塞 / 正常调度下一手（人类走子路径同此逻辑）
+        self._after_move_finished(result, player, delay, source)
 
     # ── 共用助手（消除多份逐字重复的回退/守卫/格式化样板）──
 
@@ -1354,6 +1554,8 @@ class GameController:
         self.is_active = False
         self.retry_count = 0
         self._hint_active = False
+        self._commentary_mover = None
+        self._commentary_worker = None
         # 停止在飞的引擎搜索（将杀后 MCTS/Pikafish 继续烧 CPU 至自然结束，
         # 结果虽被版本门控丢弃，纯属浪费）
         self._engine.stop_all()
@@ -1417,5 +1619,7 @@ class GameController:
         """清理资源 — 关闭引擎、取消任务、停止计时器。"""
         self.is_active = False
         self.stop_thinking_timer()
+        self._commentary_mover = None
+        self._commentary_worker = None
         self._engine.shutdown()
         self.ai_manager.shutdown()

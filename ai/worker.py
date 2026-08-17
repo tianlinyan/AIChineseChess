@@ -223,6 +223,13 @@ class AIWorker:
                 # 只保留一份实现，见 _agentic_loop 末尾）
                 break
 
+            # 纯文本任务（AI点评，tools=()）：payload 未声明任何工具，
+            # 模型若仍返回 tool_calls 也无工具可执行——直接结束循环，
+            # 由循环后逻辑用已收集的正式文本作为结果（不参与走法解析），
+            # 避免烧满 MAX_TOOL_TURNS 后误报"未找到有效走法"
+            if not self.tools:
+                break
+
             # ── 分类 tool_calls ──
             move_piece_call = None
             other_calls = []
@@ -301,8 +308,20 @@ class AIWorker:
                 # 继续下一轮，让 LLM 基于工具结果（含错误）做决策
                 continue
 
-        # ── 所有轮次结束，最后一次尝试文本解析 ──
+        # ── 所有轮次结束 ──
         full = self._build_full_text()
+        # 纯文本任务（AI点评，tools=()）：不需要走法。坐标解析/合法性
+        # 校验/仲裁兜底都只服务于走子任务——解说 worker 不传 game，
+        # _validate_move 恒为 None，旧逻辑会把"解说文本里引用的坐标"
+        # 全部判非法，最后误报"未找到有效走法"（且解说文本明明已生成）。
+        # 正式回复文本即结果；仅当模型完全没返回文本才报真实错误，
+        # 由 controller 记 WARNING 并继续对弈。
+        if not self.tools:
+            text = '\n\n'.join(t for t in self._content_texts if t).strip()
+            if not text:
+                return '', '', 'ERROR: 模型未返回解说文本'
+            return '', '', text
+        # 走子任务：最后一次尝试文本解析。
         # 与下方推理文本循环同一校验口径（M-AI-7）：content 里讨论过但
         # 未选中的坐标（如引用引擎推荐/示例）必须经 _validate_move 过滤，
         # 防止把非法或非最终选择的坐标当成走法提交。
@@ -730,15 +749,18 @@ class AIWorker:
             'model': self.model_info.model,
             'messages': messages,
             'stream': False,
-            'tools': list(self.tools),
         }
+        # 纯文本任务（如 AI点评，tools=()）不发送 tools 字段：
+        # 部分端点不接受空数组；无 tools 时发 tool_choice 也会 400
+        if self.tools:
+            payload['tools'] = list(self.tools)
         # 不设 max_tokens（旧版行为）：qwen3.8 思考模式推理可达 5000+
         # 字符，任何输出上限都会先耗尽在推理上，导致响应末尾的
         # tool_calls 被截断（0 tool_calls + 空 content → "4 轮工具调用后
         # 未找到有效走法"）。models.json 的 options 仍可对个别模型显式
         # 覆盖 max_tokens。
         is_llama_server = self.model_info.type == 'llama-server'
-        if self.model_info.tools_choice:
+        if self.model_info.tools_choice and self.tools:
             if is_llama_server:
                 payload['tool_choice'] = 'required'
             else:

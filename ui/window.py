@@ -308,6 +308,14 @@ class MainWindow(QMainWindow):
         is_human = (current_model == HUMAN_MODEL)
         busy = gc.ai_manager.is_busy()
 
+        # AI点评进行中：被解析方显示"解析中"（对局阻塞等待解析完成）
+        if gc.commentary_mover is not None:
+            if gc.commentary_mover == 1:
+                self._set_status_pair("🔴 红方 解析中...", "⚫ 黑方 等待...")
+            else:
+                self._set_status_pair("🔴 红方 等待...", "⚫ 黑方 解析中...")
+            return
+
         if g.game_over:
             if g.winner == 1:
                 self._set_status_pair("🔴 红方 🏆 获胜！", "⚫ 黑方")

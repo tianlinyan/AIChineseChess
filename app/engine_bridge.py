@@ -262,6 +262,8 @@ class EngineBridge(QObject):
                     self.hint_done.emit(
                         (move, game_version, cancel_version, on_done))
 
+                # 提示搜索与 AI 走子路径一致：时限 = 深度×3s（上限 MCTS_TIME_LIMIT）；
+                # 日志显示的（30s）为上限提示
                 self._pikafish.search_async(
                     g, g.current_player,
                     time_ms=self._pikafish_time_s(self._get_depth()) * 1000,

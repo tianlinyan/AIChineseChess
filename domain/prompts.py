@@ -545,3 +545,82 @@ def build_arbitration_prompt(
     parts.append(_MOVE_PIECE_EXAMPLE)
 
     return "\n".join(parts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI点评（人类 / 仅搜索落子后）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_commentary_system_prompt() -> str:
+    """解说系统提示词：解说员角色，纯文本输出（无工具、不走子）。"""
+    return """# 身份与任务
+
+你是中国象棋解说员。对局正在进行，你负责解说**刚刚走出的一步棋**。
+**直接输出解说文本**——不要调用任何工具，不要提交走法，文本中的坐标只是
+指代棋步，不代表落子指令。
+
+# 解说结构（按此顺序，全部使用简体中文）
+
+1. **本步评析** — 刚走出这步棋的意图与价值（吃子/将军/抢占要点/防守/铺垫），
+   并给出定性评价（佳着/正着/尚可/欠妥/失着）及理由。
+2. **双方棋势分析** — 走子后双方形势：子力对比、子力位置与阵型、双方威胁与弱点、先手归属。
+3. **其他招式**（如果有）— 若存在比实际走法更优的选择，给出 1~3 个替代方案，
+   简要比较其代价与收益；若实际走法已是最佳，则省略本段。
+
+# 约束
+
+- 基于提示词给出的局面与走子历史，不要臆测未见信息
+- 简洁专业，总字数 ≤400 字；坐标用列 A~I + 行 1~10 格式"""
+
+
+def build_commentary_prompt(mover: int, board_str: str, move_str: str,
+                            history: str, material_str: str = '',
+                            eval_score: Optional[float] = None,
+                            mover_in_check: bool = False,
+                            opponent_in_check: bool = False,
+                            ply: int = 0) -> str:
+    """构建解说用户提示词（走子后局面 + 刚走出的一步）。
+
+    模型只输出解说文本（worker 以 tools=() 启动，无 move_piece）。
+    """
+    player_display, player_color = _player_context(mover)
+    opponent_display, _ = _player_context(3 - mover)
+
+    parts = [
+        f"## 当前局面（{player_display}({player_color}) 刚走完第 {ply} 手，"
+        f"轮到 {opponent_display}）",
+        *(_board_block(board_str)),
+        "",
+        "---",
+        "## 刚走出的这步棋",
+        f"{player_display}：**{move_str}**",
+        "",
+    ]
+
+    # 状态信息（走子后）：将军/被将、静态评估、子力对比
+    status_items = []
+    if mover_in_check:
+        status_items.append(f"⚠️ 走子后 {player_display} 正被将军！")
+    if opponent_in_check:
+        status_items.append(f"✅ 走子后 {player_display} 正在将军 {opponent_display}。")
+    if eval_score is not None:
+        status_items.append(
+            f"静态评估（红方视角）：{eval_score:+.0f}"
+            f"（正值=红优，负值=黑优，±100≈1兵）")
+    if material_str:
+        status_items.append(material_str)
+    if status_items:
+        parts.extend(status_items)
+        parts.append("")
+
+    # 走子历史（含刚走的一步）
+    parts.extend(_history_section(history))
+
+    parts.append("## 任务")
+    parts.append(
+        f"按「本步评析 → 双方棋势分析 → 其他招式」的结构，"
+        f"解说 {player_display} 刚走出的这步棋，直接输出解说文本。")
+    parts.append("---")
+    parts.append("**解说一律使用简体中文**（坐标、棋子名除外），总字数 ≤400。")
+
+    return "\n".join(parts)
