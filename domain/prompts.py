@@ -576,7 +576,6 @@ def get_commentary_system_prompt() -> str:
 def build_commentary_prompt(mover: int, board_str: str, move_str: str,
                             history: str, material_str: str = '',
                             eval_score: Optional[float] = None,
-                            mover_in_check: bool = False,
                             opponent_in_check: bool = False,
                             ply: int = 0) -> str:
     """构建解说用户提示词（走子后局面 + 刚走出的一步）。
@@ -597,10 +596,9 @@ def build_commentary_prompt(mover: int, board_str: str, move_str: str,
         "",
     ]
 
-    # 状态信息（走子后）：将军/被将、静态评估、子力对比
+    # 状态信息（走子后）：将军、静态评估、子力对比
+    # 注：走子方刚走完合法走子不可能处于被将军状态，故无"被将"分支
     status_items = []
-    if mover_in_check:
-        status_items.append(f"⚠️ 走子后 {player_display} 正被将军！")
     if opponent_in_check:
         status_items.append(f"✅ 走子后 {player_display} 正在将军 {opponent_display}。")
     if eval_score is not None:

@@ -633,36 +633,4 @@ def _detect_battery(board: list, ju_list: list, cannons: list,
     return bonus
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 六、走法排序（MVV-LVA + 位置增益）
-# ══════════════════════════════════════════════════════════════════════════════
 
-def evaluate_move_ordering(board: list, fr: int, fc: int,
-                            tr: int, tc: int,
-                            piece: str = '',
-                            captured: str = '') -> int:
-    """走法排序评分（供搜索/MCTS使用）"""
-    score = 0
-    if not piece and board:
-        piece = board[fr][fc]
-    if not captured and board:
-        captured = board[tr][tc]
-
-    if captured != '.':
-        captured_upper = captured.upper()
-        piece_upper = piece.upper()
-        victim_value = PIECE_VALUE.get(captured_upper, 0)
-        attacker_value = PIECE_VALUE.get(piece_upper, 0)
-        score += victim_value * 10 - attacker_value
-
-    # 前进奖励
-    if piece and piece.isupper():
-        advance = fr - tr
-        if advance > 0:
-            score += advance * 3
-    elif piece and piece.islower():
-        advance = tr - fr
-        if advance > 0:
-            score += advance * 3
-
-    return score

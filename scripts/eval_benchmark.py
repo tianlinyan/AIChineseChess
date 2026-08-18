@@ -12,7 +12,7 @@
        - 自研 NNUE（domain.nnue）
        - 手工评估（domain.evaluation.evaluate）
      指标：Pearson 相关系数、平均绝对误差（MAE）、符号一致率（判对谁优）。
-  2. --selfplay：Pikafish(黑) vs SearchEngine(红，自研 Alpha-Beta) 限步对弈，
+  2. --selfplay：Pikafish(黑) vs MCTS(红，自研) 限步对弈，
      报告红胜/黑胜/和棋与净得分（默认关闭：自研搜索较慢）。
   3. 硬性验收：初始局面 Pikafish eval ≈ +30 厘兵（与引擎实测一致），
      且引擎可用性必须为真（防止"引擎死亡假可用"污染基准）。
@@ -33,7 +33,7 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from domain.game import ChineseChessGame
 from domain.fen import fen_to_board as board_from_fen, board_to_fen
-from domain.search import SearchEngine
+from domain.mcts import MCTSEngine
 from domain.pikafish import PikafishEngine
 from domain.nnue import get_nnue
 from domain.evaluation import evaluate
@@ -154,17 +154,17 @@ def run_metrics(pf, nnue, positions) -> dict:
     }
 
 
-def run_selfplay(pf, depth: int, games: int, max_plies: int,
+def run_selfplay(pf, sims: int, games: int, max_plies: int,
                  movetime_ms: int) -> dict:
-    """Pikafish(黑) vs SearchEngine(红) 限步对弈。自研搜索较慢，默认不跑。"""
+    """Pikafish(黑) vs MCTS(红) 限步对弈。自研引擎较慢，默认不跑。"""
     results = []
     for gi in range(games):
         g = ChineseChessGame()
-        engine = SearchEngine(max_depth=depth, time_limit=10.0)
+        engine = MCTSEngine(max_simulations=sims, time_limit=5.0)
         plies = 0
         while not g.game_over and plies < max_plies:
             player = g.current_player
-            if player == 1:      # 红 = 自研 Alpha-Beta
+            if player == 1:      # 红 = 自研 MCTS
                 mv = engine.search(g, player)
             else:                # 黑 = Pikafish
                 mv = pf.search(g, player, time_ms=movetime_ms)
@@ -199,7 +199,7 @@ def main():
     ap.add_argument('--selfplay', action='store_true',
                     help='额外跑 Pikafish vs 自研搜索对弈（慢）')
     ap.add_argument('--games', type=int, default=3, help='自对弈局数')
-    ap.add_argument('--depth', type=int, default=3, help='自研搜索深度')
+    ap.add_argument('--sims', type=int, default=300, help='自研 MCTS 每步模拟次数')
     args = ap.parse_args()
 
     # ── 引擎可用性硬检查（防"引擎死亡假可用"污染基准）──
@@ -265,8 +265,8 @@ def main():
 
     # ── 自对弈（可选）──
     if args.selfplay:
-        print('[对弈] Pikafish(黑) vs SearchEngine(红)…')
-        sp = run_selfplay(pf, args.depth, args.games, 60, 200)
+        print('[对弈] Pikafish(黑) vs MCTS(红)…')
+        sp = run_selfplay(pf, args.sims, args.games, 60, 200)
         print(f'[对弈] 红(自研){sp["red_win"]} 胜 / 黑(Pikafish)'
               f'{sp["black_win"]} 胜 / 和 {sp["draw"]}'
               f'（净得分 {sp["net"]:+.2f}）')

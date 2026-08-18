@@ -1,7 +1,7 @@
 """Pikafish UCI 引擎封装 — 中国象棋顶级开源引擎
 
 Pikafish（皮卡鱼）基于 Stockfish，使用 NNUE 评估网络，棋力远超
-本项目的 MCTS/Alpha-Beta 搜索引擎。通过 UCI 协议与引擎进程通信。
+本项目的 MCTS 搜索引擎。通过 UCI 协议与引擎进程通信。
 
 UCI 协议要点：
 - 引擎作为子进程运行，通过 stdin/stdout 文本通信
@@ -154,7 +154,7 @@ class PikafishEngine:
 
     @property
     def available(self) -> bool:
-        """引擎是否可用。False 时应回退到 MCTS/Alpha-Beta。"""
+        """引擎是否可用。False 时应回退到 MCTS。"""
         return self._available
 
     @property

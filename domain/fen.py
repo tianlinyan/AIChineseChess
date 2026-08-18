@@ -1,7 +1,7 @@
 """中国象棋 FEN 字符串生成 — 统一的棋盘序列化
 
-供 Pikafish UCI 引擎、EGTB 云库查询等模块共用。
-消除原先 egtb.py 与 pikafish.py 中 _board_to_fen 的 99% 重复代码。
+供 Pikafish UCI 引擎、NNUE 自弈数据生成等模块共用。
+消除原先 pikafish.py 等模块中 _board_to_fen 的重复代码。
 """
 
 

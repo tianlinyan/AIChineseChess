@@ -13,7 +13,6 @@ AI_RETRY_DELAY_MS = 3000
 # ── 搜索引擎配置 ──
 SEARCH_MAX_DEPTH = 8             # 搜索强度 (1-8)：MCTS模拟次数 500~5000，Pikafish时限 depth×3s（封顶 MCTS_TIME_LIMIT=30s）
 DEFAULT_SEARCH_DEPTH = min(5, SEARCH_MAX_DEPTH)  # UI 搜索强度默认值（controller 与 panel 共用，避免两处不一致）
-SEARCH_TIME_LIMIT = 40.0         # 搜索时间上限（秒）
 
 # ── MCTS 配置 ──
 MCTS_TIME_LIMIT = 30.0           # MCTS / Pikafish 时间上限（秒）
@@ -21,8 +20,7 @@ MCTS_EXPLORATION = 1.4           # UCB1 探索参数
 MCTS_FALLBACK_SIMULATIONS = 800  # 回退搜索模拟次数（后台线程执行，不阻塞 UI）
 MCTS_FALLBACK_TIME_LIMIT = 10.0  # 回退搜索时间上限（秒）
 
-# ── 残局库配置 ──
-EGTB_MAX_PIECES = 10             # 残局库查询的最大子力数
+# ── 残局配置 ──
 ENDGAME_PIECE_THRESHOLD = 14     # 残局阶段判定阈值（≤此值切换估值策略）
 
 # ── 开局库配置 ──

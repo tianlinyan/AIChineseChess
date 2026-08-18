@@ -4,8 +4,7 @@
 覆盖：
 1. Pikafish 坐标系：初始 FEN 与 startpos 逐字一致、perft 1 = 44、
    bestmove 映射后合法、兵残局走法合法
-2. EGTB 云库：已移除（云查询路径已从 domain/egtb.py 删除）
-3. MCTS 终端局面：一步杀局面（>10 子，EGTB 范围外）必须选出杀着
+2. MCTS 终端局面：一步杀局面必须选出杀着
 """
 import os
 import subprocess
@@ -107,11 +106,7 @@ move2 = _uci_to_tuple(bm2) if bm2 else None
 check("兵残局 bestmove 映射后合法", move2 in g2.get_all_legal_moves(1),
       f"uci={bm2} move={move2}")
 
-# ── 2. EGTB 云库测试已移除（云查询路径已从 domain/egtb.py 删除，本段依赖 probe_cloud 不再存在）──
-
-# ── 3. MCTS 一步杀 ──
-# 注意：必须用 >10 子（EGTB_MAX_PIECES）的局面——≤10 子时 _simulate
-# 走残局库本地启发式，被将杀方本就得 ≈0 分，测不到终端失明修复。
+# ── 2. MCTS 一步杀 ──
 from domain.mcts import MCTSEngine
 
 # 红双車一步杀（R(5,0)->(0,0)），黑方卒炮无法垫将/吃车，共 11 子

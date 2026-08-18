@@ -9,9 +9,8 @@
 - 🐟 **Pikafish 引擎接入**：2026-01-02 + 64MiB 大网络（62185→1024→15→32→1），多线程自适应（封顶 16 核）、512MB 换位表、MultiPV 1 走子、死亡自动重启
 - 🤖 **LLM 混合决策**：`evaluate_position` / `search_best_move` 双工具由 Pikafish 提供（大师级评估与深搜），LLM 基于引擎参考做战略判断
 - ⚖️ **分歧仲裁**：LLM 与引擎不一致时，DeepSeek 第三方仲裁（对称客观事实包，消除信息不对称）
-- 📚 **开局库**：165 条标准开局线，前缀加权随机选择（可在左侧面板按红黑独立开关）
+- 📚 **开局库**：64 条常用开局线，前缀加权随机选择（可在左侧面板按红黑独立开关）
 - ♟️ **规则引擎**：完整棋规（走法生成/将军检测/长将判决/重复和棋/自然限着 120 步），经 perft 黄金值与 3020 局面走法对拍验证
-- 🔬 **本地残局库（EGTB）**：逆向回推生成的 ≤4 子 DTM 表 + 启发式残局知识（≤10 子）
 - 📊 **评估基准**：`scripts/eval_benchmark.py` 量化自研评估 vs Pikafish 的相关性
 - 🌐 **视觉模式**：支持将棋盘截图（JPEG base64）发送给支持视觉的模型（DeepSeek 自动禁用）
 
@@ -75,13 +74,11 @@ python main.py
 依赖方向严格单向：`domain/`（棋规与引擎基座）← `services/`、`ai/` ← `app/`（控制器）← `ui/`、`main.py`
 
 ```
-├── domain/          # 基座：棋规、搜索、引擎、EGTB、提示词
+├── domain/          # 基座：棋规、MCTS、引擎、提示词
 │   ├── game.py      #   棋规核心（走法/将军/判决）+ 增量缓存（Zobrist/PST/NNUE 累加器）
-│   ├── search.py    #   Alpha-Beta + PVS 搜索引擎（TT/LMR/空着裁剪/静态搜索）
-│   ├── mcts.py      #   MCTS 搜索引擎（PUCT + LLM 先验）
+│   ├── mcts.py      #   MCTS 搜索引擎（PUCT + LLM 先验）+ 走子/撤销共享工具
 │   ├── pikafish.py  #   Pikafish UCI 封装（异步/评估/多主变/自动重启）
-│   ├── egtb*.py     #   本地 DTM 残局库 + 启发式 + chessdb.cn 云查询（生产禁云）
-│   ├── openings.py  #   165 条开局线
+│   ├── openings.py  #   64 条开局线
 │   └── prompts.py   #   工具定义与提示词（走子/仲裁）
 ├── ai/              # LLM 工作器：agentic 工具调用循环、文本兜底解析、请求管理
 ├── app/             # 控制器：状态机、版本门控、引擎桥接（信号中继）、仲裁编排
@@ -100,7 +97,7 @@ python main.py
       → 引擎死亡 → 自动重启 / 失败 → MCTS 兜底（800 sims）
   → 引擎参考注入 LLM 提示词
   → LLM agentic 循环（≤4 轮工具调用）：
-      evaluate_position（Pikafish 评估）→ search_best_move（Pikafish 深搜）→ move_piece 提交
+      evaluate_position（Pikafish 评估）→ search_best_move（Pikafish 深搜，缺失时 MCTS 兜底）→ move_piece 提交
   → 与引擎一致 → 落子
   → 分歧 → DeepSeek 仲裁（≤180s）→ 落子
   → LLM 失败 → 引擎走法兜底 → 随机
@@ -109,12 +106,12 @@ python main.py
 ## 🧪 测试
 
 ```bash
-python tests/smoke_engine.py      # 无 GUI 冒烟：走法生成/AB/MCTS/EGTB/开局库/哈希
+python tests/smoke_engine.py      # 无 GUI 冒烟：走法生成/MCTS/自然限着/开局库/哈希/自弈
 python tests/compare_movegen.py   # 走法生成与基线对拍（3020 局面）
 python tests/test_perft.py        # Perft 黄金值（44/1920/79666）
 python tests/test_evaluation.py   # 评估正确性/对称性/增量等价
 python tests/test_incremental.py  # 增量缓存一致性
-python tests/test_egtb.py         # EGTB 交叉验证（参考求解器/前向一致性）
+python tests/measure_vision_image.py  # 视觉截图尺寸/内容覆盖（offscreen Qt，无 GUI）
 ```
 
 ## 🛠️ 脚本工具
@@ -131,10 +128,8 @@ python scripts/train_nnue.py --data data/selfplay_data.npz   # 训练自研评�
 - **增量缓存**：Zobrist 哈希 / PST / 子力计数 / NNUE 累加器全程增量维护，搜索热路径零全盘扫描
 - **线程纪律**：Pikafish/MCTS/LLM 全部后台线程 + Qt 信号中继回主线程；LLM 工具持锁原子搜索，引擎忙时超时放弃不阻塞
 - **快照隔离**：搜索与工具校验全部在局面快照上进行，不触碰 live 棋盘
-- **自研 EGTB**：真逆向回推生成器（稠密组合索引、v4 格式 CRC32 校验、黑方 180° 旋转归一化）
 
 ## 📜 致谢
 
 - [Pikafish](https://github.com/official-pikafish/Pikafish)：开源中国象棋引擎（GPL-3.0），提供大师级棋力与评估
-- [chessdb.cn](https://www.chessdb.cn)：残局云库（生产路径默认关闭）
 - DeepSeek / LM Studio：LLM 决策与仲裁支持

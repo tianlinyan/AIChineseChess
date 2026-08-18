@@ -8,14 +8,15 @@ python main.py
 
 测试脚本（均为普通 Python 脚本，非 pytest）：
 ```bash
-python tests/smoke_engine.py      # 无 GUI 冒烟：走法生成/AB/MCTS/EGTB/开局库/哈希
+python tests/smoke_engine.py      # 无 GUI 冒烟：走法生成/MCTS/自然限着/开局库/哈希/自弈
 python tests/compare_movegen.py   # 走法生成与 baseline_movegen.jsonl 对拍
 python tests/test_perft.py        # Perft 走法计数基准（黄金标准）
 python tests/test_evaluation.py   # 评估函数正确性/对称性/增量等价
 python tests/test_incremental.py  # 增量缓存一致性
+python tests/measure_vision_image.py  # 视觉截图尺寸/内容覆盖（offscreen Qt，无 GUI）
 ```
 
-改动后按 `.claude/skills/verify/SKILL.md` 的矩阵选择验证。
+改动后按 README.md「🧪 测试」清单选择验证（与上方清单一致，均为 `tests/` 下普通 Python 脚本，非 pytest）。
 
 ## Architecture
 
@@ -27,15 +28,16 @@ python tests/test_incremental.py  # 增量缓存一致性
 - `api_key` 支持 `${ENV_VAR}` 占位符；`main.py` 启动时加载 `.env`（PyInstaller 打包后定位 exe 旁，与 `services/models.py` 一致）。
 - `type`: `llama-server`（OpenAI 兼容本地端点）/ `deepseek`（DeepSeek API — **不支持视觉**，控制器/AIWorker 对 deepseek 过滤 `image_url`）。
 
-### 两个搜索引擎 — 角色分明
+### 搜索引擎 — 角色分明
 
 | 引擎 | 文件 | 使用者 | 角色 |
 |------|------|--------|------|
-| `MCTSEngine` | `domain/mcts.py` | Controller | 战术验证、引擎兜底 |
-| `SearchEngine` | `domain/search.py` | LLM (via `search_best_move`) | LLM 按需深度分析 |
+| `MCTSEngine` | `domain/mcts.py` | Controller | 战术验证、引擎兜底（含走子/撤销共享工具） |
 | `PikafishEngine` | `domain/pikafish.py` | Controller | 外部 NNUE，大师级；优先→MCTS 兜底 |
 
-LLM 侧的工具调用（`domain/prompts.py` 的 `DEFAULT_TOOLS`）由 `ai/worker.py` 执行：`move_piece` 提交走法、`search_best_move` 实例化 `SearchEngine` 跑 Alpha-Beta、`evaluate_position` 静态评估。多轮 agentic loop 直到调用 `move_piece` 或达 `MAX_TOOL_TURNS=4`。
+LLM 侧的工具调用（`domain/prompts.py` 的 `DEFAULT_TOOLS`）由 `ai/worker.py` 执行：`move_piece` 提交走法、`search_best_move` 走 Pikafish 深搜（MultiPV 主变；**Pikafish 缺失/失败时由 MCTS 兜底**，`_run_search_mcts`）、`evaluate_position` 评估（Pikafish 优先，手工评估回退）。多轮 agentic loop 直到调用 `move_piece` 或达 `MAX_TOOL_TURNS=4`。
+
+> 注：自研 Alpha-Beta（`domain/search.py`）与本地 EGTB 残局库（`egtb.py`/`egtb_local.py` + `data/egtb/`）已于 2026-08-18 精简移除（减少代码量）；原 `SearchEngine` 的 make/unmake/超时工具迁入 `mcts.py`，`search_best_move` 的本地回退改由 MCTS 承担。
 
 ### AI 决策流程（Hybrid 模式）
 
@@ -59,13 +61,11 @@ LLM 分析 + 引擎参考 → 一致→落子 / 分歧→DeepSeek 仲裁
 - **Version gating**: 每个 AI 请求携带 `game_version`。重置/暂停递增它。`cancel_version`（来自 `AIManager`）提供第二层。Pikafish/MCTS 回调验证两者，陈旧回调仅记日志（不重置 busy 状态），防止重复走子。
 - **Pikafish async via signal relay**: `EngineBridge`（QObject + `pyqtSignal`）桥接 daemon 线程结果到 Qt 主线程。MCTS 兜底也走同一条中继路径（`_start_mcts_async`），永不阻塞 UI。
 - **King position cache**: `_king_pos` 缓存双方将/帅位置。`is_in_check`（从将位反向检测：射线/马腿/兵位）和 `_is_king_facing` 使用缓存，失效时自动全盘扫描回退。
-- **LRU transposition table**: OrderedDict 淘汰替代旧 O(n) 内存分配。
 - **Worker isolation**: `_run_search` 和 `_run_evaluate` 使用快照游戏对象，不触碰 `self.game.board`。
 - **Chinese UI**: 全部中文。无 i18n 基础设施。
 - **No persistence**: 游戏状态仅内存。`QSettings` 仅用于左侧面板折叠状态。
 - **Vision mode**: 棋盘渲染为 QPixmap 以 JPEG base64 发送。**DeepSeek API 不支持 `image_url`**——控制器对 `model.type == 'deepseek'` 自动禁用视觉；AIWorker 对 DeepSeek 模型过滤 `image_url`。
-- **Opening book**: 165 条标准开局线（`domain/openings.py`），前缀加权随机选择。
-- **EGTB integration**: 本地启发式≤10 子；chessdb.cn cloud 查询≤6 子已实现但未接入生产——所有生产调用者使用 `allow_cloud=False`。
+- **Opening book**: 64 条常用开局线（`domain/openings.py`），前缀加权随机选择。2026-08-18 由 165 条精简而来（保留中炮/列炮/顺炮/仙人指路/飞相/起马等主流体系，删除重复深度变例与冷门开局）。
 - **MCTS fallback**: 后台线程 MCTS 使用缩减限制。Hybrid 模式 LLM 失败直接用引擎结果或随机，不回落搜索。
 - **Prompts**: 紧凑结构化提示词。合法走法带战术标注（×吃子、+将军、⚠️重复和棋风险）；子力平衡每回合透视注入；走子历史截断至最近 24 手。`evaluate_position` 与 `search_best_move` 评分统一为红方视角（正值=红优）。仲裁使用"安全门优先，收益排序"两步式评分，候选附对称客观事实包（吃子/将军/将杀/评估/重复）。
 
@@ -75,4 +75,4 @@ LLM 分析 + 引擎参考 → 一致→落子 / 分歧→DeepSeek 仲裁
 
 ## Search Constants
 
-`SEARCH_MAX_DEPTH` 是 UI 搜索强度 spinbox 的**上限**（1~8，UI 默认 5；`ui/panel.py` 引用该常量），**非** Alpha-Beta 深度；它缩放 MCTS 模拟数和 Pikafish 时间（见 controller `_DEPTH_SIMS_MAP`）。
+`SEARCH_MAX_DEPTH` 是 UI 搜索强度 spinbox 的**上限**（1~8，UI 默认 5；`ui/panel.py` 引用该常量）；它缩放 MCTS 模拟数和 Pikafish 时间（见 controller `_DEPTH_SIMS_MAP`）。

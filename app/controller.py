@@ -1003,7 +1003,6 @@ class GameController:
             self.game.format_move_history(max_items=PROMPT_HISTORY_MAX_ITEMS),
             material_str=self._material_str(mover, perspective=False),
             eval_score=eval_score,
-            mover_in_check=self.game.is_in_check(mover),
             opponent_in_check=self.game.is_in_check(opponent),
             ply=len(self.game.moves),
         )

@@ -16,11 +16,12 @@ from domain.constants import (
     PIECE_SYMBOLS, parse_coord, format_coord, format_move,
     format_chinese_notation,
     ENDGAME_PIECE_THRESHOLD,
+    MCTS_FALLBACK_TIME_LIMIT,
 )
 from domain.prompts import DEFAULT_TOOLS
-from domain.evaluation import evaluate, PIECE_VALUE, compute_material
+from domain.evaluation import evaluate, compute_material, PIECE_VALUE
+from domain.mcts import MCTSEngine, make_move, unmake_move
 from domain.game import ChineseChessGame
-from domain.search import SearchEngine
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -28,6 +29,11 @@ from domain.search import SearchEngine
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_TOOL_TURNS = 4  # 每回合最多工具调用轮数（防止死循环）
+
+# 深度 → MCTS 模拟次数映射（与 app/engine_bridge 的 _DEPTH_SIMS_MAP 一致；
+# ai 层不得 import app 层，依赖方向约束，故本地留存一份）
+_MCTS_DEPTH_SIMS_MAP = {1: 500, 2: 800, 3: 1200, 4: 1600,
+                        5: 2000, 6: 3000, 7: 4000, 8: 5000}
 
 # 仲裁文本中的候选标签：'候选 A' / '选择 B' / '选A' / '采纳 A' 等
 # （[AB]\b 的 \b 保证不误匹配 'A1' 这类坐标里的列字母）
@@ -129,8 +135,8 @@ class AIWorker:
         self._content_texts: list = []
         # 最近一次 _validate_move 的合法走法缓存（供 move_error 附示例）
         self._legal_cache: Optional[list] = None
-        # 在途搜索对象（SearchEngine 或 PikafishEngine，均有 .stop()；
-        # cancel() 调用以中止，M-AI-1）
+        # 在途搜索对象（PikafishEngine，有 .stop()；cancel() 调用以中止，
+        # M-AI-1）
         self._active_search_engine = None
         # search_best_move 每步最多一次（系统提示词约定，此处强制）
         self._search_used = False
@@ -457,9 +463,9 @@ class AIWorker:
     def _run_search(self, args: dict) -> str:
         """执行深度搜索，返回搜索最佳走法及候选列表。
 
-        优先 Pikafish 深搜（MultiPV 主变，大师级战术）——LLM 拿到的
-        战术参考与引擎决策同源；Pikafish 不可用/未初始化/搜索失败时
-        回退本地 Alpha-Beta（原实现）。
+        优先 Pikafish 深搜（MultiPV 主变，大师级战术）——LLM 拿到的战术
+        参考与引擎决策同源；Pikafish 缺失/未初始化/搜索失败时由 MCTS
+        兜底（原本地 Alpha-Beta 回退路径已随 domain/search.py 移除）。
         """
         try:
             # 参数类型防线：弱模型可能传字符串/None，钳制必须在 try 内，
@@ -478,12 +484,12 @@ class AIWorker:
                 result = self._run_search_pikafish(tmp_game, depth, top_n)
                 if result is not None:
                     return result
-                # Pikafish 失败 → 静默回退本地（不把引擎故障暴露给模型）。
-                # 但若已被 cancel（暂停/重置），不再启动全量本地 AB：
-                # 否则取消不生效且陈旧 worker 空耗 CPU 至多 30s
+                # Pikafish 失败（锁超时/引擎故障）。若已被 cancel（暂停/
+                # 重置），直接返回取消错误，避免陈旧 worker 继续空转
                 if self._cancelled.is_set():
                     return _tool_err('任务已取消')
-            return self._run_search_local(tmp_game, depth, top_n)
+            # Pikafish 缺失或搜索失败 → MCTS 兜底
+            return self._run_search_mcts(tmp_game, depth, top_n)
         except Exception as e:
             return _tool_err(f'搜索失败: {e}')
 
@@ -533,14 +539,19 @@ class AIWorker:
         finally:
             self._active_search_engine = None
 
-    def _run_search_local(self, tmp_game, depth: int, top_n: int) -> str:
-        """回退路径：本地 Alpha-Beta 深搜索 + 全走法静态评估排序（原实现）。"""
+    def _run_search_mcts(self, tmp_game, depth: int, top_n: int) -> str:
+        """兜底路径：MCTS 深搜（PUCT）+ 全走法静态评估排序。
+
+        用于 Pikafish 缺失/未初始化/搜索失败时。走法由 MCTS 确定，
+        候选按静态评估排序（吃大子、将军优先）；评分统一红方视角，
+        与 evaluate_position 工具口径一致。
+        """
         player = self.current_player
         opponent = 3 - player
         try:
-            engine = SearchEngine(
-                max_depth=depth,
-                time_limit=min(30.0, 2.0 + depth * 3.0),
+            engine = MCTSEngine(
+                max_simulations=_MCTS_DEPTH_SIMS_MAP.get(depth, 1200),
+                time_limit=MCTS_FALLBACK_TIME_LIMIT,
             )
             # 注册在途引擎：cancel() 调 engine.stop() 尽快中止搜索（M-AI-1）
             self._active_search_engine = engine
@@ -551,21 +562,19 @@ class AIWorker:
 
             board = tmp_game.board  # 快照棋盘，不碰 live board
 
-            # 对所有走法用增强评估排序（MVV-LVA + 局面分 + 将军检测）
-            # 使用 tmp_game 隔离，避免工作线程访问 self.game.board 的数据竞争
+            # 对所有走法用增强评估排序（MVV-LVA + 局面分 + 将军检测），
+            # 评分统一红方视角（正值=红优，负值=黑优）
             all_moves = tmp_game.get_all_legal_moves(player)
             scored = []
             for fr, fc, tr, tc in all_moves:
                 piece = board[fr][fc]
-                captured = SearchEngine._make_move(tmp_game, fr, fc, tr, tc)
+                captured = make_move(tmp_game, fr, fc, tr, tc)
                 # 静态局面分（红方视角）
                 s = evaluate(board)
                 # 将军奖励：走子后对方被将军额外加分
                 if tmp_game.is_in_check(opponent):
                     s += 50.0 if player == 1 else -50.0
-                SearchEngine._unmake_move(tmp_game, fr, fc, tr, tc, captured)
-                # 评分统一红方视角（正值=红优，负值=黑优），与 evaluate_position
-                # 工具的口径一致——避免黑方走棋时两工具同号含义相反
+                unmake_move(tmp_game, fr, fc, tr, tc, captured)
                 # MVV-LVA 吃子加分（红方视角）：红吃子加分，黑吃子减分
                 if captured != '.':
                     bonus = (PIECE_VALUE.get(captured.upper(), 0) * 10
@@ -576,27 +585,33 @@ class AIWorker:
             # 红方视角排序：红方走棋高分在前，黑方走棋低分在前
             scored.sort(key=lambda x: x[4], reverse=(player == 1))
             top_moves = scored[:top_n]
-            # best_score 本身就是红方视角（search.py 公开接口约定），不再转换
-            best_score = engine.best_score
+            # 首选走法的静态参考分（红方视角）
+            best_score = 0.0
+            for fr2, fc2, tr2, tc2, s2 in scored:
+                if (fr2, fc2, tr2, tc2) == best_move:
+                    best_score = s2
+                    break
 
             # 格式化（"★ 搜索首选 + Top-N" 与 Pikafish 路径共用）
             lines = []
-            lines.append(f"Alpha-Beta 搜索完成（深度={depth}，{engine.nodes_searched} 节点）")
-            lines.append(f"搜索最佳评分: {best_score:+.0f}（正值=红优，负值=黑优）")
+            lines.append(f"MCTS 搜索完成（depth={depth}，"
+                         f"{engine.simulations} 次模拟）")
+            lines.append(f"首选走法参考评分: {best_score:+.0f}"
+                         f"（正值=红优，负值=黑优，静态评估口径）")
             lines.append("")
             return self._format_search_result(
                 board, best_move, top_moves, lines,
-                f"候选走法 Top-{len(top_moves)}（战术优先级排序：吃大子、将军优先，其后按局面评估）：")
+                f"候选走法 Top-{len(top_moves)}（MCTS 首选 + 静态评估排序："
+                f"吃大子、将军优先，其后按局面评估）：")
 
         finally:
-            # 无论成功/异常/被 cancel 中止，都解除在途引擎引用；
-            # 异常上抛由 _run_search 的外层 except 统一返回同一错误文案
+            # 无论成功/异常/被 cancel 中止，都解除在途引擎引用
             self._active_search_engine = None
 
     def _format_search_result(self, board: list, best_move: tuple,
                               top_moves: list, head_lines: list,
                               candidates_title: str) -> str:
-        """格式化"★ 搜索首选 + 候选 Top-N"结果（Pikafish/本地两条路径共用）。
+        """格式化"★ 搜索首选 + 候选 Top-N"结果（Pikafish/MCTS 两条路径共用）。
 
         top_moves 元素可为 (move_tuple, ...) 或 (fr, fc, tr, tc, ...)，
         统一取前 4 个为坐标；head_lines 为引擎专属头部行（调用方负责
@@ -729,9 +744,9 @@ class AIWorker:
 
     def cancel(self) -> None:
         self._cancelled.set()
-        # 中止在途的 Alpha-Beta 搜索（M-AI-1）：SearchEngine.stop() 置
-        # _stop_flag，_is_time_up 随即返回 True，搜索尽快退出（单次最长
-        # ~30s → 通常在毫秒级响应）。属性读写跨线程，GIL 下原子。
+        # 中止在途搜索（M-AI-1）：Pikafish 的 stop() 发 UCI stop，MCTS 的
+        # stop() 置 _stop_flag，两者都让搜索主循环尽快退出（毫秒级响应）。
+        # 属性读写跨线程，GIL 下原子。
         engine = self._active_search_engine
         if engine is not None:
             try:

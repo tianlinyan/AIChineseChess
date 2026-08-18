@@ -31,6 +31,31 @@ pix = QPixmap()
 pix.loadFromData(raw, 'JPEG')
 print(f"[当前] 实际像素: {pix.width()}x{pix.height()}")
 
+# ── 内容覆盖回归检查：超采样必须铺满画布 ──
+# capture_board_image 若退化为"1:1 渲染进左上角 + 其余黑边"，
+# 右下角等区域将全黑（棋盘本体只占左上 1/scale²）。采样三个角落
+# （棋盘控件背景为木色 #bE9867，红通道 ≈190，远大于黑边的 ≈0）。
+from PyQt6.QtGui import QImage
+_img = QImage()
+if _img.loadFromData(raw, 'JPEG'):
+    w_, h_ = _img.width(), _img.height()
+    corners = {
+        '左上': _img.pixelColor(2, 2),
+        '右上': _img.pixelColor(w_ - 2, 2),
+        '右下': _img.pixelColor(w_ - 2, h_ - 2),
+    }
+    all_ok = all(c.red() > 60 for c in corners.values())
+    desc = ', '.join(f'{k}=({c.red()},{c.green()},{c.blue()})'
+                     for k, c in corners.items())
+    print(f"[覆盖] {desc}")
+    if not all_ok:
+        print('[FAIL] 截图存在黑边 — 超采样未铺满画布（见 capture_board_image）')
+        sys.exit(1)
+    print('[PASS] 截图内容铺满画布（无黑边）')
+else:
+    print('[FAIL] 无法解码 JPEG')
+    sys.exit(1)
+
 # ── 旧逻辑模拟：无超采样 + 300px 上限 ──
 pix_old = QPixmap(board.size())
 board.render(pix_old)

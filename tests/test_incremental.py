@@ -11,7 +11,7 @@ import random as _rnd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from domain.game import ChineseChessGame
-from domain.search import SearchEngine
+from domain.mcts import make_move, unmake_move
 from domain.evaluation import RED_PST
 
 BOARD_HEIGHT = 10
@@ -123,8 +123,8 @@ def test_make_unmake_cycle():
         if not moves:
             break
         fr, fc, tr, tc = rng.choice(moves)
-        captured = SearchEngine._make_move(g, fr, fc, tr, tc)
-        SearchEngine._unmake_move(g, fr, fc, tr, tc, captured)
+        captured = make_move(g, fr, fc, tr, tc)
+        unmake_move(g, fr, fc, tr, tc, captured)
 
         # 验证所有字段恢复
         if g._material_counts != mc_before:

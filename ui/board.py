@@ -203,9 +203,14 @@ class BoardWidget(QWidget):
 
     def capture_board_image(self):
         # 使用 render() 而非 grab()：在窗口遮挡/最小化时仍能正确渲染
-        # 按 VISION_IMAGE_SCALE 超采样渲染（默认 2 倍），放大后仍保持清晰
+        # 按 VISION_IMAGE_SCALE 超采样渲染（默认 2 倍），放大后仍保持清晰：
+        # 设置目标 pixmap 的 devicePixelRatio 后，render() 按"逻辑尺寸 ×
+        # 倍率"绘制，棋盘铺满整个画布。若只放大画布尺寸而 1:1 渲染，
+        # 只有左上 1/scale² 有内容、其余为黑边（JPEG 无透明通道），
+        # 视觉模型将收到近乎全黑的图片（回归：tests/measure_vision_image.py）
         scale = max(1, VISION_IMAGE_SCALE)
         pixmap = QPixmap(QSize(self.width() * scale, self.height() * scale))
+        pixmap.setDevicePixelRatio(scale)
         self.render(pixmap)
         if pixmap.isNull():
             return ""

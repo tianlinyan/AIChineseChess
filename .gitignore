@@ -18,6 +18,9 @@ venv/
 build/
 dist/
 
+# 生成数据（train_nnue/gen_selfplay 产出，可再生，不入版本库）
+data/*.npz
+
 # Settings
 .claude/
 

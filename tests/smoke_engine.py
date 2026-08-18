@@ -1,20 +1,17 @@
 """无 GUI 引擎冒烟测试 — 每阶段改动后运行
 
 用法：python tests/smoke_engine.py
-覆盖：走法生成、Alpha-Beta、MCTS（验证真搜索）、本地 EGTB、开局库、哈希一致性。
+覆盖：走法生成、MCTS（验证真搜索）、自然限着、开局库、哈希一致性、自弈。
 任何断言失败或非零退出即不通过。
 """
 
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from domain.game import ChineseChessGame
-from domain.search import SearchEngine
 from domain.mcts import MCTSEngine
-from domain import egtb
 from domain.openings import get_opening_move, OPENING_LINES
 from domain.constants import NATURAL_LIMIT_MOVES
 
@@ -45,7 +42,7 @@ def make_game_with_board(board, player=1):
                 game._king_pos[2] = (r, c)
     game.recompute_hash()
     # 重建增量缓存：否则携带标准棋盘的陈旧 material_counts/PST，
-    # 后续断言绝对评估值/is_endgame/EGTB piece_count 会拿到错误数据
+    # 后续断言绝对评估值/is_endgame 会拿到错误数据
     game._recompute_incremental()
     return game
 
@@ -135,21 +132,6 @@ def _cross_check_is_in_check(rng):
     return True, ''
 
 
-def test_alpha_beta():
-    game = ChineseChessGame()
-    eng = SearchEngine(max_depth=3, time_limit=10.0)
-    t0 = time.time()
-    move = eng.search(game, 1)
-    dt = time.time() - t0
-    legal = game.get_all_legal_moves(1)
-    check('Alpha-Beta 初始局面返回合法走法', move in legal, f'{move} 用时{dt:.1f}s 节点{eng.nodes_searched}')
-
-    game2 = tactical_game()
-    eng2 = SearchEngine(max_depth=3, time_limit=10.0)
-    move2 = eng2.search(game2, 1)
-    check('Alpha-Beta 找到白吃車', move2 == TACTICAL_CAPTURE, f'实际 {move2}')
-
-
 def test_mcts_real_search():
     """MCTS 修复验证：必须能利用局面差异找到白吃車（伪搜索时各走法等值）。"""
     game = tactical_game()
@@ -178,74 +160,6 @@ def test_mcts_real_search():
     move3 = eng3.search(game3, 1, priors=priors)
     check('MCTS 带误导先验仍找到白吃車', move3 == TACTICAL_CAPTURE,
           f'实际 {move3}')
-
-
-def test_egtb_local():
-    # 残局库查询均为本地实现（云路径已移除），无网络依赖
-    # 双方仅将 → 和棋
-    board = empty_board()
-    board[0][4] = 'k'
-    board[9][4] = 'K'
-    res = egtb.probe(board, 1, 2)
-    check('EGTB 双将=和', res == (0.0, 0), f'实际 {res}')
-
-    # 单車 vs 孤将 → 必胜（大分）（車在 4 路隔开双将，合法局面）
-    board2 = empty_board()
-    board2[0][4] = 'k'
-    board2[9][4] = 'K'
-    board2[5][4] = 'R'
-    res2 = egtb.probe(board2, 1, 3)
-    check('EGTB 单車vs孤将=胜', res2 is not None and res2[0] > 50000, f'实际 {res2}')
-
-    # 单馬 vs 孤将 → 单马必胜孤将（黑将移出 4 路避免照面）
-    board3 = empty_board()
-    board3[0][3] = 'k'
-    board3[9][4] = 'K'
-    board3[5][5] = 'N'
-    res3 = egtb.probe(board3, 1, 3)
-    check('EGTB 单馬vs孤将=胜', res3 is not None and res3[0] > 1000, f'实际 {res3}')
-
-    # 单車 vs 士象全 → 官和（修复后不得判 80000 胜）
-    board4 = empty_board()
-    board4[0][4] = 'k'
-    board4[0][3] = 'a'
-    board4[0][5] = 'a'
-    board4[0][2] = 'b'
-    board4[0][6] = 'b'
-    board4[9][4] = 'K'
-    board4[5][5] = 'R'
-    res4 = egtb.probe(board4, 1, 7)
-    check('EGTB 单車vs士象全≠必胜',
-          res4 is None or res4[0] < 50000, f'实际 {res4}')
-
-    # ── 单卒分支（结论经 chessdb.cn 云库实测核对）──
-    # 过河未到底 vs 孤将 → 胜（黑将移出 4 路避免照面）
-    board5 = empty_board()
-    board5[0][3] = 'k'
-    board5[9][4] = 'K'
-    board5[4][4] = 'P'   # 红卒过河（r<=4）未到底
-    res5 = egtb.probe(board5, 1, 3)
-    check('EGTB 过河卒vs孤将=胜', res5 is not None and res5[0] > 1000,
-          f'实际 {res5}')
-
-    # 过河卒 vs 单士 → 和（有防守子）
-    board6 = empty_board()
-    board6[0][4] = 'k'
-    board6[0][3] = 'a'
-    board6[9][4] = 'K'
-    board6[4][4] = 'P'
-    res6 = egtb.probe(board6, 1, 4)
-    check('EGTB 过河卒vs单士=和', res6 is not None and res6[0] == 0.0,
-          f'实际 {res6}')
-
-    # 底线老兵 vs 孤将 → 和（沉底无杀伤力）
-    board7 = empty_board()
-    board7[0][4] = 'k'
-    board7[9][3] = 'K'   # 双将不同列，避免白脸将
-    board7[0][0] = 'P'   # 红卒沉底（r==0）
-    res7 = egtb.probe(board7, 1, 3)
-    check('EGTB 底线老兵vs孤将=和', res7 is not None and res7[0] == 0.0,
-          f'实际 {res7}')
 
 
 def test_natural_limit():
@@ -297,9 +211,8 @@ def test_openings():
 
 
 def test_self_play():
-    """深度2的 Alpha-Beta 自我对弈 10 步无异常。"""
+    """MCTS 自我对弈 10 步无异常（走法全部合法）。"""
     game = ChineseChessGame()
-    eng = SearchEngine(max_depth=2, time_limit=5.0)
     ok = True
     detail = ''
     try:
@@ -307,6 +220,7 @@ def test_self_play():
             if game.game_over:
                 break
             player = game.current_player
+            eng = MCTSEngine(max_simulations=150, time_limit=3.0)
             move = eng.search(game, player)
             if move is None:
                 break
@@ -318,14 +232,12 @@ def test_self_play():
     except Exception as e:  # noqa
         ok = False
         detail = repr(e)
-    check('Alpha-Beta 自我对弈 10 步', ok, detail)
+    check('MCTS 自我对弈 10 步', ok, detail)
 
 
 if __name__ == '__main__':
     test_movegen()
-    test_alpha_beta()
     test_mcts_real_search()
-    test_egtb_local()
     test_natural_limit()
     test_openings()
     test_self_play()

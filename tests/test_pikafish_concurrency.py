@@ -20,7 +20,6 @@ multipv 行会追加进 atomic 填充的 _top_moves_dict，finalize 后 _top_mov
 import os
 import sys
 import threading
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 

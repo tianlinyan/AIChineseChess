@@ -18,8 +18,8 @@
   fens     (N,) object        每样本 FEN（调试/去重用）
   results  (N,) int8          红方视角对局结果 ±1/0
   game_ids (N,) int32         样本所属对局编号
-  mirror 标志默认开启：180° 旋转 + 红黑互换（复用 egtb_local._rotate_board
-  思路），镜像样本 y 取反 —— 颜色对称直接编码进数据，样本量 ×2。
+  mirror 标志默认开启：180° 旋转 + 红黑互换（rotate180_swap，本地实现），
+  镜像样本 y 取反 —— 颜色对称直接编码进数据，样本量 ×2。
 
 验收（脚本末尾自动报告）：
   1. 胜负/和棋分布与平均步数（和棋率过高说明对局异常）
@@ -39,11 +39,21 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from domain.egtb_local import _rotate_board as rotate180_swap
 from domain.game import ChineseChessGame
 from domain.pikafish import PikafishEngine
 from domain.nnue import NnueNet
 from domain.fen import board_to_fen, fen_to_board
+
+
+def rotate180_swap(board):
+    """棋盘旋转 180° + 红黑互换（颜色对称镜像，原 egtb_local._rotate_board）。"""
+    rot = [['.'] * 9 for _ in range(10)]
+    for r in range(10):
+        for c in range(9):
+            p = board[r][c]
+            if p != '.':
+                rot[9 - r][8 - c] = p.swapcase()
+    return rot
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                          'data', 'selfplay_data.npz')

@@ -127,10 +127,10 @@ class EngineBridge(QObject):
                 nnue = get_nnue()
                 if nnue is not None:
                     diag_lines.append(("🧠 本地 NNUE 评估网络已加载 "
-                                      "(Alpha-Beta 搜索加速)", 'INFO'))
+                                      "(MCTS 走法先验)", 'INFO'))
                 else:
                     diag_lines.append(("🧠 本地 NNUE 权重未找到，"
-                                      "搜索使用手工评估", 'INFO'))
+                                      "MCTS 使用均匀先验", 'INFO'))
             except Exception as e:
                 diag_lines.append((f"[NNUE] 加载异常: {e}", 'WARNING'))
 
@@ -412,8 +412,11 @@ class EngineBridge(QObject):
                             game.board, mfr, mfc, mtr, mtc)
                     except (ValueError, IndexError):
                         mn = format_move(mfr, mfc, mtr, mtc)
+                    # val 是子节点 avg_value —— 子节点玩家（= 对手）视角的
+                    # 软胜率；零和博弈：己方胜率 = 1 - 对手胜率（显示统一为
+                    # 走子方视角，越高越利好己方；M-SEARCH-4 遗留项）
                     self._log(f"    {i+1}. {mn} "
-                              f"[访问{visits}次, 价值{val:.3f}]", 'INFO')
+                              f"[访问{visits}次, 胜率{1.0 - val:.3f}]", 'INFO')
             else:
                 detail = (f"（{result['error']}）"
                           if result.get('error') else '')

@@ -14,7 +14,7 @@
   - 时间控制（模拟次数+时间限制）
   - 评估函数驱动的模拟（比随机走子更准确）
 
-注意：Selection 下降时会在工作局面上真实走子（SearchEngine._make_move），
+注意：Selection 下降时会在工作局面上真实走子（make_move），
 Expansion/Simulation 作用于到达的叶局面，回溯后撤销 —— 树中每个节点
 都对应真实局面，而不是始终评估根局面。
 """
@@ -26,8 +26,7 @@ from typing import Optional, Dict, List, Tuple
 
 from domain.constants import MCTS_TIME_LIMIT, MCTS_EXPLORATION
 from domain.evaluation import evaluate
-from domain.egtb import probe
-from domain.search import SearchEngine, _engine_time_up, _engine_stop
+from domain.game import _sync_move_caches
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 配置
@@ -36,6 +35,42 @@ from domain.search import SearchEngine, _engine_time_up, _engine_stop
 DEFAULT_SIMULATIONS = 2000      # 默认模拟次数
 DEFAULT_TIME_LIMIT = MCTS_TIME_LIMIT       # 时间上限（秒），从 constants.py 统一管理
 DEFAULT_EXPLORATION = MCTS_EXPLORATION     # UCB1 探索参数，从 constants.py 统一管理
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 走子执行/撤销（供 MCTS 工作局面与外部测试共用）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _engine_time_up(engine) -> bool:
+    """超时判定（停止标志优先，其次时间上限）。"""
+    if engine._stop_flag:
+        return True
+    return (time.time() - engine._start_time) > engine.time_limit
+
+
+def _engine_stop(engine) -> None:
+    engine._stop_flag = True
+
+
+def make_move(game, fr: int, fc: int, tr: int, tc: int) -> str:
+    """在 game 上执行走法并同步缓存，返回被吃棋子。
+
+    注意：不修改 current_player、不走合法性校验，仅供搜索内部
+    （及 worker 的临时局面）配合 unmake_move 成对使用。
+    增量缓存（Zobrist/将位/PST/子力计数）由 game._sync_move_caches 统一维护。
+    """
+    board = game.board
+    piece = board[fr][fc]
+    captured = board[tr][tc]
+    _sync_move_caches(game, fr, fc, tr, tc, captured)
+
+    return captured
+
+
+def unmake_move(game, fr: int, fc: int,
+                tr: int, tc: int, captured: str) -> None:
+    """撤销 make_move 的走法并恢复 _king_pos 缓存与 Zobrist 哈希。"""
+    _sync_move_caches(game, fr, fc, tr, tc, captured, undo=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -164,7 +199,7 @@ class MCTSEngine:
             finally:
                 # 撤销路径走子，恢复根局面（即使 simulate 异常也必须执行）
                 for move, captured in zip(reversed(path), reversed(captured_list)):
-                    SearchEngine._unmake_move(work, *move, captured)
+                    unmake_move(work, *move, captured)
 
             # 4. Backpropagation — 回传结果
             self._backpropagate(node, value, node.player)
@@ -203,7 +238,7 @@ class MCTSEngine:
                 best_u = max(unvisited, key=lambda c: c.prior + random.random() * 0.01)
                 node = best_u
                 path.append(node.move)
-                captured_list.append(SearchEngine._make_move(game, *node.move))
+                captured_list.append(make_move(game, *node.move))
                 break
             # PUCT 选择
             best_child = None
@@ -221,7 +256,7 @@ class MCTSEngine:
                     best_child = child
             node = best_child
             path.append(node.move)
-            captured_list.append(SearchEngine._make_move(game, *node.move))
+            captured_list.append(make_move(game, *node.move))
         return node, path, captured_list
 
     def _expand(self, node: MCTSNode, game) -> None:
@@ -233,27 +268,13 @@ class MCTSEngine:
         node.is_expanded = True
 
     def _simulate(self, game, player: int) -> float:
-        """Simulation: 用评估函数替代随机走子（更精确）
+        """Simulation: 用评估函数替代随机走子（更精确）。
 
-        优先查残局库（精确DTM），不可用时回退评估函数。
         返回从 player 视角的价值（正值=对player有利）。
         """
         board = game.board
 
         endgame = game.is_endgame()
-
-        # ── 残局库查询（仅本地库；probe 内部自守卫子力上限）──
-        try:
-            egtb_result = probe(
-                board, player, game._red_piece_count + game._black_piece_count,
-                game._material_counts)
-            if egtb_result is not None:
-                # probe 返回的 score 已是 player 视角，直接归一化，
-                # 不要像下面 evaluate() 那样再按 player 翻转
-                score = egtb_result[0]
-                return 1.0 / (1.0 + math.exp(-score / 1000.0))
-        except Exception:
-            pass
 
         red_check = game.is_in_check(1)
         black_check = game.is_in_check(2)
@@ -310,11 +331,11 @@ class MCTSEngine:
         board = game.board
         for move in legal_moves:
             fr, fc, tr, tc = move
-            captured = SearchEngine._make_move(game, fr, fc, tr, tc)
+            captured = make_move(game, fr, fc, tr, tc)
             try:
                 score = nnue.evaluate(board)  # 红方视角 centipawn
             finally:
-                SearchEngine._unmake_move(game, fr, fc, tr, tc, captured)
+                unmake_move(game, fr, fc, tr, tc, captured)
             # 转为走子方视角
             scores[move] = score if player == 1 else -score
 

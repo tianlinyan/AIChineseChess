@@ -22,8 +22,8 @@ def _sync_move_caches(game, fr: int, fc: int, tr: int, tc: int,
                       captured: str, undo: bool = False) -> None:
     """走子/撤销时同步增量缓存（棋盘落子 + Zobrist + 将位 + PST + 子力计数）。
 
-    唯一实现：`game.move_piece`（前向）与 `SearchEngine._make_move` /
-    `_unmake_move`（前向/撤销）共用，避免三份逐行重复的缓存维护逻辑。
+    唯一实现：`game.move_piece`（前向）与 `mcts.make_move` /
+    `unmake_move`（前向/撤销）共用，避免三份逐行重复的缓存维护逻辑。
     `undo=True` 时执行精确逆操作（恢复被吃子、PST 减新位置加回旧位置）；
     Zobrist XOR 自逆，同式即可。NNUE 累加器由调用方（搜索路径）另行维护。
     """
@@ -572,8 +572,8 @@ class ChineseChessGame:
                 return
             elif target.upper() == 'K':
                 # 不能直接吃掉对方的将/帅：合法对局中对方将不可能处于被吃状态，
-                # 但棋盘被外部直接赋值/残局导入/编辑器修改时会暴露此走法；
-                # 若不拦截，搜索/MCTS/EGTB 会选中它并把对方将移出棋盘，
+                # 但棋盘被外部直接赋值/编辑器修改时会暴露此走法；
+                # 若不拦截，MCTS 会选中它并把对方将移出棋盘，
                 # 破坏后续局面哈希与重复检测的一致性。
                 return
         if not self._would_be_illegal(fr, fc, tr, tc, player):
