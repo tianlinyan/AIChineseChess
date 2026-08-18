@@ -701,7 +701,8 @@ class AIWorker:
 
     def _extract_move_from_call(self, tool_call: dict) -> tuple:
         """从单个 tool_call 提取 move_piece 坐标"""
-        func = tool_call.get('function', {})
+        # `or {}` 而非默认值：键存在但值为 null 时 .get 默认值不生效
+        func = tool_call.get('function') or {}
         if func.get('name') != 'move_piece':
             return '', ''
         args_data = func.get('arguments', {})
@@ -767,7 +768,11 @@ class AIWorker:
                 payload['tool_choice'] = self.model_info.tools_choice
         # 不传递 think / enable_thinking 参数：think 模式取消，
         # 由 llama-server / DeepSeek 按其默认行为处理
-        payload.update(self.model_info.options)
+        # options 仅用于附加参数（temperature / max_tokens 等）：
+        # 排除程序逻辑构造的键，防止 models.json 误覆盖 payload
+        reserved = ('model', 'messages', 'stream', 'tools', 'tool_choice')
+        payload.update({k: v for k, v in self.model_info.options.items()
+                        if k not in reserved})
         return payload
 
     def _build_user_content(self):

@@ -414,9 +414,11 @@ class SearchEngine:
         best = float('-inf')
         best_move = None
         orig_alpha = alpha
+        timed_out = False
 
         for i, move in enumerate(ordered_moves):
             if self._nodes_searched % 100 == 0 and self._is_time_up():
+                timed_out = True
                 break
 
             fr, fc, tr, tc = move
@@ -476,12 +478,17 @@ class SearchEngine:
                                TTFlag.LOWER_BOUND, move)
                 return best
 
-        # 所有走法搜索完毕
+        # 所有走法搜索完毕（或超时中断）
         if best == float('-inf'):
             # 超时截断，未搜索任何走法 —— 不存 TT，避免污染
             return self._fast_eval(game, player)
 
-        if best > orig_alpha:
+        if timed_out:
+            # 部分搜索被超时中断：未搜索的走法可能更优，真实分值 ≥ best，
+            # best 只是下界。存 EXACT/UPPER_BOUND 会污染后续 probe
+            # （probe 的 LOWER_BOUND 分支仅在 score ≥ beta 时用作剪枝，安全）
+            flag = TTFlag.LOWER_BOUND
+        elif best > orig_alpha:
             flag = TTFlag.EXACT
         else:
             flag = TTFlag.UPPER_BOUND

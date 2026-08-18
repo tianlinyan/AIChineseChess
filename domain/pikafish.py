@@ -369,10 +369,10 @@ class PikafishEngine:
             callback(None, '引擎不可用')
             return
 
-        # 重置 MultiPV 收集缓存
-        self._top_moves = []
-        self._top_moves_dict = {}
         # 原子快照：深拷贝棋盘，从副本推导 FEN + 合法走法（避免 TOCTOU）
+        # 注：_top_moves 缓存的重置在 daemon 持锁段内进行（见 _run），
+        # 锁外重置会让并发的 search_atomic 在"重置→搜索"窗口内 finalize
+        # 进本搜索的空缓存，污染 _top_moves
         try:
             board_copy = [row[:] for row in game.board]
             fen = board_to_fen(board_copy, player)
@@ -391,6 +391,9 @@ class PikafishEngine:
             error = ''
             try:
                 with self._lock:
+                    # 重置 MultiPV 收集缓存（持锁内，与 _search_locked 同序）
+                    self._top_moves = []
+                    self._top_moves_dict = {}
                     self._purge_lines()
                     self._send(f'position fen {fen}')
                     self._send(f'go movetime {time_ms}')
